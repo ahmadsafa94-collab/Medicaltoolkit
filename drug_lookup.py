@@ -379,6 +379,56 @@ def format_section(sections: dict, concept: str) -> tuple[str, list[dict]]:
     return "\n".join(lines), table_entries
 
 
+_PREGNANCY_LACTATION_LABELS = ["Pregnancy", "Nursing / Lactation"]
+
+
+def format_pregnancy_lactation(sections: dict) -> tuple[str, list[dict]]:
+    """
+    Shortcut view combining just the Pregnancy and Nursing/Lactation
+    sections of a lookup_drug() result, for /pregnancy -- skips the section
+    menu for the common case of "I just need to know about pregnancy/
+    breastfeeding" without hunting through every section. Returns
+    (text, table_entries), same shape as format_section.
+    """
+    name = sections.get("_name", "Unknown drug")
+    lines = [f"🤰🍼 *{name} -- Pregnancy & Lactation*", ""]
+    table_entries = []
+    found_any = False
+
+    for _, field_label, emoji, _keys in FIELDS:
+        if field_label not in _PREGNANCY_LACTATION_LABELS:
+            continue
+        data = sections.get(field_label)
+        if not data:
+            continue
+        bullets = data.get("bullets", [])
+        tables = data.get("tables", [])
+        if not bullets and not tables:
+            continue
+
+        found_any = True
+        lines.append(f"{emoji} *{field_label}*")
+        for bullet in bullets:
+            lines.append(_format_bullet_line(bullet))
+            lines.append("")
+        if tables:
+            plural = "s" if len(tables) != 1 else ""
+            lines.append(f"📊 {len(tables)} table{plural} -- sent as image{plural} below.")
+            lines.append("")
+        table_entries.extend({"title": f"{emoji} {field_label}", "text": block} for block in tables)
+
+    if not found_any:
+        lines.append(
+            "_No dedicated Pregnancy or Nursing/Lactation section was found in this label._ "
+            "Check 'Other Specific Populations' via /dose, or a dedicated lactation reference "
+            "(e.g. LactMed), if this matters clinically."
+        )
+        lines.append("")
+
+    lines.append(DISCLAIMER)
+    return "\n".join(lines), table_entries
+
+
 def format_drug_info(sections: dict) -> tuple[str, list[dict]]:
     """
     Format a lookup_drug() result as a clean, bulleted Telegram message

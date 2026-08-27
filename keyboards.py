@@ -13,11 +13,14 @@ from aiogram.types import (
 BTN_DOSE = "💊 Dose Lookup"
 BTN_UPLOAD = "📄 Upload PDF"
 BTN_HELP = "ℹ️ Help"
+BTN_CALC = "🧮 Calculators"
+BTN_INTERACTIONS = "🔀 Interactions"
 
 main_menu_kb = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text=BTN_DOSE)],
-        [KeyboardButton(text=BTN_UPLOAD), KeyboardButton(text=BTN_HELP)],
+        [KeyboardButton(text=BTN_DOSE), KeyboardButton(text=BTN_CALC)],
+        [KeyboardButton(text=BTN_INTERACTIONS), KeyboardButton(text=BTN_UPLOAD)],
+        [KeyboardButton(text=BTN_HELP)],
     ],
     resize_keyboard=True,
     is_persistent=True,
@@ -47,7 +50,24 @@ def drug_sections_kb(cache_id: str, sections_available: list[tuple[str, str, str
 
     rows.append([InlineKeyboardButton(text="📋 Show everything", callback_data=f"sec:{cache_id}:_all")])
     rows.append([InlineKeyboardButton(text="🧮 Calculate dose by renal function", callback_data=f"rc:start:{cache_id}")])
+    rows.append([InlineKeyboardButton(text="🔖 Bookmark this drug", callback_data=f"bm:add:{cache_id}")])
+    rows.append([InlineKeyboardButton(text="📄 Export as PDF", callback_data=f"pdfexp:{cache_id}")])
 
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def recent_list_kb(names: list[str], source: str) -> InlineKeyboardMarkup:
+    """
+    Tap-to-relookup buttons for /recent and /bookmarks. source is "recent" or
+    "bookmark" -- the handler re-fetches that list by index at tap time
+    (rather than encoding the drug name itself in callback_data), so a long
+    combination-drug name can never blow past Telegram's 64-byte
+    callback_data limit.
+    """
+    rows = [
+        [InlineKeyboardButton(text=name, callback_data=f"redo:{source}:{i}")]
+        for i, name in enumerate(names)
+    ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -101,6 +121,71 @@ def renal_unit_kb() -> InlineKeyboardMarkup:
 def renal_cancel_kb() -> InlineKeyboardMarkup:
     """Just a cancel button, shown alongside plain-text entry prompts (age, weight, creatinine, direct value)."""
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Cancel", callback_data="rc:cancel")]])
+
+
+def calc_menu_kb(calculators: list[tuple[str, str, str]]) -> InlineKeyboardMarkup:
+    """
+    Top-level /calculators menu. calculators: list of (calc_id, title, emoji)
+    tuples, 2 buttons per row, in whatever order the caller passes.
+    """
+    rows = []
+    row = []
+    for calc_id, title, emoji in calculators:
+        row.append(InlineKeyboardButton(text=f"{emoji} {title}", callback_data=f"cf:start:{calc_id}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def calc_cancel_kb() -> InlineKeyboardMarkup:
+    """Cancel button shown alongside a calculator's plain-text number-entry prompts."""
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Cancel", callback_data="cf:cancel")]])
+
+
+def interaction_menu_kb(drug_count: int) -> InlineKeyboardMarkup:
+    """
+    Buttons shown alongside the interaction checker's free-text 'type a drug
+    name to add it' prompt. 'Check interactions' only appears once there are
+    at least 2 drugs (nothing to cross-check with just 1).
+    """
+    rows = []
+    if drug_count > 0:
+        rows.append([InlineKeyboardButton(text="🗑 Remove last", callback_data="ix:remove_last")])
+    if drug_count >= 2:
+        rows.append([InlineKeyboardButton(text="✅ Check Interactions", callback_data="ix:check")])
+    rows.append([InlineKeyboardButton(text="❌ Cancel", callback_data="ix:cancel")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def chapter_ai_kb(cache_id: str) -> InlineKeyboardMarkup:
+    """Buttons attached to a just-sent chapter PDF: on-demand AI summary / self-test quiz for that chapter."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📝 Summarize", callback_data=f"chai:sum:{cache_id}"),
+                InlineKeyboardButton(text="❓ Quiz me", callback_data=f"chai:quiz:{cache_id}"),
+            ]
+        ]
+    )
+
+
+def calc_choice_kb(field_index: int, options: list[tuple[str, object]]) -> InlineKeyboardMarkup:
+    """
+    Buttons for a calculator's choice/yes-no field. options: list of
+    (label, value) tuples -- the value itself never goes in callback_data
+    (only its index does), so it can be any type (bool, str, etc.).
+    field_index is included so a stale tap from an earlier step (or an
+    earlier calculator run) can be detected and rejected.
+    """
+    rows = [
+        [InlineKeyboardButton(text=label, callback_data=f"cf:ans:{field_index}:{i}")]
+        for i, (label, _value) in enumerate(options)
+    ]
+    rows.append([InlineKeyboardButton(text="❌ Cancel", callback_data="cf:cancel")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def drug_search_inline_kb(bot_username: str) -> InlineKeyboardMarkup:

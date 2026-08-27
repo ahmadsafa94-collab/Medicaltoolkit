@@ -66,7 +66,9 @@ async def send_long_text(answer_fn, text: str) -> bool:
     return True
 
 
-async def send_documents_safely(message: Message, chapters: list[dict], output_paths: list[str]) -> tuple[int, int]:
+async def send_documents_safely(
+    message: Message, chapters: list[dict], output_paths: list[str], get_reply_markup=None
+) -> tuple[int, int]:
     """
     Send one document per chapter, tolerating the same kinds of failures
     send_long_text already guards against for text: flood control between
@@ -74,13 +76,27 @@ async def send_documents_safely(message: Message, chapters: list[dict], output_p
     delivery down silently. Returns (sent_count, total_count) so the caller
     can report a partial failure instead of the user just getting fewer
     files than expected with no explanation.
+
+    get_reply_markup, if given, is an async callable (chapter_dict, path) ->
+    InlineKeyboardMarkup | None, called once per chapter to attach buttons
+    (e.g. "Summarize" / "Quiz me") to that chapter's document message. A
+    failure building the markup for one chapter just means that chapter's
+    document is sent without buttons rather than failing the whole upload.
     """
     sent = 0
     for idx, (chapter, path) in enumerate(zip(chapters, output_paths)):
         caption = f"{chapter['title']} (from page {chapter['start_page']})"
+
+        reply_markup = None
+        if get_reply_markup is not None:
+            try:
+                reply_markup = await get_reply_markup(chapter, path)
+            except Exception:
+                logger.exception("Failed to build reply_markup for chapter %d (%s)", idx, path)
+
         for _retry in range(3):
             try:
-                await message.answer_document(FSInputFile(path), caption=caption[:1024])
+                await message.answer_document(FSInputFile(path), caption=caption[:1024], reply_markup=reply_markup)
                 sent += 1
                 break
             except TelegramRetryAfter as e:
