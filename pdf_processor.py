@@ -29,6 +29,11 @@ class ChapterDetectionError(Exception):
     pass
 
 
+def count_pages(pdf_path: str) -> int:
+    """Cheap page count via pypdf (no text extraction) for an early cap check."""
+    return len(PdfReader(pdf_path).pages)
+
+
 def extract_page_previews(pdf_path: str, chars_per_page: int = 350) -> list[str]:
     """Return a list where index i is a short text preview of page i+1."""
     previews = []
@@ -45,6 +50,12 @@ def detect_chapters(previews: list[str]) -> list[dict]:
     Ask Claude to find chapter boundaries from page previews.
     Returns a list of dicts: [{"title": str, "start_page": int}, ...]
     start_page is 1-indexed and refers to the ORIGINAL pdf page numbers.
+
+    Raises ChapterDetectionError if the page cap is exceeded, if Claude's
+    response can't be parsed, or if it's structurally malformed (missing
+    fields, non-integer/out-of-range start_page, or duplicate start_page
+    values that would make the split logic silently produce a bogus
+    near-empty chapter instead of a clear error).
     """
     if len(previews) > MAX_PAGES_PER_PASS:
         raise ChapterDetectionError(
@@ -90,10 +101,33 @@ def detect_chapters(previews: list[str]) -> list[dict]:
         raise ChapterDetectionError("Claude returned no chapters.")
 
     for ch in chapters:
-        if "title" not in ch or "start_page" not in ch:
+        if not isinstance(ch, dict) or "title" not in ch or "start_page" not in ch:
             raise ChapterDetectionError(f"Malformed chapter entry: {ch}")
+        # start_page must be a real page number, not a bool, string, float,
+        # or anything else -- letting a bad type through here would only
+        # surface later as a confusing TypeError from sort()/arithmetic in
+        # split_pdf_by_chapters.
+        if isinstance(ch["start_page"], bool) or not isinstance(ch["start_page"], int) or ch["start_page"] < 1:
+            raise ChapterDetectionError(f"Invalid start_page in chapter entry: {ch}")
+        if ch["start_page"] > len(previews):
+            raise ChapterDetectionError(
+                f"Chapter '{ch.get('title')}' has start_page {ch['start_page']}, "
+                f"beyond the document's {len(previews)} pages."
+            )
 
     chapters.sort(key=lambda c: c["start_page"])
+
+    # Duplicate start_page values would make split_pdf_by_chapters silently
+    # collapse the earlier chapter down to a bogus 1-page stub (its "end" is
+    # clamped to its own start+1) instead of raising -- surface this clearly
+    # instead of shipping a corrupted split.
+    start_pages = [c["start_page"] for c in chapters]
+    if len(set(start_pages)) != len(start_pages):
+        raise ChapterDetectionError(
+            f"Claude returned duplicate start_page values: {start_pages}. "
+            "Try again, or report this PDF if it keeps happening."
+        )
+
     return chapters
 
 
@@ -135,6 +169,17 @@ def split_pdf_by_chapters(pdf_path: str, chapters: list[dict], output_dir: str) 
 
 def process_pdf(pdf_path: str, output_dir: str) -> tuple[list[dict], list[str]]:
     """Convenience wrapper: full pipeline from PDF path to split chapter files."""
+    # Check the page cap with a cheap pypdf page count BEFORE running the
+    # much more expensive full-text extraction over every page -- no point
+    # paying that cost on a PDF we're about to reject anyway.
+    page_count = count_pages(pdf_path)
+    if page_count > MAX_PAGES_PER_PASS:
+        raise ChapterDetectionError(
+            f"PDF has {page_count} pages, which exceeds the "
+            f"{MAX_PAGES_PER_PASS}-page single-pass limit. Split the file "
+            f"manually first, or raise MAX_PAGES_PER_PASS in config.py."
+        )
+
     previews = extract_page_previews(pdf_path)
     chapters = detect_chapters(previews)
     output_paths = split_pdf_by_chapters(pdf_path, chapters, output_dir)

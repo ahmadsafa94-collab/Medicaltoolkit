@@ -12,6 +12,8 @@ Requires a .env file (see .env.example) with:
 import asyncio
 import logging
 import os
+import re
+import shutil
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
@@ -26,7 +28,7 @@ from aiogram.types import (
     CallbackQuery,
 )
 
-from config import TELEGRAM_BOT_TOKEN, STORAGE_DIR
+from config import TELEGRAM_BOT_TOKEN, STORAGE_DIR, MAX_UPLOAD_BYTES
 from pdf_processor import process_pdf, ChapterDetectionError
 from drug_lookup import (
     lookup_drug,
@@ -62,6 +64,26 @@ def user_dir(user_id: int) -> str:
     path = os.path.join(STORAGE_DIR, str(user_id))
     os.makedirs(path, exist_ok=True)
     return path
+
+
+def safe_pdf_filename(raw_name: str | None) -> str:
+    """
+    Turn a Telegram-supplied filename into something safe to join onto a
+    server-side path.
+
+    `doc.file_name` is client-supplied metadata -- a sender using the raw Bot
+    API (not just the official Telegram app) can set it to anything,
+    including things like "../../../etc/whatever.pdf". Passing that straight
+    into os.path.join() is a path-traversal bug: the download could land
+    outside the per-user storage folder entirely. Strip any directory
+    components and keep only a safe character set, mirroring the sanitizing
+    already done for chapter titles in pdf_processor.py.
+    """
+    name = os.path.basename(raw_name or "")
+    name = re.sub(r"[^\w.-]", "_", name).strip(". ") or "upload"
+    if not name.lower().endswith(".pdf"):
+        name += ".pdf"
+    return name[:200]  # keep well under filesystem filename limits
 
 
 async def send_long_text(answer_fn, text: str) -> bool:
@@ -110,6 +132,40 @@ async def send_long_text(answer_fn, text: str) -> bool:
             await asyncio.sleep(0.4)  # stay well under flood-control thresholds
 
     return True
+
+
+async def send_documents_safely(message: Message, chapters: list[dict], output_paths: list[str]) -> tuple[int, int]:
+    """
+    Send one document per chapter, tolerating the same kinds of failures
+    send_long_text already guards against for text: flood control between
+    back-to-back sends, and a single bad send that shouldn't take the whole
+    delivery down silently. Returns (sent_count, total_count) so the caller
+    can report a partial failure instead of the user just getting fewer
+    files than expected with no explanation.
+    """
+    sent = 0
+    for idx, (chapter, path) in enumerate(zip(chapters, output_paths)):
+        caption = f"{chapter['title']} (from page {chapter['start_page']})"
+        for _retry in range(3):
+            try:
+                await message.answer_document(FSInputFile(path), caption=caption[:1024])
+                sent += 1
+                break
+            except TelegramRetryAfter as e:
+                logger.warning("Flood control hit sending chapter %d, waiting %s seconds", idx, e.retry_after)
+                await asyncio.sleep(e.retry_after + 0.5)
+                continue
+            except TelegramAPIError:
+                # Covers things like "file too large" for a single oversized
+                # chapter -- log it and move on to the rest instead of
+                # aborting the whole delivery.
+                logger.exception("Failed to send chapter %d (%s)", idx, path)
+                break
+
+        if idx < len(output_paths) - 1:
+            await asyncio.sleep(0.5)  # stay well under flood-control thresholds for document sends
+
+    return sent, len(output_paths)
 
 
 @dp.message(Command("start"))
@@ -279,44 +335,87 @@ async def handle_section_tap(callback: CallbackQuery):
 @dp.message(F.document)
 async def handle_pdf_upload(message: Message):
     doc = message.document
+    file_name = doc.file_name or ""
 
-    if doc.mime_type != "application/pdf" and not doc.file_name.lower().endswith(".pdf"):
+    if doc.mime_type != "application/pdf" and not file_name.lower().endswith(".pdf"):
         await message.answer("That doesn't look like a PDF. Please send a .pdf file.")
+        return
+
+    # Telegram's Bot API cannot download files over 20MB at all -- check
+    # this up front so a large textbook fails with a clear message instead
+    # of getting stuck on "Downloading..." forever with no explanation.
+    if doc.file_size and doc.file_size > MAX_UPLOAD_BYTES:
+        await message.answer(
+            f"That file is {doc.file_size / 1024 / 1024:.1f}MB, which is over "
+            f"Telegram's {MAX_UPLOAD_BYTES // 1024 // 1024}MB limit for bot downloads. "
+            "Please split it yourself first, or send a smaller file."
+        )
         return
 
     status_msg = await message.answer("Got it. Downloading...")
 
     workdir = user_dir(message.from_user.id)
-    local_pdf_path = os.path.join(workdir, doc.file_name)
-
-    file = await bot.get_file(doc.file_id)
-    await bot.download_file(file.file_path, destination=local_pdf_path)
-
-    await status_msg.edit_text("Downloaded. Reading pages and detecting chapters with AI...")
-
+    # Sanitize the filename Telegram gives us -- it's client-supplied and,
+    # sent via the raw Bot API, could contain path-traversal sequences
+    # (e.g. "../../evil.pdf") that would otherwise let a download land
+    # outside this user's storage folder.
+    local_pdf_path = os.path.join(workdir, safe_pdf_filename(file_name))
     output_dir = os.path.join(workdir, "chapters")
 
     try:
-        chapters, output_paths = await asyncio.to_thread(
-            process_pdf, local_pdf_path, output_dir
+        file = await bot.get_file(doc.file_id)
+        await bot.download_file(file.file_path, destination=local_pdf_path)
+    except TelegramAPIError as e:
+        logger.exception("Failed to download uploaded PDF")
+        await status_msg.edit_text(f"Couldn't download that file from Telegram: {e}")
+        return
+
+    await status_msg.edit_text("Downloaded. Reading pages and detecting chapters with AI...")
+
+    # Clear out any chapter files left over from a previous upload by this
+    # user before writing new ones, so stale files don't pile up on disk
+    # indefinitely (they've already been delivered to the user via Telegram
+    # and serve no purpose sitting on the server).
+    shutil.rmtree(output_dir, ignore_errors=True)
+
+    try:
+        try:
+            chapters, output_paths = await asyncio.to_thread(
+                process_pdf, local_pdf_path, output_dir
+            )
+        except ChapterDetectionError as e:
+            await status_msg.edit_text(f"Couldn't split this PDF: {e}")
+            return
+        except Exception as e:
+            logger.exception("Unexpected error processing PDF")
+            await status_msg.edit_text(f"Something went wrong: {e}")
+            return
+
+        await status_msg.edit_text(
+            f"Found {len(chapters)} chapter(s). Sending them now..."
         )
-    except ChapterDetectionError as e:
-        await status_msg.edit_text(f"Couldn't split this PDF: {e}")
-        return
-    except Exception as e:
-        logger.exception("Unexpected error processing PDF")
-        await status_msg.edit_text(f"Something went wrong: {e}")
-        return
 
-    await status_msg.edit_text(
-        f"Found {len(chapters)} chapter(s). Sending them now..."
-    )
+        sent, total = await send_documents_safely(message, chapters, output_paths)
 
-    for chapter, path in zip(chapters, output_paths):
-        caption = f"{chapter['title']} (from page {chapter['start_page']})"
-        await message.answer_document(FSInputFile(path), caption=caption[:1024])
-
-    await message.answer("Done. Send another PDF anytime.")
+        if sent < total:
+            await message.answer(
+                f"Sent {sent} of {total} chapter(s) -- the rest failed to send "
+                "(they may be too large for Telegram). Check the logs, or try "
+                "re-uploading the PDF."
+            )
+        else:
+            await message.answer("Done. Send another PDF anytime.")
+    finally:
+        # The source PDF and its split chapters have either been delivered
+        # to the user or failed permanently -- either way, keeping them on
+        # disk forever just accumulates storage with no benefit. Clean up
+        # unconditionally so a stream of uploads (especially large ones)
+        # can't fill the disk.
+        try:
+            os.remove(local_pdf_path)
+        except OSError:
+            pass
+        shutil.rmtree(output_dir, ignore_errors=True)
 
 
 async def main():

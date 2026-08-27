@@ -56,6 +56,21 @@ class DrugLookupRateLimitedError(Exception):
     pass
 
 
+# openFDA's `search` parameter uses Lucene query syntax. drug_name comes
+# straight from user input (a Telegram message), so without escaping,
+# characters like `"` or `\` could break out of the quoted phrase we build
+# below, and Lucene's other special characters (+-&&||!(){}[]^~*?:) could
+# turn a plain drug-name lookup into an unintended boolean/wildcard query.
+# Worst case without this is just a malformed query that fails to match
+# (handled gracefully already), but escaping is the correct, defensive fix
+# rather than relying on that fallback behavior.
+_LUCENE_SPECIAL_CHARS = r'+-&|!(){}[]^"~*?:\\'
+
+
+def _escape_lucene(term: str) -> str:
+    return "".join(f"\\{ch}" if ch in _LUCENE_SPECIAL_CHARS else ch for ch in term)
+
+
 def _split_into_bullets(text: str, max_bullets: int = MAX_BULLETS_PER_FIELD) -> list[str]:
     """Break a dense label paragraph into short, scannable bullet points."""
     text = re.sub(r"\s+", " ", text).strip()
@@ -143,14 +158,15 @@ async def _fetch_label_record(drug_name: str, retries: int = 1) -> dict | None:
     # then fall back to substance_name only, then a loose unquoted match --
     # some antibiotics (e.g. salts like "cephalexin monohydrate") are stored
     # under substance_name but not generic_name, or vice versa.
+    escaped = _escape_lucene(drug_name)
     queries = [
         (
-            f'openfda.generic_name:"{drug_name}" '
-            f'OR openfda.brand_name:"{drug_name}" '
-            f'OR openfda.substance_name:"{drug_name}"'
+            f'openfda.generic_name:"{escaped}" '
+            f'OR openfda.brand_name:"{escaped}" '
+            f'OR openfda.substance_name:"{escaped}"'
         ),
-        f'openfda.substance_name:"{drug_name}"',
-        f"openfda.generic_name:{drug_name} OR openfda.brand_name:{drug_name}",
+        f'openfda.substance_name:"{escaped}"',
+        f"openfda.generic_name:{escaped} OR openfda.brand_name:{escaped}",
     ]
 
     async with httpx.AsyncClient(timeout=10) as client:
