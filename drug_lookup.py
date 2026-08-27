@@ -9,6 +9,7 @@ database (openFDA), which is free and requires no API key.
 Docs: https://open.fda.gov/apis/drug/label/
 """
 
+import asyncio
 import re
 import urllib.parse
 
@@ -40,11 +41,15 @@ DISCLAIMER = (
     "verify before dosing a patient."
 )
 
-MAX_BULLETS_PER_FIELD = 5
-MAX_CHARS_PER_BULLET = 200
+MAX_BULLETS_PER_FIELD = 12
+MAX_CHARS_PER_BULLET = 600  # safety net only, for pathologically long single sentences
 
 
 class DrugNotFoundError(Exception):
+    pass
+
+
+class DrugLookupRateLimitedError(Exception):
     pass
 
 
@@ -58,12 +63,17 @@ def _split_into_bullets(text: str, max_bullets: int = MAX_BULLETS_PER_FIELD) -> 
     raw_parts = [p.strip() for p in text.split("|") if p.strip()]
 
     bullets = []
-    for part in raw_parts:
+    for part in raw_parts[:max_bullets]:
+        # Only truncate a single sentence if it's absurdly long -- this is a
+        # safety net, not a way to shorten normal-length sentences (that was
+        # cutting real dosing info off mid-word, which is bad).
         if len(part) > MAX_CHARS_PER_BULLET:
-            part = part[:MAX_CHARS_PER_BULLET].rsplit(" ", 1)[0] + "..."
+            part = part[:MAX_CHARS_PER_BULLET].rsplit(" ", 1)[0] + " [...]"
         bullets.append(part)
-        if len(bullets) >= max_bullets:
-            break
+
+    if len(raw_parts) > max_bullets:
+        bullets.append(f"({len(raw_parts) - max_bullets} more sentence(s) in the full label — not shown here)")
+
     return bullets
 
 
@@ -75,30 +85,14 @@ async def lookup_drug(drug_name: str) -> dict:
     Raises DrugNotFoundError if nothing matches.
     """
     drug_name = drug_name.strip().lower()
-    query = (
-        f'openfda.generic_name:"{drug_name}" '
-        f'OR openfda.brand_name:"{drug_name}" '
-        f'OR openfda.substance_name:"{drug_name}"'
-    )
-    params = {
-        "search": query,
-        "limit": 1,
-    }
-    url = f"{OPENFDA_LABEL_URL}?{urllib.parse.urlencode(params)}"
+    record = await _fetch_label_record(drug_name)
 
-    async with httpx.AsyncClient(timeout=15) as client:
-        response = await client.get(url)
+    if record is None:
+        raise DrugNotFoundError(
+            f"No FDA label found for '{drug_name}'. Try the plain generic "
+            f"name (e.g. 'amoxicillin' rather than 'Amoxil 500mg')."
+        )
 
-    if response.status_code == 404:
-        raise DrugNotFoundError(f"No FDA label found for '{drug_name}'.")
-    response.raise_for_status()
-
-    data = response.json()
-    results = data.get("results", [])
-    if not results:
-        raise DrugNotFoundError(f"No FDA label found for '{drug_name}'.")
-
-    record = results[0]
     openfda = record.get("openfda", {})
 
     display_name = (
@@ -135,6 +129,61 @@ async def lookup_drug(drug_name: str) -> dict:
     return sections
 
 
+async def _fetch_label_record(drug_name: str, retries: int = 1) -> dict | None:
+    """
+    Try a sequence of increasingly loose queries against openFDA until one
+    returns a record. Returns None if nothing matched after all attempts.
+    Handles timeouts and rate limits explicitly so a failed lookup always
+    surfaces a clear result rather than hanging.
+    """
+    # Try exact quoted match across all three name fields first (fast, precise),
+    # then fall back to substance_name only, then a loose unquoted match --
+    # some antibiotics (e.g. salts like "cephalexin monohydrate") are stored
+    # under substance_name but not generic_name, or vice versa.
+    queries = [
+        (
+            f'openfda.generic_name:"{drug_name}" '
+            f'OR openfda.brand_name:"{drug_name}" '
+            f'OR openfda.substance_name:"{drug_name}"'
+        ),
+        f'openfda.substance_name:"{drug_name}"',
+        f"openfda.generic_name:{drug_name} OR openfda.brand_name:{drug_name}",
+    ]
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        for query in queries:
+            params = {"search": query, "limit": 1}
+            url = f"{OPENFDA_LABEL_URL}?{urllib.parse.urlencode(params)}"
+
+            for attempt in range(retries + 1):
+                try:
+                    response = await client.get(url)
+                except (httpx.TimeoutException, httpx.ConnectError):
+                    if attempt < retries:
+                        await asyncio.sleep(1)
+                        continue
+                    return None  # give up on this query variant, try next
+
+                if response.status_code == 404:
+                    break  # no match for this query variant, try next
+                if response.status_code == 429:
+                    if attempt < retries:
+                        await asyncio.sleep(2)
+                        continue
+                    raise DrugLookupRateLimitedError(
+                        "openFDA rate limit reached. Wait a few seconds and try again."
+                    )
+                if response.status_code != 200:
+                    break  # unexpected error, try next query variant
+
+                results = response.json().get("results", [])
+                if results:
+                    return results[0]
+                break  # 200 but empty results, try next query variant
+
+    return None
+
+
 def format_drug_info(sections: dict) -> str:
     """Format a lookup_drug() result as a clean, bulleted Telegram message."""
     name = sections.get("_name", "Unknown drug")
@@ -160,40 +209,15 @@ def format_drug_info(sections: dict) -> str:
 
 async def search_drug_names(prefix: str, limit: int = 8) -> list[str]:
     """
-    Autocomplete helper: return a short list of drug names (generic + brand)
-    starting with `prefix`, for use in Telegram inline-query suggestions.
+    Autocomplete helper: return a short list of drug names starting with
+    `prefix`, for use in Telegram inline-query suggestions.
+
+    Uses a local curated list (drug_names.py) rather than a live openFDA
+    wildcard query -- testing showed openFDA's openfda.* fields don't
+    reliably filter on prefix wildcards (a query for "ser*" returned the
+    entire unfiltered database). The actual /dose lookup below still hits
+    openFDA live, so a drug missing from the local list can still be looked
+    up directly by name -- it just won't appear in the typing suggestions.
     """
-    prefix = prefix.strip().lower()
-    if len(prefix) < 2:
-        return []
-
-    # openFDA wildcard prefix search (no quotes -- quotes force exact phrase match)
-    query = f"openfda.generic_name:{prefix}* OR openfda.brand_name:{prefix}*"
-    params = {
-        "search": query,
-        "limit": 25,  # over-fetch, then dedupe client-side
-    }
-    url = f"{OPENFDA_LABEL_URL}?{urllib.parse.urlencode(params)}"
-
-    async with httpx.AsyncClient(timeout=8) as client:
-        try:
-            response = await client.get(url)
-        except httpx.RequestError:
-            return []
-
-    if response.status_code != 200:
-        return []
-
-    data = response.json()
-    names = []
-    seen = set()
-    for record in data.get("results", []):
-        openfda = record.get("openfda", {})
-        for candidate in (openfda.get("generic_name") or []) + (openfda.get("brand_name") or []):
-            key = candidate.lower()
-            if key.startswith(prefix) and key not in seen:
-                seen.add(key)
-                names.append(candidate.title())
-            if len(names) >= limit:
-                return names
-    return names
+    from drug_names import search_common_drugs
+    return search_common_drugs(prefix, limit=limit)

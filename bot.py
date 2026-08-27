@@ -26,7 +26,13 @@ from aiogram.types import (
 
 from config import TELEGRAM_BOT_TOKEN, STORAGE_DIR
 from pdf_processor import process_pdf, ChapterDetectionError
-from drug_lookup import lookup_drug, format_drug_info, search_drug_names, DrugNotFoundError
+from drug_lookup import (
+    lookup_drug,
+    format_drug_info,
+    search_drug_names,
+    DrugNotFoundError,
+    DrugLookupRateLimitedError,
+)
 from keyboards import main_menu_kb, drug_search_inline_kb, BTN_DOSE, BTN_UPLOAD, BTN_HELP
 
 logging.basicConfig(level=logging.INFO)
@@ -130,7 +136,15 @@ async def cmd_dose(message: Message):
     status_msg = await message.answer(f"Looking up {drug_name}...")
 
     try:
-        sections = await lookup_drug(drug_name)
+        sections = await asyncio.wait_for(lookup_drug(drug_name), timeout=25)
+    except asyncio.TimeoutError:
+        await status_msg.edit_text(
+            "The FDA database took too long to respond. Please try again in a moment."
+        )
+        return
+    except DrugLookupRateLimitedError as e:
+        await status_msg.edit_text(str(e))
+        return
     except DrugNotFoundError as e:
         await status_msg.edit_text(str(e))
         return
