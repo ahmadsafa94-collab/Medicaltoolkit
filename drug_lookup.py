@@ -44,7 +44,6 @@ DISCLAIMER = (
     "verify before dosing a patient."
 )
 
-MAX_BULLETS_PER_FIELD = 12
 MAX_CHARS_PER_BULLET = 600  # safety net only, for pathologically long single sentences
 
 
@@ -160,8 +159,15 @@ def _extract_structured_blocks(raw_text: str) -> tuple[str, list[str]]:
     return "\n".join(remaining), blocks
 
 
-def _split_into_bullets(text: str, max_bullets: int = MAX_BULLETS_PER_FIELD) -> list[str]:
-    """Break a dense label paragraph into short, scannable bullet points."""
+def _split_into_bullets(text: str) -> list[str]:
+    """
+    Break a dense label paragraph into short, scannable bullet points.
+    Every sentence from the label is kept -- no cap on how many bullets a
+    section can have. A long section just becomes a longer message;
+    send_long_text (bot.py) already splits any message over ~4000 chars
+    into multiple Telegram messages, so there's no length problem from
+    showing everything.
+    """
     text = re.sub(r"\s+", " ", text).strip()
     if not text:
         return []
@@ -172,16 +178,13 @@ def _split_into_bullets(text: str, max_bullets: int = MAX_BULLETS_PER_FIELD) -> 
     raw_parts = [p.strip() for p in text.split("|") if p.strip()]
 
     bullets = []
-    for part in raw_parts[:max_bullets]:
+    for part in raw_parts:
         # Only truncate a single sentence if it's absurdly long -- this is a
         # safety net, not a way to shorten normal-length sentences (that was
         # cutting real dosing info off mid-word, which is bad).
         if len(part) > MAX_CHARS_PER_BULLET:
             part = part[:MAX_CHARS_PER_BULLET].rsplit(" ", 1)[0] + " [...]"
         bullets.append(part)
-
-    if len(raw_parts) > max_bullets:
-        bullets.append(f"({len(raw_parts) - max_bullets} more sentence(s) in the full label — not shown here)")
 
     return bullets
 
@@ -411,6 +414,50 @@ def format_drug_info(sections: dict) -> tuple[str, list[dict]]:
 
     lines.append(DISCLAIMER)
     return "\n".join(lines), table_entries
+
+
+# Keywords used to find renal-relevant content across a drug's sections, for
+# the "Calculate dose by renal function" flow (renal_flow.py). Deliberately
+# broad (substring match, e.g. "renal" also matches "renally") -- a false
+# positive here just means one extra bullet or table shown, whereas a false
+# negative could hide the one dosing note that actually matters.
+_RENAL_KEYWORD_RE = re.compile(
+    r"renal|kidney|nephro|dialysis|creatinine|\begfr\b|\bcrcl\b",
+    re.IGNORECASE,
+)
+
+
+def find_renal_relevant_content(sections: dict) -> tuple[list[str], list[dict]]:
+    """
+    Scan every section of a lookup_drug() result for bullets and tables
+    that mention renal function, and return them tagged with which section
+    they came from.
+
+    This does NOT attempt to match a specific eGFR/CrCl value against the
+    table -- see the module docstring and renal_calc.py for why that step
+    is left to the user. It just surfaces whatever the label actually says
+    about renal dosing so the user doesn't have to hunt through every
+    section by hand.
+
+    Returns (bullets, table_entries) in the same shapes as format_section.
+    """
+    matching_bullets = []
+    matching_tables = []
+
+    for _, field_label, emoji, _keys in FIELDS:
+        data = sections.get(field_label)
+        if not data:
+            continue
+
+        for bullet in data.get("bullets", []):
+            if _RENAL_KEYWORD_RE.search(bullet):
+                matching_bullets.append(f"[{field_label}] " + _format_bullet_line(bullet))
+
+        for block in data.get("tables", []):
+            if _RENAL_KEYWORD_RE.search(block):
+                matching_tables.append({"title": f"{emoji} {field_label}", "text": block})
+
+    return matching_bullets, matching_tables
 
 
 async def search_drug_names(prefix: str, limit: int = 8) -> list[str]:
