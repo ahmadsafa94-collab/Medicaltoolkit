@@ -24,6 +24,32 @@ main_menu_kb = ReplyKeyboardMarkup(
 )
 
 
+def drug_sections_kb(cache_id: str, sections_available: list[tuple[str, str, str]]) -> InlineKeyboardMarkup:
+    """
+    Buttons for each available label section (Dosage, Contraindications, etc.)
+    plus a 'show everything' option. Tapping one sends just that section.
+    sections_available: list of (concept_key, field_label, emoji) tuples.
+    """
+    rows = []
+    row = []
+    for concept, field_label, emoji in sections_available:
+        row.append(
+            InlineKeyboardButton(
+                text=f"{emoji} {field_label}",
+                callback_data=f"sec:{cache_id}:{concept}",
+            )
+        )
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+
+    rows.append([InlineKeyboardButton(text="📋 Show everything", callback_data=f"sec:{cache_id}:_all")])
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def drug_search_inline_kb(bot_username: str) -> InlineKeyboardMarkup:
     """
     A button that, when tapped, switches the chat's text input into inline

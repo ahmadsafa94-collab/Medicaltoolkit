@@ -22,6 +22,7 @@ from aiogram.types import (
     InlineQuery,
     InlineQueryResultArticle,
     InputTextMessageContent,
+    CallbackQuery,
 )
 
 from config import TELEGRAM_BOT_TOKEN, STORAGE_DIR
@@ -29,11 +30,14 @@ from pdf_processor import process_pdf, ChapterDetectionError
 from drug_lookup import (
     lookup_drug,
     format_drug_info,
+    format_section,
+    available_sections,
     search_drug_names,
     DrugNotFoundError,
     DrugLookupRateLimitedError,
 )
-from keyboards import main_menu_kb, drug_search_inline_kb, BTN_DOSE, BTN_UPLOAD, BTN_HELP
+from keyboards import main_menu_kb, drug_search_inline_kb, drug_sections_kb, BTN_DOSE, BTN_UPLOAD, BTN_HELP
+import session_cache
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -70,9 +74,11 @@ async def cmd_help(message: Message):
         "3. Send you back one PDF per chapter\n\n"
         "Note: very large PDFs (400+ pages) aren't supported in this first "
         "version.\n\n"
-        "/dose <drug name> - pulls dosing, contraindications, interactions, "
-        "etc. straight from the FDA label database. Reference only, not a "
-        "substitute for a current formulary."
+        "/dose <drug name> - looks up a drug in the FDA label database, "
+        "then shows buttons so you can pick exactly which section you want "
+        "(Dosage, Contraindications, Interactions, etc.) instead of one huge "
+        "wall of text. Reference only, not a substitute for a current "
+        "formulary."
     )
 
 
@@ -153,12 +159,42 @@ async def cmd_dose(message: Message):
         await status_msg.edit_text(f"Lookup failed: {e}")
         return
 
-    reply = format_drug_info(sections)
-    # Telegram caps messages at 4096 chars; split if needed
-    for i in range(0, len(reply), 4000):
-        await message.answer(reply[i:i + 4000], parse_mode="Markdown")
+    sections_present = available_sections(sections)
+    cache_id = session_cache.put(sections)
+    name = sections.get("_name", drug_name)
 
-    await status_msg.delete()
+    await status_msg.edit_text(
+        f"💊 *{name}* — found {len(sections_present)} section(s). "
+        f"Tap what you need:",
+        parse_mode="Markdown",
+        reply_markup=drug_sections_kb(cache_id, sections_present),
+    )
+
+
+@dp.callback_query(F.data.startswith("sec:"))
+async def handle_section_tap(callback: CallbackQuery):
+    try:
+        _, cache_id, concept = callback.data.split(":", 2)
+    except ValueError:
+        await callback.answer("Something went wrong with that button.", show_alert=True)
+        return
+
+    sections = session_cache.get(cache_id)
+    if sections is None:
+        await callback.answer(
+            "This lookup expired. Please run /dose again.", show_alert=True
+        )
+        return
+
+    if concept == "_all":
+        reply = format_drug_info(sections)
+    else:
+        reply = format_section(sections, concept)
+
+    await callback.answer()  # clear the loading spinner on the tapped button
+
+    for i in range(0, len(reply), 4000):
+        await callback.message.answer(reply[i:i + 4000], parse_mode="Markdown")
 
 
 @dp.message(F.document)

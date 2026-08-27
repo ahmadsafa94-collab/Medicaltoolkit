@@ -10,10 +10,13 @@ Docs: https://open.fda.gov/apis/drug/label/
 """
 
 import asyncio
+import logging
 import re
 import urllib.parse
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 OPENFDA_LABEL_URL = "https://api.fda.gov/drug/label.json"
 
@@ -151,18 +154,24 @@ async def _fetch_label_record(drug_name: str, retries: int = 1) -> dict | None:
     ]
 
     async with httpx.AsyncClient(timeout=10) as client:
-        for query in queries:
+        for query_index, query in enumerate(queries):
             params = {"search": query, "limit": 1}
             url = f"{OPENFDA_LABEL_URL}?{urllib.parse.urlencode(params)}"
+            logger.info("openFDA lookup attempt %d for '%s': %s", query_index, drug_name, url)
 
             for attempt in range(retries + 1):
                 try:
                     response = await client.get(url)
-                except (httpx.TimeoutException, httpx.ConnectError):
+                except (httpx.TimeoutException, httpx.ConnectError) as e:
+                    logger.warning("openFDA request error (attempt %d): %s", attempt, e)
                     if attempt < retries:
                         await asyncio.sleep(1)
                         continue
-                    return None  # give up on this query variant, try next
+                    break  # BUGFIX: was `return None` here, which aborted the
+                            # ENTIRE lookup on a transient network error instead
+                            # of trying the next (looser) query variant below.
+
+                logger.info("openFDA response for query %d: status=%s", query_index, response.status_code)
 
                 if response.status_code == 404:
                     break  # no match for this query variant, try next
@@ -174,18 +183,52 @@ async def _fetch_label_record(drug_name: str, retries: int = 1) -> dict | None:
                         "openFDA rate limit reached. Wait a few seconds and try again."
                     )
                 if response.status_code != 200:
+                    logger.warning("openFDA unexpected status %s: %s", response.status_code, response.text[:300])
                     break  # unexpected error, try next query variant
 
                 results = response.json().get("results", [])
                 if results:
+                    logger.info("openFDA match found on query %d for '%s'", query_index, drug_name)
                     return results[0]
                 break  # 200 but empty results, try next query variant
 
+    logger.info("openFDA: no match for '%s' after trying all query variants", drug_name)
     return None
 
 
+def available_sections(sections: dict) -> list[tuple[str, str, str]]:
+    """Return (concept_key, field_label, emoji) for each section actually present."""
+    present = []
+    for concept, field_label, emoji, _keys in FIELDS:
+        if field_label in sections:
+            present.append((concept, field_label, emoji))
+    return present
+
+
+def format_section(sections: dict, concept: str) -> str:
+    """Format just ONE section of a lookup_drug() result (for button taps)."""
+    name = sections.get("_name", "Unknown drug")
+
+    field_label, emoji, bullets = None, None, None
+    for c, label, e, _keys in FIELDS:
+        if c == concept:
+            field_label, emoji = label, e
+            bullets = sections.get(label)
+            break
+
+    if bullets is None:
+        return f"No data available for that section of {name}."
+
+    lines = [f"💊 *{name}* — {emoji} *{field_label}*", ""]
+    for bullet in bullets:
+        lines.append(f"  • {bullet}")
+    lines.append("")
+    lines.append(DISCLAIMER)
+    return "\n".join(lines)
+
+
 def format_drug_info(sections: dict) -> str:
-    """Format a lookup_drug() result as a clean, bulleted Telegram message."""
+    """Format a lookup_drug() result as a clean, bulleted Telegram message (ALL sections)."""
     name = sections.get("_name", "Unknown drug")
     generic = sections.get("_generic")
 
