@@ -19,6 +19,7 @@ from aiogram.types import Message, FSInputFile, BufferedInputFile
 
 from config import TELEGRAM_BOT_TOKEN, STORAGE_DIR
 from pdf_processor import process_pdf, ChapterDetectionError
+from drug_lookup import lookup_drug, format_drug_info, DrugNotFoundError
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -40,7 +41,8 @@ async def cmd_start(message: Message):
         "Send me a textbook PDF and I'll split it into chapters using AI.\n\n"
         "Commands:\n"
         "/start - this message\n"
-        "/help - how to use the bot"
+        "/help - how to use the bot\n"
+        "/dose <drug> - FDA label dosing & reference info"
     )
 
 
@@ -52,8 +54,41 @@ async def cmd_help(message: Message):
         "2. Ask Claude to find the chapter boundaries\n"
         "3. Send you back one PDF per chapter\n\n"
         "Note: very large PDFs (400+ pages) aren't supported in this first "
-        "version."
+        "version.\n\n"
+        "/dose <drug name> - pulls dosing, contraindications, interactions, "
+        "etc. straight from the FDA label database. Reference only, not a "
+        "substitute for a current formulary."
     )
+
+
+@dp.message(Command("dose"))
+async def cmd_dose(message: Message):
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        await message.answer(
+            "Usage: /dose <drug name>\nExample: /dose sertraline"
+        )
+        return
+
+    drug_name = args[1].strip()
+    status_msg = await message.answer(f"Looking up {drug_name}...")
+
+    try:
+        sections = await lookup_drug(drug_name)
+    except DrugNotFoundError as e:
+        await status_msg.edit_text(str(e))
+        return
+    except Exception as e:
+        logger.exception("Drug lookup failed")
+        await status_msg.edit_text(f"Lookup failed: {e}")
+        return
+
+    reply = format_drug_info(sections)
+    # Telegram caps messages at 4096 chars; split if needed
+    for i in range(0, len(reply), 4000):
+        await message.answer(reply[i:i + 4000], parse_mode="Markdown")
+
+    await status_msg.delete()
 
 
 @dp.message(F.document)
