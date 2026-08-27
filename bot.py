@@ -15,6 +15,7 @@ import os
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter, TelegramAPIError
 from aiogram.types import (
     Message,
     FSInputFile,
@@ -46,10 +47,69 @@ bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
 
 
+@dp.errors()
+async def global_error_handler(event, exception):
+    """
+    Last-resort safety net: logs the FULL traceback for any exception that
+    escapes an individual handler, so a bug never just silently disappears
+    with 'nothing happens' and no trace in the logs.
+    """
+    logger.exception("Unhandled exception in update %s: %s", event, exception)
+    return True  # mark as handled so aiogram doesn't re-raise
+
+
 def user_dir(user_id: int) -> str:
     path = os.path.join(STORAGE_DIR, str(user_id))
     os.makedirs(path, exist_ok=True)
     return path
+
+
+async def send_long_text(answer_fn, text: str) -> bool:
+    """
+    Send `text` in <=4000-char chunks via `answer_fn` (e.g. message.answer or
+    callback.message.answer). Handles the two ways Telegram can reject a send:
+    - TelegramBadRequest (e.g. an unmatched '*'/'_' slipped through from
+      source data) -> retries that chunk as plain text.
+    - TelegramRetryAfter (flood control -- triggered by sending many chunks
+      back-to-back, which "Show everything" on a long section can do) ->
+      waits the time Telegram asks for, then retries that chunk.
+    A small delay between chunks avoids hitting flood control in the first
+    place. Returns True if every chunk sent successfully, False otherwise,
+    so the caller can tell the user something went wrong instead of the
+    message just silently never arriving.
+    """
+    chunks = [text[i:i + 4000] for i in range(0, len(text), 4000)]
+
+    for idx, chunk in enumerate(chunks):
+        sent = False
+        for _retry in range(3):
+            try:
+                await answer_fn(chunk, parse_mode="Markdown")
+                sent = True
+                break
+            except TelegramBadRequest:
+                logger.warning("Markdown parse failed for a chunk, resending as plain text")
+                try:
+                    await answer_fn(chunk)
+                    sent = True
+                except Exception:
+                    logger.exception("Plain-text fallback send also failed")
+                break
+            except TelegramRetryAfter as e:
+                logger.warning("Flood control hit, waiting %s seconds", e.retry_after)
+                await asyncio.sleep(e.retry_after + 0.5)
+                continue
+            except TelegramAPIError:
+                logger.exception("Telegram API error sending chunk %d", idx)
+                break
+
+        if not sent:
+            return False
+
+        if idx < len(chunks) - 1:
+            await asyncio.sleep(0.4)  # stay well under flood-control thresholds
+
+    return True
 
 
 @dp.message(Command("start"))
@@ -163,12 +223,15 @@ async def cmd_dose(message: Message):
     cache_id = session_cache.put(sections)
     name = sections.get("_name", drug_name)
 
-    await status_msg.edit_text(
-        f"💊 *{name}* — found {len(sections_present)} section(s). "
-        f"Tap what you need:",
-        parse_mode="Markdown",
-        reply_markup=drug_sections_kb(cache_id, sections_present),
-    )
+    menu_text = f"💊 *{name}* — found {len(sections_present)} section(s). Tap what you need:"
+    try:
+        await status_msg.edit_text(
+            menu_text, parse_mode="Markdown", reply_markup=drug_sections_kb(cache_id, sections_present)
+        )
+    except TelegramBadRequest:
+        await status_msg.edit_text(
+            menu_text.replace("*", ""), reply_markup=drug_sections_kb(cache_id, sections_present)
+        )
 
 
 @dp.callback_query(F.data.startswith("sec:"))
@@ -186,15 +249,31 @@ async def handle_section_tap(callback: CallbackQuery):
         )
         return
 
-    if concept == "_all":
-        reply = format_drug_info(sections)
-    else:
-        reply = format_section(sections, concept)
+    # Acknowledge the tap FIRST, before any formatting/sending. If those
+    # steps throw for any reason, the spinner still clears and we still
+    # have a chance to tell the user something went wrong below, instead
+    # of the button just doing nothing with an exception logged server-side
+    # and never surfaced.
+    await callback.answer()
 
-    await callback.answer()  # clear the loading spinner on the tapped button
+    try:
+        if concept == "_all":
+            reply = format_drug_info(sections)
+        else:
+            reply = format_section(sections, concept)
+    except Exception:
+        logger.exception("Failed to format section '%s' for cache_id=%s", concept, cache_id)
+        await callback.message.answer(
+            "Couldn't display that section due to an internal error. Please try /dose again."
+        )
+        return
 
-    for i in range(0, len(reply), 4000):
-        await callback.message.answer(reply[i:i + 4000], parse_mode="Markdown")
+    ok = await send_long_text(callback.message.answer, reply)
+    if not ok:
+        await callback.message.answer(
+            "Couldn't send that section (Telegram rejected the message). "
+            "Try again, or use /dose again if the problem continues."
+        )
 
 
 @dp.message(F.document)
