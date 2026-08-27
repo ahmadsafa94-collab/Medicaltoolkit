@@ -15,11 +15,19 @@ import os
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import Message, FSInputFile, BufferedInputFile
+from aiogram.types import (
+    Message,
+    FSInputFile,
+    BufferedInputFile,
+    InlineQuery,
+    InlineQueryResultArticle,
+    InputTextMessageContent,
+)
 
 from config import TELEGRAM_BOT_TOKEN, STORAGE_DIR
 from pdf_processor import process_pdf, ChapterDetectionError
-from drug_lookup import lookup_drug, format_drug_info, DrugNotFoundError
+from drug_lookup import lookup_drug, format_drug_info, search_drug_names, DrugNotFoundError
+from keyboards import main_menu_kb, drug_search_inline_kb, BTN_DOSE, BTN_UPLOAD, BTN_HELP
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -42,7 +50,8 @@ async def cmd_start(message: Message):
         "Commands:\n"
         "/start - this message\n"
         "/help - how to use the bot\n"
-        "/dose <drug> - FDA label dosing & reference info"
+        "/dose <drug> - FDA label dosing & reference info",
+        reply_markup=main_menu_kb,
     )
 
 
@@ -59,6 +68,53 @@ async def cmd_help(message: Message):
         "etc. straight from the FDA label database. Reference only, not a "
         "substitute for a current formulary."
     )
+
+
+@dp.message(F.text == BTN_HELP)
+async def btn_help(message: Message):
+    await cmd_help(message)
+
+
+@dp.message(F.text == BTN_UPLOAD)
+async def btn_upload(message: Message):
+    await message.answer("Send me a .pdf file as a document (attach → file) and I'll split it into chapters.")
+
+
+@dp.message(F.text == BTN_DOSE)
+async def btn_dose(message: Message):
+    bot_info = await bot.get_me()
+    await message.answer(
+        "Tap the button below, then start typing a drug name — "
+        "you'll see live suggestions to pick from.",
+        reply_markup=drug_search_inline_kb(bot_info.username),
+    )
+
+
+@dp.inline_query()
+async def handle_inline_drug_search(inline_query: InlineQuery):
+    prefix = inline_query.query.strip()
+
+    if len(prefix) < 2:
+        await inline_query.answer([], cache_time=1, is_personal=True)
+        return
+
+    try:
+        names = await search_drug_names(prefix)
+    except Exception:
+        logger.exception("Inline drug search failed")
+        names = []
+
+    results = [
+        InlineQueryResultArticle(
+            id=str(i),
+            title=name,
+            description="Tap to look up dosing & label info",
+            input_message_content=InputTextMessageContent(message_text=f"/dose {name}"),
+        )
+        for i, name in enumerate(names)
+    ]
+
+    await inline_query.answer(results, cache_time=30, is_personal=True)
 
 
 @dp.message(Command("dose"))
