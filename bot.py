@@ -40,6 +40,7 @@ from drug_lookup import (
     DrugLookupRateLimitedError,
 )
 from keyboards import main_menu_kb, drug_search_inline_kb, drug_sections_kb, BTN_DOSE, BTN_UPLOAD, BTN_HELP
+from table_image import render_table_image
 import session_cache
 
 logging.basicConfig(level=logging.INFO)
@@ -166,6 +167,47 @@ async def send_documents_safely(message: Message, chapters: list[dict], output_p
             await asyncio.sleep(0.5)  # stay well under flood-control thresholds for document sends
 
     return sent, len(output_paths)
+
+
+async def send_photo_safely(answer_photo_fn, png_bytes: bytes, caption: str) -> bool:
+    """Send one photo (e.g. a rendered table image), tolerating flood control the same way the helpers above do."""
+    for _retry in range(3):
+        try:
+            await answer_photo_fn(BufferedInputFile(png_bytes, filename="table.png"), caption=caption[:1024])
+            return True
+        except TelegramRetryAfter as e:
+            logger.warning("Flood control hit sending table image, waiting %s seconds", e.retry_after)
+            await asyncio.sleep(e.retry_after + 0.5)
+            continue
+        except TelegramAPIError:
+            logger.exception("Failed to send table image")
+            return False
+    return False
+
+
+async def send_table_entries(message: Message, drug_name: str, table_entries: list[dict]) -> None:
+    """
+    Render and send each detected table as a photo. Falls back to sending
+    the raw text (via send_long_text) if rendering itself fails for some
+    reason, so a rendering bug never just silently drops dosing
+    information the user asked for.
+    """
+    for idx, entry in enumerate(table_entries):
+        caption = f"{drug_name} — {entry['title']}"
+        try:
+            png_bytes = render_table_image(entry["text"], title=caption)
+        except Exception:
+            logger.exception("Failed to render table image for %s", entry.get("title"))
+            await message.answer(f"Couldn't render this as an image ({caption}) -- here's the raw text instead:")
+            await send_long_text(message.answer, entry["text"])
+            continue
+
+        ok = await send_photo_safely(message.answer_photo, png_bytes, caption)
+        if not ok:
+            await message.answer(f"Couldn't send the table image for {caption}.")
+
+        if idx < len(table_entries) - 1:
+            await asyncio.sleep(0.5)
 
 
 @dp.message(Command("start"))
@@ -314,9 +356,9 @@ async def handle_section_tap(callback: CallbackQuery):
 
     try:
         if concept == "_all":
-            reply = format_drug_info(sections)
+            reply, table_entries = format_drug_info(sections)
         else:
-            reply = format_section(sections, concept)
+            reply, table_entries = format_section(sections, concept)
     except Exception:
         logger.exception("Failed to format section '%s' for cache_id=%s", concept, cache_id)
         await callback.message.answer(
@@ -330,6 +372,10 @@ async def handle_section_tap(callback: CallbackQuery):
             "Couldn't send that section (Telegram rejected the message). "
             "Try again, or use /dose again if the problem continues."
         )
+
+    if table_entries:
+        drug_name = sections.get("_name", "Drug")
+        await send_table_entries(callback.message, drug_name, table_entries)
 
 
 @dp.message(F.document)

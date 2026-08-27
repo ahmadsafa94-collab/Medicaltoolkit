@@ -71,9 +71,100 @@ def _escape_lucene(term: str) -> str:
     return "".join(f"\\{ch}" if ch in _LUCENE_SPECIAL_CHARS else ch for ch in term)
 
 
+_TABLE_HEADING_RE = re.compile(r"(?im)^[ \t]*table\s+\d+\b.*$")
+_MULTISPACE_RE = re.compile(r" {3,}")
+_MAX_TABLE_HEADING_LINES = 30  # cap runaway capture if no blank line ever ends it
+_MIN_COLUMNAR_RUN = 3  # require 3+ consecutive aligned-looking lines, not 1-2 (avoids false positives on normal prose)
+
+# Bullets that start with a short "lead" like "Adults:" or "Renal impairment:"
+# get that lead bolded, so scanning a long section for the population/context
+# that applies to you is faster than reading every bullet start-to-finish.
+_LEAD_RE = re.compile(r"^([A-Za-z][A-Za-z0-9 /()\-]{1,40}:)\s*(.*)$")
+
+
+def _is_columnar_line(line: str) -> bool:
+    """
+    Loose proxy for 'this line looks like it has whitespace-aligned
+    columns'. A single run of 3+ spaces is enough -- the common case is a
+    2-column table (e.g. "dose range  ->  recommended dose"), which only
+    produces one gap per row. Requiring this to hold for _MIN_COLUMNAR_RUN
+    consecutive lines (checked by the caller) is what keeps this from
+    false-positiving on an incidental extra space in ordinary prose.
+    """
+    stripped = line.strip()
+    if not stripped or len(stripped) > 200:
+        return False
+    return bool(_MULTISPACE_RE.search(line))
+
+
+def _extract_structured_blocks(raw_text: str) -> tuple[str, list[str]]:
+    """
+    Pull table-like regions out of raw (NOT yet whitespace-collapsed) label
+    text, so they can be rendered as an image later instead of being
+    flattened into an unreadable run-on paragraph by the bullet splitter.
+
+    Two independent signals trigger capture:
+      1. An explicit "Table N" caption -- FDA labels commonly caption real
+         tables this way, and it's a near-zero-false-positive signal.
+      2. A run of 3+ consecutive lines that each look column-aligned
+         (2+ runs of 2+ spaces) -- a loose proxy for "this was a table
+         before HTML-to-text flattening".
+
+    Deliberately does NOT try to figure out where the actual column
+    boundaries are within a line -- guessing wrong on dosing numbers would
+    be worse than not detecting the table at all. The extracted block is
+    returned completely verbatim so it can later be rendered in a
+    monospace font, which reproduces the original space-alignment on its
+    own without us needing to parse it into cells.
+
+    Returns (remaining_prose_text, [table_block, ...]).
+    """
+    lines = raw_text.replace("\r\n", "\n").split("\n")
+    n = len(lines)
+    blocks = []
+    remaining = []
+    i = 0
+
+    while i < n:
+        line = lines[i]
+
+        if _TABLE_HEADING_RE.match(line):
+            j = i + 1
+            captured = [line]
+            while (
+                j < n
+                and lines[j].strip()
+                and not _TABLE_HEADING_RE.match(lines[j])
+                and (j - i) < _MAX_TABLE_HEADING_LINES
+            ):
+                captured.append(lines[j])
+                j += 1
+            blocks.append("\n".join(captured).strip())
+            i = j
+            continue
+
+        if _is_columnar_line(line):
+            j = i
+            captured = []
+            while j < n and _is_columnar_line(lines[j]):
+                captured.append(lines[j])
+                j += 1
+            if len(captured) >= _MIN_COLUMNAR_RUN:
+                blocks.append("\n".join(captured).strip())
+                i = j
+                continue
+
+        remaining.append(line)
+        i += 1
+
+    return "\n".join(remaining), blocks
+
+
 def _split_into_bullets(text: str, max_bullets: int = MAX_BULLETS_PER_FIELD) -> list[str]:
     """Break a dense label paragraph into short, scannable bullet points."""
     text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return []
 
     # Split on sentence boundaries, but don't break on common medical
     # abbreviations/decimals (e.g. "5 mg." or "q.i.d.")
@@ -95,11 +186,35 @@ def _split_into_bullets(text: str, max_bullets: int = MAX_BULLETS_PER_FIELD) -> 
     return bullets
 
 
+def _process_field_text(raw_text: str) -> tuple[list[str], list[str]]:
+    """
+    Full per-field pipeline: extract any table-like blocks first (from the
+    UNTOUCHED raw text, before whitespace collapsing destroys their
+    alignment), then bullet-split whatever prose is left.
+    Returns (bullets, table_blocks).
+    """
+    prose, table_blocks = _extract_structured_blocks(raw_text)
+    bullets = _split_into_bullets(prose) if prose.strip() else []
+    return bullets, table_blocks
+
+
+def _format_bullet_line(bullet: str) -> str:
+    """Bold a short leading label like 'Adults:' so bullets scan faster."""
+    match = _LEAD_RE.match(bullet)
+    if match:
+        lead, rest = match.groups()
+        return f"• *{lead}* {rest}".rstrip()
+    return f"• {bullet}"
+
+
 async def lookup_drug(drug_name: str) -> dict:
     """
     Query openFDA for a drug by generic or brand name.
-    Returns a dict of {field_label: [bullet, bullet, ...]} for whichever
-    fields are present, plus "_name" for the display name.
+    Returns a dict of {field_label: {"bullets": [...], "tables": [...]}}
+    for whichever fields are present, plus "_name" for the display name.
+    "tables" holds raw (verbatim) text blocks that looked like tables in
+    the original label -- see _extract_structured_blocks for why these are
+    kept separate instead of being flattened into bullets.
     Raises DrugNotFoundError if nothing matches.
     """
     drug_name = drug_name.strip().lower()
@@ -127,9 +242,9 @@ async def lookup_drug(drug_name: str) -> dict:
         for key in keys:
             values = record.get(key)
             if values:
-                bullets = _split_into_bullets(values[0])
-                if bullets:
-                    sections[field_label] = bullets
+                bullets, tables = _process_field_text(values[0])
+                if bullets or tables:
+                    sections[field_label] = {"bullets": bullets, "tables": tables}
                     filled_concepts.add(concept)
                 break  # stop trying alternate keys for this concept once found
 
@@ -221,30 +336,51 @@ def available_sections(sections: dict) -> list[tuple[str, str, str]]:
     return present
 
 
-def format_section(sections: dict, concept: str) -> str:
-    """Format just ONE section of a lookup_drug() result (for button taps)."""
+def format_section(sections: dict, concept: str) -> tuple[str, list[dict]]:
+    """
+    Format just ONE section of a lookup_drug() result (for button taps).
+    Returns (text, table_entries) -- table_entries is a list of
+    {"title": str, "text": str} for any table-like blocks found in this
+    section, meant to be rendered as images (see table_image.py) and sent
+    alongside the text rather than folded into it.
+    """
     name = sections.get("_name", "Unknown drug")
 
-    field_label, emoji, bullets = None, None, None
+    field_label, emoji, data = None, None, None
     for c, label, e, _keys in FIELDS:
         if c == concept:
             field_label, emoji = label, e
-            bullets = sections.get(label)
+            data = sections.get(label)
             break
 
-    if bullets is None:
-        return f"No data available for that section of {name}."
+    if data is None:
+        return f"No data available for that section of {name}.", []
+
+    bullets = data.get("bullets", [])
+    tables = data.get("tables", [])
 
     lines = [f"💊 *{name}* — {emoji} *{field_label}*", ""]
     for bullet in bullets:
-        lines.append(f"  • {bullet}")
-    lines.append("")
+        lines.append(_format_bullet_line(bullet))
+        lines.append("")  # blank line between points so each one stands on its own
+    if tables:
+        plural = "s" if len(tables) != 1 else ""
+        lines.append(f"📊 {len(tables)} table{plural} in this section — sent as image{plural} below.")
+        lines.append("")
+    if not bullets and not tables:
+        lines.append("_(No additional details in this section.)_")
+        lines.append("")
     lines.append(DISCLAIMER)
-    return "\n".join(lines)
+
+    table_entries = [{"title": f"{emoji} {field_label}", "text": block} for block in tables]
+    return "\n".join(lines), table_entries
 
 
-def format_drug_info(sections: dict) -> str:
-    """Format a lookup_drug() result as a clean, bulleted Telegram message (ALL sections)."""
+def format_drug_info(sections: dict) -> tuple[str, list[dict]]:
+    """
+    Format a lookup_drug() result as a clean, bulleted Telegram message
+    (ALL sections). Returns (text, table_entries) -- see format_section.
+    """
     name = sections.get("_name", "Unknown drug")
     generic = sections.get("_generic")
 
@@ -253,17 +389,28 @@ def format_drug_info(sections: dict) -> str:
         lines.append(f"_({generic})_")
     lines.append("")
 
+    table_entries = []
     for _, field_label, emoji, _keys in FIELDS:
-        bullets = sections.get(field_label)
-        if not bullets:
+        data = sections.get(field_label)
+        if not data:
             continue
+        bullets = data.get("bullets", [])
+        tables = data.get("tables", [])
+        if not bullets and not tables:
+            continue
+
         lines.append(f"{emoji} *{field_label}*")
         for bullet in bullets:
-            lines.append(f"  • {bullet}")
-        lines.append("")
+            lines.append(_format_bullet_line(bullet))
+            lines.append("")
+        if tables:
+            plural = "s" if len(tables) != 1 else ""
+            lines.append(f"📊 {len(tables)} table{plural} — sent as image{plural} below.")
+            lines.append("")
+        table_entries.extend({"title": f"{emoji} {field_label}", "text": block} for block in tables)
 
     lines.append(DISCLAIMER)
-    return "\n".join(lines)
+    return "\n".join(lines), table_entries
 
 
 async def search_drug_names(prefix: str, limit: int = 8) -> list[str]:
