@@ -151,6 +151,28 @@ def detect_chapters(previews: list[str]) -> list[dict]:
     return chapters
 
 
+def compute_chapter_ranges(chapters: list[dict], total_pages: int) -> list[dict]:
+    """
+    Given Claude's raw chapter list ({"title","start_page"}, already sorted
+    and validated by detect_chapters) and the document's total page count,
+    return the same chapters with an added "end_page" (1-indexed, inclusive).
+
+    This is the same boundary math split_pdf_by_chapters uses to decide
+    where to cut each output file, but exposed standalone so a caller that
+    only needs the METADATA -- e.g. the Book Shelf mini app, which keeps
+    chapter boundaries in library.py rather than physically splitting the
+    book into one file per chapter -- doesn't have to write any files just
+    to know where each chapter ends.
+    """
+    result = []
+    for idx, chapter in enumerate(chapters):
+        start = chapter["start_page"]
+        end = chapters[idx + 1]["start_page"] - 1 if idx + 1 < len(chapters) else total_pages
+        end = max(start, min(end, total_pages))
+        result.append({"title": chapter["title"], "start_page": start, "end_page": end})
+    return result
+
+
 def split_pdf_by_chapters(pdf_path: str, chapters: list[dict], output_dir: str) -> list[str]:
     """
     Physically split the PDF into one file per chapter.
@@ -159,15 +181,12 @@ def split_pdf_by_chapters(pdf_path: str, chapters: list[dict], output_dir: str) 
     os.makedirs(output_dir, exist_ok=True)
     reader = PdfReader(pdf_path)
     total_pages = len(reader.pages)
+    ranges = compute_chapter_ranges(chapters, total_pages)
 
     output_paths = []
-    for idx, chapter in enumerate(chapters):
+    for idx, chapter in enumerate(ranges):
         start = chapter["start_page"] - 1  # to 0-indexed
-        end = (
-            chapters[idx + 1]["start_page"] - 1
-            if idx + 1 < len(chapters)
-            else total_pages
-        )
+        end = chapter["end_page"]  # end_page is inclusive/1-indexed, which is exactly the exclusive 0-indexed bound
         start = max(0, min(start, total_pages - 1))
         end = max(start + 1, min(end, total_pages))
 

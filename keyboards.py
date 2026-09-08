@@ -8,6 +8,7 @@ from aiogram.types import (
     KeyboardButton,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
+    WebAppInfo,
 )
 
 BTN_DOSE = "💊 Dose Lookup"
@@ -16,16 +17,30 @@ BTN_HELP = "ℹ️ Help"
 BTN_CALC = "🧮 Calculators"
 BTN_INTERACTIONS = "🔀 Interactions"
 BTN_ASK = "💬 Ask My Books"
+BTN_SHELF = "📚 Book Shelf"
 
-main_menu_kb = ReplyKeyboardMarkup(
-    keyboard=[
+
+def main_menu_kb(webapp_url: str = "") -> ReplyKeyboardMarkup:
+    """
+    Built as a function (not a module-level constant) because the Book Shelf
+    button needs a `web_app` URL known only at runtime (config.WEBAPP_URL) --
+    a KeyboardButton's web_app field is what actually makes Telegram open
+    the Mini App when tapped, the same way any other reply-keyboard button
+    works, rather than needing a separate inline button/message.
+
+    If webapp_url is empty (not configured yet), the Book Shelf button is
+    left out of the menu entirely rather than shipped as a dead button --
+    Telegram flatly refuses non-HTTPS web_app URLs, so a blank/placeholder
+    URL would just fail confusingly when tapped.
+    """
+    rows = [
         [KeyboardButton(text=BTN_DOSE), KeyboardButton(text=BTN_CALC)],
         [KeyboardButton(text=BTN_INTERACTIONS), KeyboardButton(text=BTN_ASK)],
         [KeyboardButton(text=BTN_UPLOAD), KeyboardButton(text=BTN_HELP)],
-    ],
-    resize_keyboard=True,
-    is_persistent=True,
-)
+    ]
+    if webapp_url:
+        rows.append([KeyboardButton(text=BTN_SHELF, web_app=WebAppInfo(url=webapp_url))])
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True, is_persistent=True)
 
 
 def drug_sections_kb(cache_id: str, sections_available: list[tuple[str, str, str]]) -> InlineKeyboardMarkup:

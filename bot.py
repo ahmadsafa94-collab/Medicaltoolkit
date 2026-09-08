@@ -14,8 +14,8 @@ import logging
 import os
 import re
 import shutil
-import time
 
+import uvicorn
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -29,8 +29,16 @@ from aiogram.types import (
     BufferedInputFile,
 )
 
-from config import TELEGRAM_BOT_TOKEN, STORAGE_DIR, MAX_UPLOAD_BYTES, PDF_PROCESSING_TIMEOUT_SECONDS
-from pdf_processor import process_pdf, ChapterDetectionError
+from config import (
+    TELEGRAM_BOT_TOKEN,
+    STORAGE_DIR,
+    MAX_UPLOAD_BYTES,
+    PDF_PROCESSING_TIMEOUT_SECONDS,
+    WEBAPP_URL,
+    PORT,
+)
+from pdf_processor import process_pdf, ChapterDetectionError, count_pages, compute_chapter_ranges
+from paths import user_dir, safe_pdf_filename, unique_path
 from drug_lookup import (
     lookup_drug,
     format_drug_info,
@@ -67,6 +75,7 @@ import library
 import pdf_export
 import session_cache
 import user_history
+from webapp_api import app as webapp_app
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -105,30 +114,10 @@ async def global_error_handler(event, exception):
     return True  # mark as handled so aiogram doesn't re-raise
 
 
-def user_dir(user_id: int) -> str:
-    path = os.path.join(STORAGE_DIR, str(user_id))
-    os.makedirs(path, exist_ok=True)
-    return path
-
-
-def safe_pdf_filename(raw_name: str | None) -> str:
-    """
-    Turn a Telegram-supplied filename into something safe to join onto a
-    server-side path.
-
-    `doc.file_name` is client-supplied metadata -- a sender using the raw Bot
-    API (not just the official Telegram app) can set it to anything,
-    including things like "../../../etc/whatever.pdf". Passing that straight
-    into os.path.join() is a path-traversal bug: the download could land
-    outside the per-user storage folder entirely. Strip any directory
-    components and keep only a safe character set, mirroring the sanitizing
-    already done for chapter titles in pdf_processor.py.
-    """
-    name = os.path.basename(raw_name or "")
-    name = re.sub(r"[^\w.-]", "_", name).strip(". ") or "upload"
-    if not name.lower().endswith(".pdf"):
-        name += ".pdf"
-    return name[:200]  # keep well under filesystem filename limits
+# user_dir() and safe_pdf_filename() now live in paths.py -- webapp_api.py
+# (the Book Shelf mini app's backend) needs the exact same logic, and
+# importing it from here would create a circular import (bot.py imports
+# webapp_api.py to run its server alongside the polling loop).
 
 
 @dp.message(Command("start"))
@@ -146,8 +135,11 @@ async def cmd_start(message: Message):
         "/glossary <term> - common medical abbreviations & lab reference ranges\n"
         "/recent - your last few /dose lookups, tap to look up again\n"
         "/bookmarks - drugs you've bookmarked (via the 🔖 button after /dose)\n"
-        "/ask - ask your indexed books questions in plain language, AI answers with page citations",
-        reply_markup=main_menu_kb,
+        "/ask - ask your indexed books questions in plain language, AI answers with page citations\n\n"
+        "📚 Book Shelf (button below) opens a full mini app for your uploaded books -- browse them on a "
+        "shelf, read them with a built-in PDF viewer, divide them into chapters, summarize the whole book "
+        "or one chapter, ask AI questions, and generate a custom quiz.",
+        reply_markup=main_menu_kb(WEBAPP_URL),
     )
 
 
@@ -168,6 +160,10 @@ async def cmd_help(message: Message):
         "Note: very large or very complex PDFs can take a while to process; "
         "if reading/chapter-detection takes too long the bot will tell you "
         "instead of hanging silently.\n\n"
+        "📚 Book Shelf - opens a mini app with every book you've uploaded (from chat or from the mini app "
+        "itself) laid out on a shelf. From there you can read a book with a built-in viewer, divide it into "
+        "chapters, summarize the whole book or one chapter, ask it AI questions, and build a custom quiz "
+        "(pick chapters, difficulty, and up to 30 questions) -- all without leaving Telegram.\n\n"
         "/ask - pick one of your previously-indexed books and ask it "
         "questions freely, one after another, until /cancel. Answers are "
         "generated only from that book's actual text, with page citations -- "
@@ -593,65 +589,25 @@ async def _build_chapter_ai_kb(chapter: dict, path: str):
     return chapter_ai_kb(cache_id)
 
 
-def _unique_path(path: str) -> str:
-    """
-    If `path` already exists, append " (2)", " (3)", etc. before the
-    extension until a name that doesn't collide is found. Used when moving
-    an uploaded PDF into a user's library folder so re-uploading a
-    same-named book never silently overwrites an earlier one that's still
-    sitting there un-indexed.
-    """
-    if not os.path.exists(path):
-        return path
-    base, ext = os.path.splitext(path)
-    i = 2
-    while True:
-        candidate = f"{base} ({i}){ext}"
-        if not os.path.exists(candidate):
-            return candidate
-        i += 1
-
-
-def _cleanup_stale_library_files(library_dir: str, max_age_days: int = 30) -> None:
-    """
-    Delete PDFs sitting in a user's library folder that are older than
-    max_age_days. book_qa_flow.handle_index_request already deletes a PDF
-    the moment it's successfully indexed, so anything still here past the
-    threshold was uploaded and split into chapters but never had 'Make
-    searchable' tapped -- this bounds disk growth from those abandoned
-    uploads. Best-effort: any error for an individual file is swallowed so
-    one bad stat/remove can't block a new upload.
-    """
-    if not os.path.isdir(library_dir):
-        return
-    cutoff = time.time() - max_age_days * 86400
-    try:
-        entries = os.listdir(library_dir)
-    except OSError:
-        return
-    for name in entries:
-        path = os.path.join(library_dir, name)
-        try:
-            if os.path.isfile(path) and os.path.getmtime(path) < cutoff:
-                os.remove(path)
-        except OSError:
-            pass
-
-
 @dp.message(F.document)
 async def handle_pdf_upload(message: Message):
     """
-    Download a PDF, split it into chapters with AI, and offer to index the
-    whole book for "Ask my book" Q&A.
+    Download a PDF, split it into chapters with AI, register it in the
+    shared book registry (library.py) -- which immediately makes it show up
+    on the 📚 Book Shelf mini app too -- and offer to index it for "Ask my
+    book" Q&A.
 
-    The original PDF is MOVED (not deleted) into a per-user library/
-    subfolder after chapters are sent, and only actually deleted later, by
-    book_qa_flow.handle_index_request, once it's been successfully indexed
-    (or by _cleanup_stale_library_files above, if the user never taps
-    "Make searchable" at all). This matters because indexing is triggered
-    by a button tap that happens AFTER this handler returns -- if the
-    `finally` block below deleted the source PDF the way earlier versions
-    did, there would be nothing left to index by the time that tap arrives.
+    The original PDF is MOVED (never deleted) into a per-user library/
+    subfolder after chapters are sent, and is kept indefinitely from then
+    on: unlike the earlier version of this feature, an upload is no longer
+    a one-shot "split, maybe index, then forget it" flow -- once a book is
+    on the shelf, its Divide-into-chapters/Read/Summarize/Quiz/Ask actions
+    can all be used again later from the mini app, and all of them need the
+    real file, not just a cached extract. This matters immediately, too:
+    indexing itself is triggered by a button tap that happens AFTER this
+    handler returns, so if the `finally` block below deleted the source PDF
+    the way earlier versions did, there would be nothing left to index by
+    the time that tap arrives.
     """
     doc = message.document
     file_name = doc.file_name or ""
@@ -675,7 +631,6 @@ async def handle_pdf_upload(message: Message):
 
     workdir = user_dir(message.from_user.id)
     library_dir = os.path.join(workdir, "library")
-    _cleanup_stale_library_files(library_dir)
 
     # Sanitize the filename Telegram gives us -- it's client-supplied and,
     # sent via the raw Bot API, could contain path-traversal sequences
@@ -770,17 +725,40 @@ async def handle_pdf_upload(message: Message):
         # Move (never delete) the original PDF into this user's durable
         # library folder so it survives this handler's own cleanup below --
         # see the function docstring for why a plain delete here would break
-        # the later "Make searchable" indexing step.
+        # the later "Make searchable" indexing step. Then register it in the
+        # shared book registry (library.py) -- the same registry the Book
+        # Shelf mini app reads -- with the chapters we just detected already
+        # attached, so a chat-uploaded book shows up there fully divided,
+        # with no need to divide it again from the mini app.
         ask_kb = None
         try:
             os.makedirs(library_dir, exist_ok=True)
-            library_pdf_path = _unique_path(os.path.join(library_dir, safe_pdf_filename(file_name)))
+            library_pdf_path = unique_path(os.path.join(library_dir, safe_pdf_filename(file_name)))
             shutil.move(local_pdf_path, library_pdf_path)
             book_title = os.path.splitext(file_name)[0].strip() or "Untitled book"
-            pending_id = session_cache.put({"pdf_path": library_pdf_path, "title": book_title})
+
+            try:
+                page_count = await asyncio.to_thread(count_pages, library_pdf_path)
+            except Exception:
+                # process_pdf just read this exact file successfully, so this
+                # should essentially never happen -- fall back to the number
+                # of chapters detected rather than failing the whole upload
+                # over a page-count re-check.
+                logger.exception("count_pages failed on a file process_pdf just read: %s", library_pdf_path)
+                page_count = len(chapters)
+
+            book_id = library.add_book(message.from_user.id, book_title, library_pdf_path, page_count, source="chat")
+            library.set_chapters(message.from_user.id, book_id, compute_chapter_ranges(chapters, page_count))
+
+            pending_id = session_cache.put({"book_id": book_id})
             ask_kb = make_searchable_kb(pending_id)
-        except OSError:
-            logger.exception("Failed to move uploaded PDF into library folder -- Q&A indexing won't be offered")
+        except Exception:
+            # Broad on purpose: a failure here (move, registry write, page
+            # re-count) should never take down the whole upload -- the user
+            # has already received their chapters either way, so just skip
+            # the "make searchable"/Book Shelf registration this once rather
+            # than losing the "Sent N chapter(s)" confirmation below too.
+            logger.exception("Failed to register uploaded PDF into the library -- Q&A indexing won't be offered")
 
         if ask_kb is not None:
             await message.answer(
@@ -806,8 +784,33 @@ async def handle_pdf_upload(message: Message):
 
 
 async def main():
+    """
+    Runs the chat bot's polling loop and the Book Shelf mini app's web
+    server side by side, in the SAME process and event loop. This is
+    deliberate, not just convenient: both need access to the same
+    STORAGE_DIR filesystem (uploaded PDFs, library.py's registry, pdf_qa's
+    indexes), and running them as two separate processes/dynos on most
+    hosting platforms would mean two separate, non-shared filesystems --
+    the mini app would upload a book the bot could never see, or vice
+    versa. One process, one event loop, one disk sidesteps that entirely.
+
+    If dp.start_polling(bot) or server.serve() raises, asyncio.gather lets
+    the exception propagate and this process exits non-zero -- the hosting
+    platform's own restart policy (e.g. Heroku's) is what should bring it
+    back up, not a retry loop in here.
+    """
     os.makedirs(STORAGE_DIR, exist_ok=True)
-    await dp.start_polling(bot)
+    if not WEBAPP_URL:
+        logger.warning(
+            "WEBAPP_URL is not set -- the 📚 Book Shelf button will be hidden from the main menu, "
+            "but its web server still runs at /webapp/ if you want to test it directly."
+        )
+    server_config = uvicorn.Config(webapp_app, host="0.0.0.0", port=PORT, log_level="info")
+    server = uvicorn.Server(server_config)
+    await asyncio.gather(
+        dp.start_polling(bot),
+        server.serve(),
+    )
 
 
 if __name__ == "__main__":

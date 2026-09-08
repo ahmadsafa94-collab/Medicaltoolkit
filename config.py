@@ -7,6 +7,17 @@ TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 VOYAGE_API_KEY = os.environ["VOYAGE_API_KEY"]
 
+# Public HTTPS URL the Book Shelf mini app is served from, e.g.
+# "https://yourapp.herokuapp.com/webapp/" -- this is what gets registered
+# with @BotFather as the bot's Menu Button / Mini App URL, and what the
+# 📚 Book Shelf keyboard button opens. Telegram REQUIRES this to be a real
+# HTTPS URL; it will not open a plain http:// or localhost address.
+WEBAPP_URL = os.environ.get("WEBAPP_URL", "")
+
+# Port the merged bot+webapp process listens on. Hosting platforms that
+# assign a dynamic port (Heroku, Render, etc.) set $PORT themselves.
+PORT = int(os.environ.get("PORT", 8000))
+
 # Where uploaded PDFs and split chapters get stored, per user
 STORAGE_DIR = os.environ.get("STORAGE_DIR", "./storage")
 
@@ -64,3 +75,23 @@ QA_EMBED_BATCH_SIZE = 100       # texts per Voyage API call (Voyage's own cap is
 # Embedding is many sequential network calls for a long book, so this is
 # intentionally more generous than PDF_PROCESSING_TIMEOUT_SECONDS.
 QA_INDEXING_TIMEOUT_SECONDS = 600
+
+# --- Book Shelf mini app settings ---
+
+# The mini app's own upload limit is deliberately larger than the chat's
+# MAX_UPLOAD_BYTES (Telegram's Bot API hard-caps a bot's file downloads at
+# 20MB -- see MAX_UPLOAD_BYTES above). The mini app's uploader posts the
+# file straight from the browser to OUR OWN server over plain HTTPS, never
+# through Telegram's Bot API at all, so that 20MB ceiling simply doesn't
+# apply there -- 200MB is a real, working limit for this path.
+MAX_SHELF_UPLOAD_BYTES = 200 * 1024 * 1024
+MAX_SHELF_UPLOAD_PAGES = 1500
+
+# Background-job timeouts for the mini app's longer-running actions,
+# following the same "never let the user stare at a spinner forever"
+# principle as PDF_PROCESSING_TIMEOUT_SECONDS/QA_INDEXING_TIMEOUT_SECONDS.
+CHAPTER_DIVISION_TIMEOUT_SECONDS = 300
+BOOK_SUMMARY_TIMEOUT_SECONDS = 900  # whole-book summaries make one Claude call per chapter -- generous on purpose
+CHAPTER_SUMMARY_TIMEOUT_SECONDS = 120
+QUIZ_GENERATION_TIMEOUT_SECONDS = 180
+ASK_TIMEOUT_SECONDS = 30
