@@ -38,14 +38,32 @@ from drug_lookup import (
     DrugNotFoundError,
     DrugLookupRateLimitedError,
 )
-from keyboards import main_menu_kb, drug_search_inline_kb, drug_sections_kb, BTN_DOSE, BTN_UPLOAD, BTN_HELP
+from keyboards import (
+    main_menu_kb,
+    drug_search_inline_kb,
+    drug_sections_kb,
+    make_searchable_kb,
+    book_picker_kb,
+    BTN_DOSE,
+    BTN_UPLOAD,
+    BTN_ASK,
+    BTN_HELP,
+)
 import session_cache
+import library
+import pdf_qa
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
+
+# user_id -> book_id, set when a user taps a book from /ask's picker and
+# clears once they send their question (or pick a different book). Simple
+# in-memory state; fine for a single-process bot, lost on restart like the
+# session_cache.
+awaiting_question: dict[int, str] = {}
 
 
 @dp.errors()
@@ -117,11 +135,14 @@ async def send_long_text(answer_fn, text: str) -> bool:
 async def cmd_start(message: Message):
     await message.answer(
         "Welcome to the Medical Student Toolkit bot.\n\n"
-        "Send me a textbook PDF and I'll split it into chapters using AI.\n\n"
+        "Send me a textbook PDF and I'll split it into chapters using AI. "
+        "You can also make a book searchable and ask it questions in plain "
+        "language — like NotebookLM.\n\n"
         "Commands:\n"
         "/start - this message\n"
         "/help - how to use the bot\n"
-        "/dose <drug> - FDA label dosing & reference info",
+        "/dose <drug> - FDA label dosing & reference info\n"
+        "/ask - ask a question about a book you've made searchable",
         reply_markup=main_menu_kb,
     )
 
@@ -139,7 +160,10 @@ async def cmd_help(message: Message):
         "then shows buttons so you can pick exactly which section you want "
         "(Dosage, Contraindications, Interactions, etc.) instead of one huge "
         "wall of text. Reference only, not a substitute for a current "
-        "formulary."
+        "formulary.\n\n"
+        "After uploading a PDF, tap '🔍 Make this book searchable' to ask it "
+        "questions in plain language — I'll find the relevant passages and "
+        "answer citing the exact page numbers, like NotebookLM."
     )
 
 
@@ -151,6 +175,40 @@ async def btn_help(message: Message):
 @dp.message(F.text == BTN_UPLOAD)
 async def btn_upload(message: Message):
     await message.answer("Send me a .pdf file as a document (attach → file) and I'll split it into chapters.")
+
+
+async def show_book_picker(message: Message):
+    books = library.list_books(message.from_user.id)
+    if not books:
+        await message.answer(
+            "You don't have any searchable books yet. Upload a PDF, then tap "
+            "'🔍 Make this book searchable' on the result to enable Q&A for it."
+        )
+        return
+    await message.answer("Which book do you want to ask about?", reply_markup=book_picker_kb(books))
+
+
+@dp.message(F.text == BTN_ASK)
+async def btn_ask(message: Message):
+    await show_book_picker(message)
+
+
+@dp.message(Command("ask"))
+async def cmd_ask(message: Message):
+    await show_book_picker(message)
+
+
+@dp.callback_query(F.data.startswith("askbook:"))
+async def handle_book_pick(callback: CallbackQuery):
+    book_id = callback.data.split(":", 1)[1]
+    book = library.get_book(callback.from_user.id, book_id)
+    if book is None:
+        await callback.answer("That book isn't available anymore.", show_alert=True)
+        return
+
+    awaiting_question[callback.from_user.id] = book_id
+    await callback.answer()
+    await callback.message.answer(f"📖 Ask a question about *{book['title']}*:", parse_mode="Markdown")
 
 
 @dp.message(F.text == BTN_DOSE)
@@ -317,7 +375,103 @@ async def handle_pdf_upload(message: Message):
         caption = f"{chapter['title']} (from page {chapter['start_page']})"
         await message.answer_document(FSInputFile(path), caption=caption[:1024])
 
-    await message.answer("Done. Send another PDF anytime.")
+    # Offer to make the whole book semantically searchable ("Ask my book").
+    # Store what the indexing step needs (path + a title) behind a short id --
+    # reusing session_cache since it's already exactly this kind of "remember
+    # a bit of data for a future button tap" store.
+    book_title = os.path.splitext(doc.file_name)[0]
+    pending_id = session_cache.put({"pdf_path": local_pdf_path, "title": book_title})
+
+    await message.answer(
+        "Done. Send another PDF anytime.\n\n"
+        "Want to ask this book questions in plain language? I'll index it "
+        "for semantic search (may take a minute or two for a long book).",
+        reply_markup=make_searchable_kb(pending_id),
+    )
+
+
+@dp.callback_query(F.data.startswith("index:"))
+async def handle_index_request(callback: CallbackQuery):
+    pending_id = callback.data.split(":", 1)[1]
+    pending = session_cache.get(pending_id)
+    if pending is None:
+        await callback.answer("This request expired. Please upload the PDF again.", show_alert=True)
+        return
+
+    await callback.answer()
+    status_msg = await callback.message.answer("Starting indexing...")
+
+    async def progress(text: str):
+        try:
+            await status_msg.edit_text(text)
+        except TelegramBadRequest:
+            pass  # message content unchanged or too soon after last edit -- harmless
+
+    book_id = library.add_book(callback.from_user.id, pending["title"], num_chunks=0)  # placeholder, updated below
+
+    try:
+        num_chunks = await asyncio.wait_for(
+            pdf_qa.build_index(pending["pdf_path"], book_id, pending["title"], progress_cb=progress),
+            timeout=600,  # long books with many chunks can take a while to embed
+        )
+    except asyncio.TimeoutError:
+        await status_msg.edit_text("Indexing took too long and timed out. Try again, or use a shorter book.")
+        return
+    except pdf_qa.IndexingError as e:
+        await status_msg.edit_text(f"Couldn't index this book: {e}")
+        return
+    except Exception as e:
+        logger.exception("Indexing failed")
+        await status_msg.edit_text(f"Indexing failed: {e}")
+        return
+
+    # update the registry entry now that we know the real chunk count
+    library.update_chunk_count(callback.from_user.id, book_id, num_chunks)
+
+    await status_msg.edit_text(
+        f"✅ *{pending['title']}* is ready ({num_chunks} passages indexed). "
+        f"Use /ask or 💬 Ask My Books to ask it a question.",
+        parse_mode="Markdown",
+    )
+
+
+@dp.message(lambda m: m.from_user and m.from_user.id in awaiting_question)
+async def handle_book_question(message: Message):
+    book_id = awaiting_question.pop(message.from_user.id)
+    book = library.get_book(message.from_user.id, book_id)
+    if book is None:
+        await message.answer("That book isn't available anymore. Use /ask to pick another.")
+        return
+
+    question = message.text
+    if not question:
+        await message.answer("Please send your question as text.")
+        awaiting_question[message.from_user.id] = book_id  # let them try again
+        return
+
+    status_msg = await message.answer("Searching the book...")
+
+    try:
+        result = await asyncio.wait_for(pdf_qa.answer_question(book_id, question), timeout=30)
+    except asyncio.TimeoutError:
+        await status_msg.edit_text("That took too long. Please try again.")
+        return
+    except pdf_qa.IndexingError as e:
+        await status_msg.edit_text(str(e))
+        return
+    except Exception as e:
+        logger.exception("Book Q&A failed")
+        await status_msg.edit_text(f"Something went wrong answering that: {e}")
+        return
+
+    await status_msg.delete()
+
+    pages_cited = sorted({s["page"] for s in result["sources"]})
+    reply = f"{result['answer']}\n\n📄 Source pages: {', '.join(str(p) for p in pages_cited)}"
+    await send_long_text(message.answer, reply)
+
+    # Let them keep asking about the same book without re-picking it
+    awaiting_question[message.from_user.id] = book_id
 
 
 async def main():
