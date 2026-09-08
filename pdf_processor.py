@@ -20,23 +20,48 @@ import anthropic
 import pdfplumber
 from pypdf import PdfReader, PdfWriter
 
-from config import ANTHROPIC_API_KEY, CLAUDE_MODEL, MAX_PAGES_PER_PASS
+from config import ANTHROPIC_API_KEY, CLAUDE_MODEL, MAX_PAGES_PER_PASS, ANTHROPIC_CLIENT_TIMEOUT_SECONDS
 
-client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+# Explicit timeout -- the SDK's own default is ~10 minutes, which is far too
+# long for a Telegram bot to sit silently on a stalled request. This is one
+# half of the fix for uploads that appeared to hang forever; the other half
+# is the overall asyncio.wait_for() around process_pdf() in bot.py.
+client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=ANTHROPIC_CLIENT_TIMEOUT_SECONDS)
 
 
 class ChapterDetectionError(Exception):
     pass
 
 
-def extract_page_previews(pdf_path: str, chars_per_page: int = 350) -> list[str]:
-    """Return a list where index i is a short text preview of page i+1."""
+def count_pages(pdf_path: str) -> int:
+    """Cheap page count via pypdf (no text extraction) for an early cap check."""
+    return len(PdfReader(pdf_path).pages)
+
+
+def extract_page_previews(pdf_path: str, chars_per_page: int = 350, progress_cb=None) -> list[str]:
+    """
+    Return a list where index i is a short text preview of page i+1.
+
+    progress_cb, if given, is a plain SYNCHRONOUS callable(pages_done, total_pages)
+    invoked every 10 pages. This runs inside a worker thread (see bot.py's
+    asyncio.to_thread call), so it must not touch asyncio/Telegram directly --
+    callers relay it back to the event loop themselves (e.g. via
+    loop.call_soon_threadsafe). pdfplumber's per-page extraction can be slow
+    on complex/image-heavy pages, and without this a long book gives the user
+    zero feedback for minutes at a time.
+    """
     previews = []
     with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages:
+        total = len(pdf.pages)
+        for i, page in enumerate(pdf.pages):
             text = page.extract_text() or ""
             text = re.sub(r"\s+", " ", text).strip()
             previews.append(text[:chars_per_page])
+            if progress_cb and (i % 10 == 0 or i == total - 1):
+                try:
+                    progress_cb(i + 1, total)
+                except Exception:
+                    pass  # a broken progress callback should never abort extraction itself
     return previews
 
 
@@ -45,6 +70,12 @@ def detect_chapters(previews: list[str]) -> list[dict]:
     Ask Claude to find chapter boundaries from page previews.
     Returns a list of dicts: [{"title": str, "start_page": int}, ...]
     start_page is 1-indexed and refers to the ORIGINAL pdf page numbers.
+
+    Raises ChapterDetectionError if the page cap is exceeded, if Claude's
+    response can't be parsed, or if it's structurally malformed (missing
+    fields, non-integer/out-of-range start_page, or duplicate start_page
+    values that would make the split logic silently produce a bogus
+    near-empty chapter instead of a clear error).
     """
     if len(previews) > MAX_PAGES_PER_PASS:
         raise ChapterDetectionError(
@@ -73,7 +104,7 @@ def detect_chapters(previews: list[str]) -> list[dict]:
 
     response = client.messages.create(
         model=CLAUDE_MODEL,
-        max_tokens=8000,
+        max_tokens=4000,
         system=system_prompt,
         messages=[{"role": "user", "content": numbered_text}],
     )
@@ -90,10 +121,33 @@ def detect_chapters(previews: list[str]) -> list[dict]:
         raise ChapterDetectionError("Claude returned no chapters.")
 
     for ch in chapters:
-        if "title" not in ch or "start_page" not in ch:
+        if not isinstance(ch, dict) or "title" not in ch or "start_page" not in ch:
             raise ChapterDetectionError(f"Malformed chapter entry: {ch}")
+        # start_page must be a real page number, not a bool, string, float,
+        # or anything else -- letting a bad type through here would only
+        # surface later as a confusing TypeError from sort()/arithmetic in
+        # split_pdf_by_chapters.
+        if isinstance(ch["start_page"], bool) or not isinstance(ch["start_page"], int) or ch["start_page"] < 1:
+            raise ChapterDetectionError(f"Invalid start_page in chapter entry: {ch}")
+        if ch["start_page"] > len(previews):
+            raise ChapterDetectionError(
+                f"Chapter '{ch.get('title')}' has start_page {ch['start_page']}, "
+                f"beyond the document's {len(previews)} pages."
+            )
 
     chapters.sort(key=lambda c: c["start_page"])
+
+    # Duplicate start_page values would make split_pdf_by_chapters silently
+    # collapse the earlier chapter down to a bogus 1-page stub (its "end" is
+    # clamped to its own start+1) instead of raising -- surface this clearly
+    # instead of shipping a corrupted split.
+    start_pages = [c["start_page"] for c in chapters]
+    if len(set(start_pages)) != len(start_pages):
+        raise ChapterDetectionError(
+            f"Claude returned duplicate start_page values: {start_pages}. "
+            "Try again, or report this PDF if it keeps happening."
+        )
+
     return chapters
 
 
@@ -133,9 +187,23 @@ def split_pdf_by_chapters(pdf_path: str, chapters: list[dict], output_dir: str) 
     return output_paths
 
 
-def process_pdf(pdf_path: str, output_dir: str) -> tuple[list[dict], list[str]]:
-    """Convenience wrapper: full pipeline from PDF path to split chapter files."""
-    previews = extract_page_previews(pdf_path)
+def process_pdf(pdf_path: str, output_dir: str, progress_cb=None) -> tuple[list[dict], list[str]]:
+    """
+    Convenience wrapper: full pipeline from PDF path to split chapter files.
+    progress_cb: see extract_page_previews -- forwarded through unchanged.
+    """
+    # Check the page cap with a cheap pypdf page count BEFORE running the
+    # much more expensive full-text extraction over every page -- no point
+    # paying that cost on a PDF we're about to reject anyway.
+    page_count = count_pages(pdf_path)
+    if page_count > MAX_PAGES_PER_PASS:
+        raise ChapterDetectionError(
+            f"PDF has {page_count} pages, which exceeds the "
+            f"{MAX_PAGES_PER_PASS}-page single-pass limit. Split the file "
+            f"manually first, or raise MAX_PAGES_PER_PASS in config.py."
+        )
+
+    previews = extract_page_previews(pdf_path, progress_cb=progress_cb)
     chapters = detect_chapters(previews)
     output_paths = split_pdf_by_chapters(pdf_path, chapters, output_dir)
     return chapters, output_paths

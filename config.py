@@ -7,28 +7,60 @@ TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 VOYAGE_API_KEY = os.environ["VOYAGE_API_KEY"]
 
-# Embedding model for "Ask my book" semantic search. voyage-4 is the current
-# general-purpose model (Jan 2026 release, replaced voyage-3-large). Use
-# voyage-4-lite instead if you want lower cost at slightly lower quality --
-# it shares the same embedding space so nothing else needs to change.
-VOYAGE_MODEL = "voyage-4"
-
 # Where uploaded PDFs and split chapters get stored, per user
 STORAGE_DIR = os.environ.get("STORAGE_DIR", "./storage")
 
-# Claude model to use for chapter-boundary detection
+# Claude model to use for chapter-boundary detection and Q&A answers
 CLAUDE_MODEL = "claude-sonnet-5"
 
-# Safety cap: don't try to AI-split books with more pages than this
-# in one shot (protects you from huge API bills on giant PDFs)
-# At ~350 chars/page preview, 1000 pages ≈ 90k input tokens ≈ $0.18/book
-# on Sonnet 5 pricing ($2/$10 per MTok) -- still cheap, but scales linearly,
-# so keep this cap if you ever raise page counts much further.
-MAX_PAGES_PER_PASS = 1000
+# Embedding model for "Ask my book" semantic search (voyage-4 is current as
+# of Sep 2026 -- verified against Voyage's own docs). voyage-4-lite is a
+# cheaper/faster alternative in the same embedding space if you want to swap.
+VOYAGE_MODEL = "voyage-4"
+
+# Safety cap: don't try to AI-split books with more pages than this in one
+# shot. This bounds two different costs: the Claude API cost of the chapter-
+# detection prompt (scales with page count), AND -- the more important one in
+# practice -- how long pdfplumber's per-page text extraction takes, which is
+# NOT just a function of file size. A short, image-heavy 8MB PDF with a
+# moderate page count is usually fine; a very long or layout-complex book can
+# make extraction itself take many minutes even well under a naive page cap.
+# If you need to raise this for a legitimately long textbook, also consider
+# raising PDF_PROCESSING_TIMEOUT_SECONDS below so it isn't cut off mid-extraction.
+MAX_PAGES_PER_PASS = 400
+
+# Telegram's Bot API hard-caps file downloads at 20MB for regular bots --
+# there is no way to download a bigger file via bot.get_file(), so we check
+# this BEFORE attempting a download and tell the user clearly, rather than
+# letting the download fail deep inside aiogram with no user-facing message.
+MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+
+# Hard ceiling on the whole "extract pages + ask Claude for chapter
+# boundaries" pipeline. Without this, a slow/complex PDF (extraction is
+# local CPU work with no natural timeout of its own) or a stalled network
+# call could leave the user staring at "Reading pages..." indefinitely with
+# no feedback and no way to know whether it's still working. Past this many
+# seconds, the upload fails with a clear message instead of hanging silently.
+PDF_PROCESSING_TIMEOUT_SECONDS = 300
+
+# Anthropic/Voyage API client timeouts (seconds). Anthropic's SDK default is
+# already ~10 minutes, which is far too long to sit silently for a Telegram
+# bot -- set an explicit, shorter bound so a stalled request fails fast
+# enough for PDF_PROCESSING_TIMEOUT_SECONDS above to actually be meaningful.
+ANTHROPIC_CLIENT_TIMEOUT_SECONDS = 120
+# Voyage's client has NO default timeout at all (confirmed against Voyage's
+# own docs) and no retries by default -- both matter here since indexing a
+# long book makes many sequential embedding calls.
+VOYAGE_CLIENT_TIMEOUT_SECONDS = 60
+VOYAGE_CLIENT_MAX_RETRIES = 2
 
 # "Ask my book" (RAG) settings
 QA_INDEX_DIR = os.environ.get("QA_INDEX_DIR", "./storage/qa_indexes")
 QA_CHUNK_SIZE_CHARS = 1200      # ~250-300 tokens per chunk
 QA_CHUNK_OVERLAP_CHARS = 200    # keeps sentences that straddle a chunk boundary searchable from both sides
 QA_TOP_K = 6                    # how many chunks to feed Claude per question
-QA_EMBED_BATCH_SIZE = 100       # texts per Voyage API call
+QA_EMBED_BATCH_SIZE = 100       # texts per Voyage API call (Voyage's own cap is 1000/request)
+# Overall cap on the indexing pipeline (extract -> chunk -> embed -> save).
+# Embedding is many sequential network calls for a long book, so this is
+# intentionally more generous than PDF_PROCESSING_TIMEOUT_SECONDS.
+QA_INDEXING_TIMEOUT_SECONDS = 600

@@ -6,16 +6,22 @@ citing the exact page numbers those passages came from.
 
 Pipeline:
   1. extract_full_page_text()  -- pull ALL text per page (not the short
-     previews used for chapter detection)
+     previews pdf_processor.py uses for chapter detection)
   2. build_chunks()            -- break each page into overlapping ~1200-char
      windows so a chunk is small enough to embed precisely but big enough to
      contain a full thought
   3. embed_texts()              -- call Voyage AI to turn chunks into vectors
-  4. build_index() / save/load -- persist chunks+vectors to disk per book
+  4. build_index() / load_index -- persist chunks+vectors to disk per book
   5. search_index()            -- cosine-similarity nearest neighbors for a
      question's embedding
   6. answer_question()         -- feed the top matches to Claude with a
      citation-focused system prompt
+
+Same "don't let a slow/stalled external API hang the bot forever" concern as
+pdf_processor.py applies here, doubly so -- indexing a long book makes many
+sequential Voyage API calls in a loop, so the Voyage client is given an
+explicit per-request timeout AND a few retries (its own default is NO
+timeout and NO retries at all, confirmed against Voyage's docs).
 """
 
 import asyncio
@@ -24,13 +30,11 @@ import logging
 import os
 import re
 
-import anthropic
 import numpy as np
 import pdfplumber
 import voyageai
 
 from config import (
-    ANTHROPIC_API_KEY,
     CLAUDE_MODEL,
     VOYAGE_API_KEY,
     VOYAGE_MODEL,
@@ -39,12 +43,18 @@ from config import (
     QA_CHUNK_OVERLAP_CHARS,
     QA_TOP_K,
     QA_EMBED_BATCH_SIZE,
+    VOYAGE_CLIENT_TIMEOUT_SECONDS,
+    VOYAGE_CLIENT_MAX_RETRIES,
 )
+from pdf_processor import client as claude_client  # reuse the one Anthropic client instance, not a second one
 
 logger = logging.getLogger(__name__)
 
-claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-voyage_client = voyageai.Client(api_key=VOYAGE_API_KEY)
+voyage_client = voyageai.Client(
+    api_key=VOYAGE_API_KEY,
+    timeout=VOYAGE_CLIENT_TIMEOUT_SECONDS,
+    max_retries=VOYAGE_CLIENT_MAX_RETRIES,
+)
 
 
 class IndexingError(Exception):
@@ -121,7 +131,10 @@ async def build_index(pdf_path: str, book_id: str, title: str, progress_cb=None)
     """
     if progress_cb:
         await progress_cb("Reading pages...")
-    page_texts = await asyncio.to_thread(extract_full_page_text, pdf_path)
+    try:
+        page_texts = await asyncio.to_thread(extract_full_page_text, pdf_path)
+    except Exception as e:
+        raise IndexingError(f"Couldn't read this PDF's text: {e}")
 
     chunks = build_chunks(page_texts)
     if not chunks:
@@ -129,11 +142,16 @@ async def build_index(pdf_path: str, book_id: str, title: str, progress_cb=None)
 
     if progress_cb:
         await progress_cb(f"Embedding {len(chunks)} passages ({VOYAGE_MODEL})...")
-    embeddings = await embed_texts([c["text"] for c in chunks], input_type="document")
+    try:
+        embeddings = await embed_texts([c["text"] for c in chunks], input_type="document")
+    except Exception as e:
+        raise IndexingError(f"Voyage AI embedding request failed: {e}")
 
     vectors = np.array(embeddings, dtype=np.float32)
+    norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0  # guard against a degenerate all-zero embedding causing a NaN/inf vector
     # Normalize once at index time so search is a plain dot product (cosine similarity)
-    vectors /= np.linalg.norm(vectors, axis=1, keepdims=True)
+    vectors /= norms
 
     meta_path, vectors_path = _index_paths(book_id)
     with open(meta_path, "w") as f:
@@ -159,9 +177,12 @@ async def search_index(meta: dict, vectors: np.ndarray, question: str, top_k: in
     """Return the top_k most relevant chunks for `question`, each with a similarity score."""
     [query_embedding] = await embed_texts([question], input_type="query")
     query_vec = np.array(query_embedding, dtype=np.float32)
-    query_vec /= np.linalg.norm(query_vec)
+    norm = np.linalg.norm(query_vec)
+    if norm > 0:
+        query_vec /= norm
 
     scores = vectors @ query_vec  # cosine similarity, since both sides are pre-normalized
+    top_k = min(top_k, len(scores))
     top_indices = np.argsort(scores)[::-1][:top_k]
 
     results = []
@@ -183,7 +204,12 @@ async def answer_question(book_id: str, question: str) -> dict:
         raise IndexingError("This book hasn't been indexed yet. Process it and tap 'Make searchable' first.")
     meta, vectors = loaded
 
+    if not question.strip():
+        raise IndexingError("Please send your question as text.")
+
     matches = await search_index(meta, vectors, question)
+    if not matches:
+        raise IndexingError("This book's index is empty -- try re-indexing it.")
 
     context = "\n\n".join(f"[Page {m['page']}]\n{m['text']}" for m in matches)
 
@@ -200,13 +226,16 @@ async def answer_question(book_id: str, question: str) -> dict:
         f"EXCERPTS:\n{context}"
     )
 
-    response = await asyncio.to_thread(
-        claude_client.messages.create,
-        model=CLAUDE_MODEL,
-        max_tokens=1500,
-        system=system_prompt,
-        messages=[{"role": "user", "content": question}],
-    )
+    try:
+        response = await asyncio.to_thread(
+            claude_client.messages.create,
+            model=CLAUDE_MODEL,
+            max_tokens=1500,
+            system=system_prompt,
+            messages=[{"role": "user", "content": question}],
+        )
+    except Exception as e:
+        raise IndexingError(f"Claude request failed: {e}")
 
     answer_text = "".join(block.text for block in response.content if block.type == "text").strip()
 
