@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>Book Shelf</title>
+  <link rel="stylesheet" href="style.css" />
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+</head>
+<body>
+
+  <!-- ============ SHELF (root) ============ -->
+  <section id="view-shelf" class="view">
+    <header class="topbar">
+      <h1>📚 Book Shelf</h1>
+    </header>
+    <div id="shelf-empty" class="empty-state" hidden>
+      <p>No books yet.</p>
+      <p class="muted">Tap + to upload your first PDF.</p>
+    </div>
+    <div id="shelf-grid" class="shelf-grid"></div>
+    <button id="btn-add-book" class="fab" title="Add a book">+</button>
+    <input id="file-input" type="file" accept="application/pdf" hidden />
+  </section>
+
+  <!-- ============ UPLOAD PROGRESS ============ -->
+  <section id="view-upload" class="view" hidden>
+    <header class="topbar"><h1>Uploading…</h1></header>
+    <div class="panel">
+      <div class="progress-track"><div id="upload-bar" class="progress-fill" style="width:0%"></div></div>
+      <p id="upload-status" class="muted">Starting upload…</p>
+    </div>
+  </section>
+
+  <!-- ============ BOOK DETAIL ============ -->
+  <section id="view-book" class="view" hidden>
+    <header class="topbar">
+      <h1 id="book-title">Book</h1>
+      <p id="book-meta" class="muted"></p>
+    </header>
+    <div class="action-grid">
+      <button class="action-btn" data-action="chapters">
+        <span class="icon">📖</span><span>Divide into chapters</span>
+        <span id="chapters-badge" class="badge"></span>
+      </button>
+      <button class="action-btn" data-action="read">
+        <span class="icon">🔎</span><span>Read the book</span>
+      </button>
+      <button class="action-btn" data-action="summarize">
+        <span class="icon">📝</span><span>Summarize</span>
+      </button>
+      <button class="action-btn" data-action="ask">
+        <span class="icon">💬</span><span>Ask questions using AI</span>
+      </button>
+      <button class="action-btn" data-action="quiz">
+        <span class="icon">❓</span><span>Create a quiz</span>
+      </button>
+    </div>
+    <div id="book-panel" class="panel" hidden></div>
+  </section>
+
+  <!-- ============ READER ============ -->
+  <section id="view-reader" class="view" hidden>
+    <header class="topbar reader-topbar">
+      <button id="reader-prev" class="pager-btn">‹</button>
+      <span id="reader-page-label">Page 1</span>
+      <button id="reader-next" class="pager-btn">›</button>
+    </header>
+    <div id="reader-canvas-wrap">
+      <canvas id="reader-canvas"></canvas>
+    </div>
+  </section>
+
+  <script src="app.js"></script>
+</body>
+</html>
