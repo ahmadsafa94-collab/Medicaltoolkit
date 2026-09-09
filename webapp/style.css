@@ -14,6 +14,18 @@
 
 * { box-sizing: border-box; }
 
+/* Without this, any class below that sets `display` (flex, in particular)
+   silently wins over the browser's own "hidden means display:none" default
+   whenever both apply to the same element at equal specificity -- author
+   CSS always beats the UA stylesheet at a tie, regardless of source order.
+   That's exactly what happened here: .sheet-backdrop's `display: flex` was
+   overriding `hidden` on #action-sheet-backdrop, so the dark full-screen
+   overlay rendered (and ate every tap) even when no menu was open. This
+   single !important rule -- the same one Telegram Mini Apps' own recommended
+   base CSS uses -- makes `el.hidden = true` always win, for every element,
+   permanently, so this bug class can't come back for any future addition. */
+[hidden] { display: none !important; }
+
 body {
   margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
