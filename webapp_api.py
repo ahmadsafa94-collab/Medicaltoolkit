@@ -42,6 +42,7 @@ from starlette.staticfiles import StaticFiles
 
 import chapter_ai
 import library
+import pdf_export
 import pdf_qa
 import quiz_ai
 from config import (
@@ -591,6 +592,74 @@ async def ask_book(request: Request):
     return JSONResponse(result)
 
 
+async def export_answer_pdf(request: Request):
+    """
+    Renders one already-answered Q&A exchange (question + Claude's answer +
+    its numbered sources) as a downloadable PDF, for the "Export as PDF"
+    button under each answer in the mini app's Ask AI panel.
+
+    Deliberately takes the question/answer/sources straight from the
+    request body instead of re-running pdf_qa.answer_question() -- the
+    frontend already has the exact exchange the user is looking at (see
+    app.js's qaHistory), and re-asking would cost another Claude call, risk
+    a slightly different answer, and require re-sending conversation
+    history just to reconstruct something already in hand. Same
+    "deliberately dumb formatting step" philosophy as pdf_export.py's other
+    caller (drug_lookup's "Export as PDF").
+    """
+    user = require_user(request)
+    book_id = request.path_params["book_id"]
+    book = _book_or_404(user["id"], book_id)
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise ApiError(status_code=400, detail="Invalid JSON body.")
+
+    question = (body.get("question") or "").strip()
+    answer = (body.get("answer") or "").strip()
+    raw_sources = body.get("sources") or []
+
+    if not question or not answer:
+        raise ApiError(status_code=400, detail="Nothing to export -- question and answer are both required.")
+    if not isinstance(raw_sources, list):
+        raise ApiError(status_code=400, detail="Invalid sources.")
+
+    sources = []
+    for s in raw_sources:
+        if not isinstance(s, dict):
+            continue
+        n, page, text = s.get("n"), s.get("page"), s.get("text")
+        if isinstance(n, int) and isinstance(page, int) and isinstance(text, str):
+            sources.append({"n": n, "page": page, "text": text})
+
+    body_lines = [
+        "Q: " + question,
+        "",
+        answer,
+    ]
+    if sources:
+        body_lines.append("")
+        body_lines.append("Sources")
+        for s in sources:
+            body_lines.append(f"[{s['n']}] Page {s['page']} — {s['text']}")
+
+    try:
+        pdf_bytes = await asyncio.to_thread(
+            pdf_export.generate_text_pdf, book.get("title") or "Book Q&A", "\n".join(body_lines)
+        )
+    except Exception:
+        logger.exception("Q&A answer PDF export failed for book_id=%s", book_id)
+        raise ApiError(status_code=500, detail="Couldn't build the PDF. Please try again.")
+
+    filename = safe_pdf_filename((book.get("title") or "qa-answer") + " - Q&A")
+    return StreamingResponse(
+        iter([pdf_bytes]),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 # ---------------------------------------------------------------------------
 # 5. Quiz (chapter selection, difficulty, question count)
 # ---------------------------------------------------------------------------
@@ -654,6 +723,7 @@ routes = [
     Route("/api/books/{book_id}/summarize", summarize, methods=["POST"]),
     Route("/api/books/{book_id}/index", index_book, methods=["POST"]),
     Route("/api/books/{book_id}/ask", ask_book, methods=["POST"]),
+    Route("/api/books/{book_id}/ask/export", export_answer_pdf, methods=["POST"]),
     Route("/api/books/{book_id}/quiz", create_quiz, methods=["POST"]),
     Mount("/webapp", app=StaticFiles(directory=_WEBAPP_DIR, html=True), name="webapp"),
 ]

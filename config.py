@@ -38,7 +38,11 @@ VOYAGE_MODEL = "voyage-4"
 # make extraction itself take many minutes even well under a naive page cap.
 # If you need to raise this for a legitimately long textbook, also consider
 # raising PDF_PROCESSING_TIMEOUT_SECONDS below so it isn't cut off mid-extraction.
-MAX_PAGES_PER_PASS = 400
+# Raised 400 -> 1000 at the user's request; PDF_PROCESSING_TIMEOUT_SECONDS and
+# CHAPTER_DIVISION_TIMEOUT_SECONDS below were scaled up proportionally (both
+# gate this same extract-previews + detect-chapters pipeline) so a long book
+# that now legitimately takes longer isn't cut off mid-extraction.
+MAX_PAGES_PER_PASS = 1000
 
 # Telegram's Bot API hard-caps file downloads at 20MB for regular bots --
 # there is no way to download a bigger file via bot.get_file(), so we check
@@ -52,7 +56,7 @@ MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 # call could leave the user staring at "Reading pages..." indefinitely with
 # no feedback and no way to know whether it's still working. Past this many
 # seconds, the upload fails with a clear message instead of hanging silently.
-PDF_PROCESSING_TIMEOUT_SECONDS = 300
+PDF_PROCESSING_TIMEOUT_SECONDS = 750
 
 # Anthropic/Voyage API client timeouts (seconds). Anthropic's SDK default is
 # already ~10 minutes, which is far too long to sit silently for a Telegram
@@ -90,7 +94,7 @@ MAX_SHELF_UPLOAD_PAGES = 1500
 # Background-job timeouts for the mini app's longer-running actions,
 # following the same "never let the user stare at a spinner forever"
 # principle as PDF_PROCESSING_TIMEOUT_SECONDS/QA_INDEXING_TIMEOUT_SECONDS.
-CHAPTER_DIVISION_TIMEOUT_SECONDS = 300
+CHAPTER_DIVISION_TIMEOUT_SECONDS = 750
 BOOK_SUMMARY_TIMEOUT_SECONDS = 900  # whole-book summaries make one Claude call per chapter -- generous on purpose
 CHAPTER_SUMMARY_TIMEOUT_SECONDS = 120
 QUIZ_GENERATION_TIMEOUT_SECONDS = 180
