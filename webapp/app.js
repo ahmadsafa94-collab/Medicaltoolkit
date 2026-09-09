@@ -917,11 +917,17 @@ function renderQaLog() {
   const log = document.getElementById("qa-log");
   if (!log) return;
   log.innerHTML = qaHistory
-    .map((m, i) =>
-      m.role === "q"
-        ? `<div class="qa-msg q">${escapeHtml(m.text)}</div>`
-        : `<div class="qa-msg a" data-msg-index="${i}">${renderAnswerHtml(m.text, m.sources)}</div>`
-    )
+    .map((m, i) => {
+      if (m.role === "q") return `<div class="qa-msg q">${escapeHtml(m.text)}</div>`;
+      // m.sources is only set once a real answer has come back (it's absent
+      // on the "…thinking…" placeholder and on an "Error: ..." bubble), so
+      // it doubles as the signal that there's a finished answer to export.
+      const exportBtn =
+        m.sources !== undefined
+          ? `<button class="qa-export-btn" data-msg-index="${i}">📄 Export as PDF</button>`
+          : "";
+      return `<div class="qa-msg a" data-msg-index="${i}">${renderAnswerHtml(m.text, m.sources)}${exportBtn}</div>`;
+    })
     .join("");
   log.scrollTop = log.scrollHeight;
 }
@@ -938,6 +944,59 @@ document.getElementById("view-book").addEventListener("click", (e) => {
   const source = msg && msg.sources && msg.sources.find((s) => String(s.n) === marker.dataset.n);
   if (source) alertMsg(`[${source.n}] Page ${source.page}:\n\n${source.text}`);
 });
+
+// Same delegation pattern as the citation-marker handler above, for the
+// per-answer "Export as PDF" button.
+document.getElementById("view-book").addEventListener("click", (e) => {
+  const btn = e.target.closest(".qa-export-btn");
+  if (!btn) return;
+  const msgIndex = parseInt(btn.dataset.msgIndex, 10);
+  const answerMsg = qaHistory[msgIndex];
+  const questionMsg = qaHistory[msgIndex - 1];
+  if (!answerMsg || !questionMsg) return;
+  exportAnswerAsPdf(btn, questionMsg.text, answerMsg.text, answerMsg.sources || []);
+});
+
+// The api() helper always parses JSON, so a raw fetch() is used here
+// instead to get the PDF's bytes back as a Blob. Telegram's in-app
+// WebView doesn't expose a native "save file" API, so the standard
+// browser trick -- an object URL wired to a hidden <a download> that
+// gets programmatically clicked -- is what actually saves it to the
+// phone's Downloads/Files app in practice.
+async function exportAnswerAsPdf(btn, question, answer, sources) {
+  const originalLabel = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Exporting…";
+  try {
+    const res = await fetch(`/api/books/${currentBook.book_id}/ask/export`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Telegram-Init-Data": INIT_DATA },
+      body: JSON.stringify({ question, answer, sources }),
+    });
+    if (!res.ok) {
+      let detail = `Export failed (${res.status})`;
+      try {
+        const data = await res.json();
+        if (data && data.detail) detail = data.detail;
+      } catch (_) { /* no JSON body */ }
+      throw new Error(detail);
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "answer.pdf";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+  } catch (e) {
+    alertMsg("Couldn't export: " + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalLabel;
+  }
+}
 
 async function sendQuestion() {
   const input = document.getElementById("qa-input");

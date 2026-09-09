@@ -259,6 +259,11 @@ body {
 }
 .qa-sources .src-line { display: flex; gap: 4px; margin-top: 3px; }
 .qa-sources .src-line .n { font-weight: 700; flex-shrink: 0; }
+.qa-export-btn {
+  display: block; margin-top: 8px; padding: 6px 10px; border-radius: 8px; border: 1px solid rgba(0,0,0,0.15);
+  background: var(--bg); color: var(--link); font-size: 12px; font-weight: 600; cursor: pointer;
+}
+.qa-export-btn:disabled { opacity: 0.6; cursor: default; }
 .qa-input-row { display: flex; gap: 8px; }
 .qa-input-row input { flex: 1; padding: 10px; border-radius: 10px; border: 1px solid rgba(0,0,0,0.15); font-size: 14px; }
 
