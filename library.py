@@ -76,6 +76,7 @@ def add_book(user_id: int, title: str, pdf_path: str, page_count: int, source: s
         "chapters_error": None,
         "qa_indexed": False,
         "num_chunks": 0,
+        "bookmark_page": None,  # last page the user bookmarked in the reader, 1-indexed
     }
     _save(user_id, registry)
     return book_id
@@ -114,6 +115,15 @@ def set_chapters_error(user_id: int, book_id: str, error: str) -> bool:
 
 def mark_indexed(user_id: int, book_id: str, num_chunks: int) -> bool:
     return _update(user_id, book_id, qa_indexed=True, num_chunks=num_chunks)
+
+
+def rename_book(user_id: int, book_id: str, new_title: str) -> bool:
+    return _update(user_id, book_id, title=new_title)
+
+
+def set_bookmark(user_id: int, book_id: str, page: int | None) -> bool:
+    """page=None clears the bookmark."""
+    return _update(user_id, book_id, bookmark_page=page)
 
 
 def remove_book(user_id: int, book_id: str, delete_file: bool = False) -> bool:

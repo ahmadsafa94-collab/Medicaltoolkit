@@ -166,6 +166,45 @@ async def get_book(request: Request):
     return JSONResponse(_public_book(book_id, book))
 
 
+async def rename_book(request: Request):
+    user = require_user(request)
+    book_id = request.path_params["book_id"]
+    _book_or_404(user["id"], book_id)
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise ApiError(status_code=400, detail="Invalid JSON body.")
+
+    new_title = (body.get("title") or "").strip()
+    if not new_title:
+        raise ApiError(status_code=400, detail="Title can't be empty.")
+    if len(new_title) > 200:
+        raise ApiError(status_code=400, detail="Title is too long (200 characters max).")
+
+    library.rename_book(user["id"], book_id, new_title)
+    return JSONResponse(_public_book(book_id, library.get_book(user["id"], book_id)))
+
+
+async def set_bookmark(request: Request):
+    user = require_user(request)
+    book_id = request.path_params["book_id"]
+    book = _book_or_404(user["id"], book_id)
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise ApiError(status_code=400, detail="Invalid JSON body.")
+
+    page = body.get("page")
+    if page is not None:
+        if not isinstance(page, int) or isinstance(page, bool) or not (1 <= page <= book["page_count"]):
+            raise ApiError(status_code=400, detail="Invalid page number.")
+
+    library.set_bookmark(user["id"], book_id, page)
+    return JSONResponse(_public_book(book_id, library.get_book(user["id"], book_id)))
+
+
 def _safe_remove(path: str) -> None:
     try:
         os.remove(path)
@@ -482,14 +521,31 @@ async def ask_book(request: Request):
     except Exception:
         raise ApiError(status_code=400, detail="Invalid JSON body.")
     question = (body.get("question") or "").strip()
+    raw_history = body.get("history") or []
 
     if not book.get("qa_indexed"):
         raise ApiError(status_code=409, detail="Index this book for Q&A first (tap 'Ask questions using AI').")
     if not question:
         raise ApiError(status_code=400, detail="Question can't be empty.")
 
+    # history is only ever client-supplied conversation state for THIS
+    # book/session (see app.js's "Conversational" mode) -- validated
+    # defensively since it's untrusted input, same as any other body field.
+    if not isinstance(raw_history, list):
+        raise ApiError(status_code=400, detail="Invalid history.")
+    history = []
+    for turn in raw_history[-pdf_qa.MAX_HISTORY_TURNS:]:
+        if not isinstance(turn, dict):
+            raise ApiError(status_code=400, detail="Invalid history entry.")
+        q, a = turn.get("question"), turn.get("answer")
+        if not isinstance(q, str) or not isinstance(a, str):
+            raise ApiError(status_code=400, detail="Invalid history entry.")
+        history.append({"question": q, "answer": a})
+
     try:
-        result = await asyncio.wait_for(pdf_qa.answer_question(book_id, question), timeout=ASK_TIMEOUT_SECONDS)
+        result = await asyncio.wait_for(
+            pdf_qa.answer_question(book_id, question, history=history), timeout=ASK_TIMEOUT_SECONDS
+        )
     except asyncio.TimeoutError:
         raise ApiError(status_code=504, detail="That took too long. Please try again.")
     except pdf_qa.IndexingError as e:
@@ -556,6 +612,8 @@ routes = [
     Route("/api/books", list_books, methods=["GET"]),
     Route("/api/upload", upload_book, methods=["POST"]),
     Route("/api/books/{book_id}", get_book, methods=["GET"]),
+    Route("/api/books/{book_id}/rename", rename_book, methods=["POST"]),
+    Route("/api/books/{book_id}/bookmark", set_bookmark, methods=["POST"]),
     Route("/api/books/{book_id}/file", get_book_file, methods=["GET"]),
     Route("/api/books/{book_id}/jobs/{job_type}", get_job_status, methods=["GET"]),
     Route("/api/books/{book_id}/chapters", divide_into_chapters, methods=["POST"]),

@@ -27,6 +27,11 @@ from aiogram.types import (
     InputTextMessageContent,
     CallbackQuery,
     BufferedInputFile,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    WebAppInfo,
+    MenuButtonWebApp,
+    MenuButtonDefault,
 )
 
 from config import (
@@ -62,6 +67,7 @@ from keyboards import (
     BTN_CALC,
     BTN_INTERACTIONS,
     BTN_ASK,
+    BTN_SHELF,
 )
 from telegram_helpers import send_long_text, send_documents_safely, send_table_entries
 from renal_flow import register_renal_handlers
@@ -140,6 +146,30 @@ async def cmd_start(message: Message):
         "shelf, read them with a built-in PDF viewer, divide them into chapters, summarize the whole book "
         "or one chapter, ask AI questions, and generate a custom quiz.",
         reply_markup=main_menu_kb(WEBAPP_URL),
+    )
+
+
+@dp.message(F.text == BTN_SHELF)
+async def open_book_shelf(message: Message):
+    """
+    Sends a fresh message with an INLINE web_app button rather than opening
+    the Mini App directly off this reply-keyboard tap. This is a deliberate
+    workaround, not a style choice: a web_app attached straight to a
+    ReplyKeyboardMarkup button was confirmed in production to hand Telegram
+    an empty initData on Android (Telegram 9.6), while a web_app attached to
+    an inline button on an actual message works correctly -- both are
+    documented launch mechanisms, but only the message-attached one has been
+    verified end-to-end with a real signed initData reaching webapp_auth.
+    See keyboards.py's main_menu_kb docstring for the full story.
+    """
+    if not WEBAPP_URL:
+        await message.answer("Book Shelf isn't configured on this deployment yet.")
+        return
+    await message.answer(
+        "📚 Tap below to open your Book Shelf.",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="📚 Open Book Shelf", web_app=WebAppInfo(url=WEBAPP_URL))]]
+        ),
     )
 
 
@@ -805,6 +835,24 @@ async def main():
             "WEBAPP_URL is not set -- the 📚 Book Shelf button will be hidden from the main menu, "
             "but its web server still runs at /webapp/ if you want to test it directly."
         )
+        try:
+            await bot.set_chat_menu_button(menu_button=MenuButtonDefault())
+        except TelegramAPIError:
+            logger.exception("Failed to reset the chat menu button to default.")
+    else:
+        # This is the PRIMARY, confirmed-working way users open the Book
+        # Shelf: Telegram's own persistent "Menu" button, next to the
+        # message box, in every private chat with this bot. Setting it here
+        # (rather than requiring the bot owner to configure it by hand via
+        # @BotFather's /setmenubutton) means it's always in sync with
+        # whatever WEBAPP_URL is currently deployed, and it's set with no
+        # chat_id so it applies as the default for every user at once.
+        try:
+            await bot.set_chat_menu_button(
+                menu_button=MenuButtonWebApp(text="📚 Book Shelf", web_app=WebAppInfo(url=WEBAPP_URL))
+            )
+        except TelegramAPIError:
+            logger.exception("Failed to set the chat menu button to the Book Shelf web app.")
     server_config = uvicorn.Config(webapp_app, host="0.0.0.0", port=PORT, log_level="info")
     server = uvicorn.Server(server_config)
     await asyncio.gather(

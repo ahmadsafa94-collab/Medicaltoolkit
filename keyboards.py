@@ -22,16 +22,21 @@ BTN_SHELF = "📚 Book Shelf"
 
 def main_menu_kb(webapp_url: str = "") -> ReplyKeyboardMarkup:
     """
-    Built as a function (not a module-level constant) because the Book Shelf
-    button needs a `web_app` URL known only at runtime (config.WEBAPP_URL) --
-    a KeyboardButton's web_app field is what actually makes Telegram open
-    the Mini App when tapped, the same way any other reply-keyboard button
-    works, rather than needing a separate inline button/message.
+    Built as a function (not a module-level constant) so the Book Shelf row
+    can be left out entirely when webapp_url isn't configured yet.
 
-    If webapp_url is empty (not configured yet), the Book Shelf button is
-    left out of the menu entirely rather than shipped as a dead button --
-    Telegram flatly refuses non-HTTPS web_app URLs, so a blank/placeholder
-    URL would just fail confusingly when tapped.
+    IMPORTANT: the Book Shelf button here is a PLAIN text button, not a
+    `web_app` KeyboardButton. An earlier version attached web_app directly
+    to this reply-keyboard button, which is the officially-documented way
+    to launch a Mini App -- but confirmed in production (Android, Telegram
+    9.6) that Telegram sends an empty initData for a web_app launched from
+    a custom reply keyboard, while a web_app button attached to an actual
+    message (an InlineKeyboardButton) works correctly. Tapping this button
+    now just triggers open_book_shelf() in bot.py, which sends a fresh
+    message with a real inline web_app button -- see that handler for the
+    actual Mini App launch. The bot's Chat Menu Button (set once at startup
+    via bot.set_chat_menu_button, also a web_app launch) is the other,
+    redundant, confirmed-working entry point.
     """
     rows = [
         [KeyboardButton(text=BTN_DOSE), KeyboardButton(text=BTN_CALC)],
@@ -39,7 +44,7 @@ def main_menu_kb(webapp_url: str = "") -> ReplyKeyboardMarkup:
         [KeyboardButton(text=BTN_UPLOAD), KeyboardButton(text=BTN_HELP)],
     ]
     if webapp_url:
-        rows.append([KeyboardButton(text=BTN_SHELF, web_app=WebAppInfo(url=webapp_url))])
+        rows.append([KeyboardButton(text=BTN_SHELF)])
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True, is_persistent=True)
 
 

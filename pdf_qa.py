@@ -192,11 +192,26 @@ async def search_index(meta: dict, vectors: np.ndarray, question: str, top_k: in
     return results
 
 
-async def answer_question(book_id: str, question: str) -> dict:
+MAX_HISTORY_TURNS = 6  # older turns are dropped rather than growing the prompt without bound
+
+
+async def answer_question(book_id: str, question: str, history: list[dict] | None = None) -> dict:
     """
     Full Q&A flow for a previously-indexed book: retrieve relevant passages,
-    ask Claude to answer using ONLY those passages, citing page numbers.
-    Returns {"answer": str, "sources": [{"page": int, "text": str}, ...]}.
+    ask Claude to answer using ONLY those passages, with numbered inline
+    citations tied to the returned `sources` list.
+
+    history, if given, is prior turns for THIS same book/session as
+    [{"question": str, "answer": str}, ...], oldest first. When present,
+    it's replayed as real multi-turn messages to Claude so the answer can
+    flow naturally from earlier turns ("continuous" mode in the mini app)
+    instead of treating every question in isolation. When omitted/empty,
+    behavior is identical to the original single-shot Q&A.
+
+    Returns {"answer": str, "sources": [{"n": int, "page": int, "text": str}, ...]}
+    where `answer` contains bracketed citation markers like "[1]" that refer
+    to `sources` by their "n" field (NOT by page number, since one page can
+    back multiple excerpts and one excerpt is only ever excerpt N once).
     Raises IndexingError if the book hasn't been indexed.
     """
     loaded = load_index(book_id)
@@ -211,20 +226,38 @@ async def answer_question(book_id: str, question: str) -> dict:
     if not matches:
         raise IndexingError("This book's index is empty -- try re-indexing it.")
 
-    context = "\n\n".join(f"[Page {m['page']}]\n{m['text']}" for m in matches)
+    numbered = list(enumerate(matches, start=1))
+    context = "\n\n".join(f"[{n}] (Page {m['page']})\n{m['text']}" for n, m in numbered)
+
+    history = (history or [])[-MAX_HISTORY_TURNS:]
 
     system_prompt = (
-        f"You are answering a question about the book '{meta['title']}' using "
-        "ONLY the excerpts provided below. Each excerpt is labeled with its "
-        "page number. Follow these rules strictly:\n"
-        "1. Answer using only information in the excerpts -- do not use "
-        "outside knowledge, even if you know the topic.\n"
-        "2. Cite the page number for every claim, like this: (p. 42).\n"
-        "3. If the excerpts don't contain enough information to answer, say "
-        "so clearly instead of guessing.\n"
-        "4. Be concise and direct -- this will be read on a phone screen.\n\n"
-        f"EXCERPTS:\n{context}"
+        f"You are answering questions about the book '{meta['title']}' using ONLY the numbered "
+        "excerpts below. Follow these rules strictly:\n"
+        "1. Answer using only information in the excerpts -- do not use outside knowledge, even if "
+        "you know the topic.\n"
+        "2. Every factual claim must end with a bracketed citation number matching the excerpt it "
+        "came from, like this: \"The heart has four chambers [1].\" If multiple excerpts support one "
+        "claim, cite all of them: \"...four chambers [1][2].\" Cite the excerpt NUMBER shown below, "
+        "never the page number.\n"
+        "3. If the excerpts don't contain enough information to answer, say so clearly instead of "
+        "guessing.\n"
+        "4. Be concise and direct -- this will be read on a phone screen.\n"
+        + (
+            "5. This is one turn in an ongoing conversation about this book -- answer the CURRENT "
+            "question so it flows naturally from the earlier turns shown (don't re-explain things "
+            "already covered), but the citation numbers below apply ONLY to the current question's "
+            "excerpts. Do not reuse or reference citation numbers from earlier turns.\n"
+            if history else ""
+        )
+        + f"\nEXCERPTS:\n{context}"
     )
+
+    messages = []
+    for turn in history:
+        messages.append({"role": "user", "content": turn["question"]})
+        messages.append({"role": "assistant", "content": turn["answer"]})
+    messages.append({"role": "user", "content": question})
 
     try:
         response = await asyncio.to_thread(
@@ -232,7 +265,7 @@ async def answer_question(book_id: str, question: str) -> dict:
             model=CLAUDE_MODEL,
             max_tokens=1500,
             system=system_prompt,
-            messages=[{"role": "user", "content": question}],
+            messages=messages,
         )
     except Exception as e:
         raise IndexingError(f"Claude request failed: {e}")
@@ -241,5 +274,5 @@ async def answer_question(book_id: str, question: str) -> dict:
 
     return {
         "answer": answer_text,
-        "sources": [{"page": m["page"], "text": m["text"][:150]} for m in matches],
+        "sources": [{"n": n, "page": m["page"], "text": m["text"][:150]} for n, m in numbered],
     }
