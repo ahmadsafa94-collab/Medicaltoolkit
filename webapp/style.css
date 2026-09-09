@@ -39,36 +39,55 @@ body {
 .empty-state { text-align: center; padding: 60px 20px; }
 
 .shelf-grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 18px 12px;
-  padding: 8px 16px 24px;
+  padding: 10px 14px 30px;
+}
+
+/* Each shelf-row is one "shelf" of small book covers standing side by
+   side, closet-style; a shelf-ledge div (a wood plank) is inserted after
+   every row by app.js's renderShelf() so it always lines up with the
+   actual rendered row height, even when titles wrap to 1 vs 2 lines --
+   a pure-CSS repeating-background approach can't track variable row
+   heights reliably, this can. */
+.shelf-row {
+  display: flex;
+  gap: 14px;
+  padding: 6px 6px 12px;
+}
+.shelf-row .book-tile { flex: 1 1 0; min-width: 0; max-width: 76px; }
+
+.shelf-ledge {
+  height: 12px;
+  margin: 0 4px 14px;
+  border-radius: 2px;
+  background: linear-gradient(to bottom, var(--shelf-wood), var(--shelf-wood-dark));
+  box-shadow: 0 3px 6px rgba(0,0,0,0.3), inset 0 -3px 0 rgba(0,0,0,0.2), inset 0 1px 0 rgba(255,255,255,0.15);
 }
 
 .book-tile { display: flex; flex-direction: column; align-items: center; cursor: pointer; border: none; background: none; padding: 0; }
 .book-cover {
   width: 100%;
   aspect-ratio: 2/3;
-  border-radius: 4px 8px 8px 4px;
+  border-radius: 3px 6px 6px 3px;
   background: linear-gradient(135deg, var(--shelf-wood), var(--shelf-wood-dark));
-  box-shadow: -3px 0 0 rgba(0,0,0,0.15) inset, 0 3px 6px rgba(0,0,0,0.25);
+  box-shadow: -2px 0 0 rgba(0,0,0,0.15) inset, 0 2px 5px rgba(0,0,0,0.3);
   display: flex;
   align-items: center;
   justify-content: center;
   color: #fff;
-  font-size: 28px;
+  font-size: 18px;
   position: relative;
 }
 .book-cover .status-dot {
-  position: absolute; top: 6px; right: 6px;
-  width: 9px; height: 9px; border-radius: 50%;
+  position: absolute; top: 4px; right: 4px;
+  width: 7px; height: 7px; border-radius: 50%;
   background: var(--ok);
+  box-shadow: 0 0 0 1px rgba(255,255,255,0.6);
 }
 .book-title-label {
-  margin-top: 6px;
-  font-size: 12px;
+  margin-top: 5px;
+  font-size: 10.5px;
   text-align: center;
-  line-height: 1.25;
+  line-height: 1.2;
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -90,6 +109,21 @@ body {
   font-size: 28px;
   line-height: 1;
   box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+}
+
+/* ---------- Book detail header / edit name ---------- */
+
+.book-title-row { display: flex; align-items: center; gap: 8px; }
+.book-title-row h1 { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.icon-btn {
+  border: none; background: rgba(0,0,0,0.06); color: var(--text);
+  width: 32px; height: 32px; border-radius: 50%; font-size: 14px; flex-shrink: 0;
+}
+
+.name-editor { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+.name-editor input {
+  flex: 1; min-width: 120px; padding: 8px 10px; border-radius: 8px;
+  border: 1px solid rgba(0,0,0,0.15); font-size: 14px; color: var(--text); background: var(--secondary-bg);
 }
 
 /* ---------- Panels / buttons ---------- */
@@ -145,11 +179,25 @@ body {
 .diff-btn { flex: 1; padding: 10px; border-radius: 10px; border: 2px solid rgba(0,0,0,0.1); background: var(--secondary-bg); color: var(--text); font-size: 13px; }
 .diff-btn.selected { border-color: var(--button); color: var(--button); font-weight: 600; }
 
+.qa-mode-row { display: flex; gap: 8px; margin-bottom: 12px; }
+.qa-mode-btn { flex: 1; padding: 9px; border-radius: 10px; border: 2px solid rgba(0,0,0,0.1); background: var(--secondary-bg); color: var(--text); font-size: 12.5px; }
+.qa-mode-btn.selected { border-color: var(--button); color: var(--button); font-weight: 600; }
+.qa-mode-hint { font-size: 11px; color: var(--hint); margin: -6px 0 12px; }
+
 .qa-log { display: flex; flex-direction: column; gap: 10px; margin-bottom: 12px; }
-.qa-msg { padding: 10px 12px; border-radius: 10px; font-size: 14px; line-height: 1.4; }
+.qa-msg { padding: 10px 12px; border-radius: 10px; font-size: 14px; line-height: 1.5; max-width: 92%; }
 .qa-msg.q { background: var(--button); color: var(--button-text); align-self: flex-end; }
 .qa-msg.a { background: var(--secondary-bg); align-self: flex-start; }
-.qa-msg .sources { display: block; margin-top: 6px; font-size: 11px; opacity: 0.8; }
+.cite-marker {
+  display: inline-block; font-size: 10px; vertical-align: super; line-height: 1;
+  color: var(--link); font-weight: 700; margin: 0 1px; cursor: pointer;
+}
+.qa-sources {
+  display: block; margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(0,0,0,0.1);
+  font-size: 11.5px; opacity: 0.85;
+}
+.qa-sources .src-line { display: flex; gap: 4px; margin-top: 3px; }
+.qa-sources .src-line .n { font-weight: 700; flex-shrink: 0; }
 .qa-input-row { display: flex; gap: 8px; }
 .qa-input-row input { flex: 1; padding: 10px; border-radius: 10px; border: 1px solid rgba(0,0,0,0.15); font-size: 14px; }
 
@@ -170,6 +218,17 @@ body {
 
 .reader-topbar { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; }
 .pager-btn { border: none; background: var(--secondary-bg); color: var(--text); font-size: 22px; width: 40px; height: 40px; border-radius: 50%; }
+
+.reader-toolbar {
+  display: flex; align-items: center; gap: 6px; padding: 0 14px 8px;
+  overflow-x: auto; white-space: nowrap;
+}
+.tool-btn {
+  border: none; background: var(--secondary-bg); color: var(--text);
+  font-size: 13px; padding: 8px 12px; border-radius: 10px; flex-shrink: 0;
+}
+#reader-zoom-label { flex-shrink: 0; font-size: 12px; }
+
 #reader-canvas-wrap { display: flex; justify-content: center; padding: 8px; overflow: auto; }
 #reader-canvas { max-width: 100%; box-shadow: 0 2px 10px rgba(0,0,0,0.2); background: #fff; }
 

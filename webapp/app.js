@@ -101,6 +101,8 @@ function updateBackButton() {
 // Shelf
 // ---------------------------------------------------------------------
 
+const SHELF_COLS = 4;
+
 async function loadShelf() {
   const grid = document.getElementById("shelf-grid");
   const empty = document.getElementById("shelf-empty");
@@ -108,7 +110,7 @@ async function loadShelf() {
   try {
     const { books } = await api("/api/books");
     empty.hidden = books.length > 0;
-    books.forEach((book) => grid.appendChild(bookTile(book)));
+    renderShelf(grid, books);
   } catch (e) {
     // TEMPORARY diagnostics appended to the error itself -- this specific
     // failure (401 "missing sign-in data") has resisted two rounds of
@@ -119,6 +121,21 @@ async function loadShelf() {
       ? `tg=yes platform=${tg.platform} ver=${tg.version} initDataLen=${INIT_DATA.length} unsafeUserPresent=${!!(tg.initDataUnsafe && tg.initDataUnsafe.user)}`
       : "tg=no (window.Telegram.WebApp was never defined -- telegram-web-app.js did not load or this wasn't opened as a Web App)";
     alertMsg("Couldn't load your shelf: " + e.message + "\n\n[debug] " + diag);
+  }
+}
+
+// Builds the shelf as explicit rows of SHELF_COLS books, with a wood
+// "shelf-ledge" div after each row -- see style.css's .shelf-row/.shelf-ledge
+// comment for why this is done in JS rather than a CSS background trick.
+function renderShelf(grid, books) {
+  for (let i = 0; i < books.length; i += SHELF_COLS) {
+    const row = document.createElement("div");
+    row.className = "shelf-row";
+    books.slice(i, i + SHELF_COLS).forEach((book) => row.appendChild(bookTile(book)));
+    grid.appendChild(row);
+    const ledge = document.createElement("div");
+    ledge.className = "shelf-ledge";
+    grid.appendChild(ledge);
   }
 }
 
@@ -216,6 +233,7 @@ async function openBook(bookId) {
   renderBookHeader();
   document.getElementById("book-panel").hidden = true;
   document.getElementById("book-panel").innerHTML = "";
+  document.getElementById("book-name-editor").hidden = true;
   showView("view-book");
 }
 
@@ -239,6 +257,40 @@ function panel(html) {
   p.innerHTML = html;
   return p;
 }
+
+// ---------------------------------------------------------------------
+// Book detail: edit name
+// ---------------------------------------------------------------------
+
+document.getElementById("book-edit-name").addEventListener("click", () => {
+  document.getElementById("book-name-input").value = currentBook.title;
+  document.getElementById("book-name-editor").hidden = false;
+  document.getElementById("book-name-input").focus();
+});
+
+document.getElementById("book-name-cancel").addEventListener("click", () => {
+  document.getElementById("book-name-editor").hidden = true;
+});
+
+document.getElementById("book-name-save").addEventListener("click", async () => {
+  const newTitle = document.getElementById("book-name-input").value.trim();
+  if (!newTitle) {
+    alertMsg("Title can't be empty.");
+    return;
+  }
+  try {
+    currentBook = await api(`/api/books/${currentBook.book_id}/rename`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: newTitle }),
+    });
+  } catch (e) {
+    alertMsg("Couldn't rename this book: " + e.message);
+    return;
+  }
+  document.getElementById("book-name-editor").hidden = true;
+  renderBookHeader();
+});
 
 document.querySelectorAll(".action-btn").forEach((btn) => {
   btn.addEventListener("click", () => {
@@ -331,11 +383,18 @@ function renderChapterList() {
 // 2. Reader (pdf.js)
 // ---------------------------------------------------------------------
 
-let readerState = { pdf: null, pageNum: 1, rendering: false };
+// zoomFactor is a multiplier applied on top of the auto-fit-to-width scale
+// (1 = fit width, 1.4 = 40% zoomed in past fit-width, etc.) so zoom keeps
+// working sensibly across pages/devices with different fit-width scales.
+let readerState = { pdf: null, pageNum: 1, rendering: false, zoomFactor: 1 };
+const ZOOM_STEP = 0.2;
+const ZOOM_MIN = 0.5;
+const ZOOM_MAX = 3;
 
 async function openReader() {
   showView("view-reader");
   document.getElementById("reader-page-label").textContent = "Loading…";
+  document.getElementById("reader-goto-row").hidden = true;
   try {
     pdfjsLib.GlobalWorkerOptions.workerSrc =
       "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
@@ -344,7 +403,10 @@ async function openReader() {
       httpHeaders: { "X-Telegram-Init-Data": INIT_DATA },
     });
     readerState.pdf = await loadingTask.promise;
-    readerState.pageNum = 1;
+    // Resume from the bookmark if one is set, rather than always page 1.
+    readerState.pageNum = currentBook.bookmark_page || 1;
+    readerState.zoomFactor = 1;
+    updateZoomLabel();
     renderReaderPage();
   } catch (e) {
     alertMsg("Couldn't open the reader: " + e.message);
@@ -360,14 +422,25 @@ async function renderReaderPage() {
   const ctx = canvas.getContext("2d");
   const containerWidth = document.getElementById("reader-canvas-wrap").clientWidth - 16;
   const baseViewport = page.getViewport({ scale: 1 });
-  const scale = Math.max(0.5, containerWidth / baseViewport.width);
-  const viewport = page.getViewport({ scale });
+  const fitScale = Math.max(0.5, containerWidth / baseViewport.width);
+  const viewport = page.getViewport({ scale: fitScale * readerState.zoomFactor });
   canvas.width = viewport.width;
   canvas.height = viewport.height;
   await page.render({ canvasContext: ctx, viewport }).promise;
   document.getElementById("reader-page-label").textContent =
     `Page ${readerState.pageNum} / ${readerState.pdf.numPages}`;
+  updateBookmarkButton();
   readerState.rendering = false;
+}
+
+function updateZoomLabel() {
+  document.getElementById("reader-zoom-label").textContent = Math.round(readerState.zoomFactor * 100) + "%";
+}
+
+function updateBookmarkButton() {
+  const btn = document.getElementById("reader-bookmark");
+  const isBookmarked = currentBook.bookmark_page === readerState.pageNum;
+  btn.textContent = isBookmarked ? "🔖 Bookmarked (tap to remove)" : "🔖 Bookmark this page";
 }
 
 document.getElementById("reader-prev").addEventListener("click", () => {
@@ -379,13 +452,61 @@ document.getElementById("reader-next").addEventListener("click", () => {
     renderReaderPage();
   }
 });
-document.getElementById("reader-page-label").addEventListener("click", () => {
+
+document.getElementById("reader-zoom-in").addEventListener("click", () => {
+  readerState.zoomFactor = Math.min(ZOOM_MAX, +(readerState.zoomFactor + ZOOM_STEP).toFixed(2));
+  updateZoomLabel();
+  renderReaderPage();
+});
+document.getElementById("reader-zoom-out").addEventListener("click", () => {
+  readerState.zoomFactor = Math.max(ZOOM_MIN, +(readerState.zoomFactor - ZOOM_STEP).toFixed(2));
+  updateZoomLabel();
+  renderReaderPage();
+});
+
+document.getElementById("reader-goto").addEventListener("click", () => {
   if (!readerState.pdf) return;
-  const n = parseInt(window.prompt(`Go to page (1-${readerState.pdf.numPages})`), 10);
-  if (n && n >= 1 && n <= readerState.pdf.numPages) {
+  const row = document.getElementById("reader-goto-row");
+  const input = document.getElementById("reader-goto-input");
+  input.max = readerState.pdf.numPages;
+  input.placeholder = `Page 1-${readerState.pdf.numPages}`;
+  row.hidden = false;
+  input.focus();
+});
+document.getElementById("reader-goto-cancel").addEventListener("click", () => {
+  document.getElementById("reader-goto-row").hidden = true;
+});
+function jumpToPage() {
+  const input = document.getElementById("reader-goto-input");
+  const n = parseInt(input.value, 10);
+  if (readerState.pdf && n >= 1 && n <= readerState.pdf.numPages) {
     readerState.pageNum = n;
+    document.getElementById("reader-goto-row").hidden = true;
+    input.value = "";
     renderReaderPage();
+  } else {
+    alertMsg(`Enter a page between 1 and ${readerState.pdf ? readerState.pdf.numPages : "?"}.`);
   }
+}
+document.getElementById("reader-goto-go").addEventListener("click", jumpToPage);
+document.getElementById("reader-goto-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") jumpToPage();
+});
+
+document.getElementById("reader-bookmark").addEventListener("click", async () => {
+  const alreadyBookmarked = currentBook.bookmark_page === readerState.pageNum;
+  const newPage = alreadyBookmarked ? null : readerState.pageNum;
+  try {
+    currentBook = await api(`/api/books/${currentBook.book_id}/bookmark`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ page: newPage }),
+    });
+  } catch (e) {
+    alertMsg("Couldn't update the bookmark: " + e.message);
+    return;
+  }
+  updateBookmarkButton();
 });
 
 // ---------------------------------------------------------------------
@@ -449,9 +570,11 @@ async function runSummarize(body) {
 // ---------------------------------------------------------------------
 
 let qaHistory = [];
+let qaMode = "single"; // "single" | "conversational"
 
 function handleAskMenu() {
   qaHistory = [];
+  qaMode = "single";
   if (!currentBook.qa_indexed) {
     panel(`
       <p>This book isn't indexed for AI Q&A yet.</p>
@@ -490,6 +613,15 @@ async function startIndexing() {
 
 function renderAskUI() {
   panel(`
+    <div class="qa-mode-row">
+      <button class="qa-mode-btn ${qaMode === "single" ? "selected" : ""}" data-mode="single">💬 Single answers</button>
+      <button class="qa-mode-btn ${qaMode === "conversational" ? "selected" : ""}" data-mode="conversational">🔗 Conversational</button>
+    </div>
+    <p class="qa-mode-hint">${
+      qaMode === "conversational"
+        ? "Each answer can build on earlier ones in this chat."
+        : "Every question is answered on its own, with no memory of earlier ones."
+    }</p>
     <div id="qa-log" class="qa-log"></div>
     <div class="qa-input-row">
       <input id="qa-input" type="text" placeholder="Ask a question about this book…" />
@@ -501,39 +633,81 @@ function renderAskUI() {
   document.getElementById("qa-input").addEventListener("keydown", (e) => {
     if (e.key === "Enter") sendQuestion();
   });
+  document.querySelectorAll(".qa-mode-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      qaMode = btn.dataset.mode;
+      // Switching modes mid-conversation would mix "continuous" answers
+      // with a fresh no-memory mode confusingly, so start the thread over.
+      qaHistory = [];
+      renderAskUI();
+    });
+  });
+}
+
+// Turns literal "[1]", "[2]" markers Claude wrote inline into small
+// superscript citation numbers, and appends a numbered source list at the
+// bottom of the bubble -- exactly the footnote-style citation the mini
+// app's Ask AI panel is meant to show.
+function renderAnswerHtml(text, sources) {
+  const escaped = escapeHtml(text);
+  const withMarkers = escaped.replace(/\[(\d+)\]/g, (m, n) => `<span class="cite-marker" data-n="${n}">[${n}]</span>`);
+  if (!sources || !sources.length) return withMarkers;
+  const lines = sources
+    .map((s) => `<span class="src-line"><span class="n">[${s.n}]</span><span>p.${s.page} — ${escapeHtml(s.text)}</span></span>`)
+    .join("");
+  return `${withMarkers}<span class="qa-sources">${lines}</span>`;
 }
 
 function renderQaLog() {
   const log = document.getElementById("qa-log");
   if (!log) return;
   log.innerHTML = qaHistory
-    .map((m) =>
+    .map((m, i) =>
       m.role === "q"
         ? `<div class="qa-msg q">${escapeHtml(m.text)}</div>`
-        : `<div class="qa-msg a">${escapeHtml(m.text)}${
-            m.sources ? `<span class="sources">📄 Pages: ${m.sources.join(", ")}</span>` : ""
-          }</div>`
+        : `<div class="qa-msg a" data-msg-index="${i}">${renderAnswerHtml(m.text, m.sources)}</div>`
     )
     .join("");
   log.scrollTop = log.scrollHeight;
 }
+
+// Tapping a small citation number re-shows that excerpt. Delegated on the
+// static #view-book container (rather than #qa-log, which is rebuilt from
+// scratch by panel()/renderAskUI() and wouldn't keep a directly-attached
+// listener) since bubbles are re-rendered wholesale on every turn.
+document.getElementById("view-book").addEventListener("click", (e) => {
+  const marker = e.target.closest(".cite-marker");
+  if (!marker) return;
+  const bubble = marker.closest(".qa-msg");
+  const msg = qaHistory[parseInt(bubble.dataset.msgIndex, 10)];
+  const source = msg && msg.sources && msg.sources.find((s) => String(s.n) === marker.dataset.n);
+  if (source) alertMsg(`[${source.n}] Page ${source.page}:\n\n${source.text}`);
+});
 
 async function sendQuestion() {
   const input = document.getElementById("qa-input");
   const question = input.value.trim();
   if (!question) return;
   input.value = "";
+
   qaHistory.push({ role: "q", text: question });
   qaHistory.push({ role: "a", text: "…thinking…" });
   renderQaLog();
+
+  const priorTurns = [];
+  if (qaMode === "conversational") {
+    for (let i = 0; i < qaHistory.length - 2; i += 2) {
+      priorTurns.push({ question: qaHistory[i].text, answer: qaHistory[i + 1].text });
+    }
+  }
+
   try {
     const result = await api(`/api/books/${currentBook.book_id}/ask`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question }),
+      body: JSON.stringify({ question, history: priorTurns }),
     });
-    const pages = [...new Set((result.sources || []).map((s) => s.page))].sort((a, b) => a - b);
-    qaHistory[qaHistory.length - 1] = { role: "a", text: result.answer, sources: pages };
+    qaHistory[qaHistory.length - 1] = { role: "a", text: result.answer, sources: result.sources || [] };
   } catch (e) {
     qaHistory[qaHistory.length - 1] = { role: "a", text: "Error: " + e.message };
   }

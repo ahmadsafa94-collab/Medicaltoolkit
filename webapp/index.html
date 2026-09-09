@@ -36,7 +36,15 @@
   <!-- ============ BOOK DETAIL ============ -->
   <section id="view-book" class="view" hidden>
     <header class="topbar">
-      <h1 id="book-title">Book</h1>
+      <div class="book-title-row">
+        <h1 id="book-title">Book</h1>
+        <button id="book-edit-name" class="icon-btn" title="Edit name">✏️</button>
+      </div>
+      <div id="book-name-editor" class="name-editor" hidden>
+        <input id="book-name-input" type="text" maxlength="200" />
+        <button id="book-name-save" class="btn">Save</button>
+        <button id="book-name-cancel" class="btn secondary">Cancel</button>
+      </div>
       <p id="book-meta" class="muted"></p>
     </header>
     <div class="action-grid">
@@ -67,6 +75,18 @@
       <span id="reader-page-label">Page 1</span>
       <button id="reader-next" class="pager-btn">›</button>
     </header>
+    <div class="reader-toolbar">
+      <button id="reader-zoom-out" class="tool-btn" title="Zoom out">−</button>
+      <span id="reader-zoom-label" class="muted">100%</span>
+      <button id="reader-zoom-in" class="tool-btn" title="Zoom in">+</button>
+      <button id="reader-goto" class="tool-btn" title="Jump to page">🔢 Go to page</button>
+      <button id="reader-bookmark" class="tool-btn" title="Bookmark this page">🔖 Bookmark</button>
+    </div>
+    <div id="reader-goto-row" class="name-editor" hidden>
+      <input id="reader-goto-input" type="number" min="1" placeholder="Page number" />
+      <button id="reader-goto-go" class="btn">Go</button>
+      <button id="reader-goto-cancel" class="btn secondary">Cancel</button>
+    </div>
     <div id="reader-canvas-wrap">
       <canvas id="reader-canvas"></canvas>
     </div>
