@@ -110,7 +110,15 @@ async function loadShelf() {
     empty.hidden = books.length > 0;
     books.forEach((book) => grid.appendChild(bookTile(book)));
   } catch (e) {
-    alertMsg("Couldn't load your shelf: " + e.message);
+    // TEMPORARY diagnostics appended to the error itself -- this specific
+    // failure (401 "missing sign-in data") has resisted two rounds of
+    // guessing based on symptoms alone, so instead of shipping a third
+    // blind fix, surface exactly what the Telegram JS bridge looked like
+    // on the device that hit it. Safe to remove once this is root-caused.
+    const diag = tg
+      ? `tg=yes platform=${tg.platform} ver=${tg.version} initDataLen=${INIT_DATA.length} unsafeUserPresent=${!!(tg.initDataUnsafe && tg.initDataUnsafe.user)}`
+      : "tg=no (window.Telegram.WebApp was never defined -- telegram-web-app.js did not load or this wasn't opened as a Web App)";
+    alertMsg("Couldn't load your shelf: " + e.message + "\n\n[debug] " + diag);
   }
 }
 
