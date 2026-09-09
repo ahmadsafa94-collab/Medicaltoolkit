@@ -77,6 +77,7 @@ def add_book(user_id: int, title: str, pdf_path: str, page_count: int, source: s
         "qa_indexed": False,
         "num_chunks": 0,
         "bookmark_page": None,  # last page the user bookmarked in the reader, 1-indexed
+        "cover_color": None,    # user-chosen hex color ("#rrggbb") for the shelf cover, or None for the default
     }
     _save(user_id, registry)
     return book_id
@@ -124,6 +125,11 @@ def rename_book(user_id: int, book_id: str, new_title: str) -> bool:
 def set_bookmark(user_id: int, book_id: str, page: int | None) -> bool:
     """page=None clears the bookmark."""
     return _update(user_id, book_id, bookmark_page=page)
+
+
+def set_cover_color(user_id: int, book_id: str, color: str | None) -> bool:
+    """color=None resets the cover to the default wood-gradient look."""
+    return _update(user_id, book_id, cover_color=color)
 
 
 def remove_book(user_id: int, book_id: str, delete_file: bool = False) -> bool:

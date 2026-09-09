@@ -30,6 +30,7 @@ holding one HTTP request open for however long a multi-minute job takes.
 import asyncio
 import logging
 import os
+import re
 import time
 
 from starlette.applications import Starlette
@@ -184,6 +185,37 @@ async def rename_book(request: Request):
 
     library.rename_book(user["id"], book_id, new_title)
     return JSONResponse(_public_book(book_id, library.get_book(user["id"], book_id)))
+
+
+_VALID_HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
+
+
+async def set_cover_color(request: Request):
+    user = require_user(request)
+    book_id = request.path_params["book_id"]
+    _book_or_404(user["id"], book_id)
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise ApiError(status_code=400, detail="Invalid JSON body.")
+
+    color = body.get("color")
+    if color is not None and not _VALID_HEX_COLOR.match(color):
+        raise ApiError(status_code=400, detail="Color must be a hex value like '#8a5a3c', or null to reset.")
+
+    library.set_cover_color(user["id"], book_id, color)
+    return JSONResponse(_public_book(book_id, library.get_book(user["id"], book_id)))
+
+
+async def delete_book(request: Request):
+    user = require_user(request)
+    book_id = request.path_params["book_id"]
+    book = _book_or_404(user["id"], book_id)
+
+    library.remove_book(user["id"], book_id, delete_file=True)
+    pdf_qa.delete_index(book_id)
+    return JSONResponse({"deleted": True, "book_id": book_id})
 
 
 async def set_bookmark(request: Request):
@@ -612,7 +644,9 @@ routes = [
     Route("/api/books", list_books, methods=["GET"]),
     Route("/api/upload", upload_book, methods=["POST"]),
     Route("/api/books/{book_id}", get_book, methods=["GET"]),
+    Route("/api/books/{book_id}", delete_book, methods=["DELETE"]),
     Route("/api/books/{book_id}/rename", rename_book, methods=["POST"]),
+    Route("/api/books/{book_id}/cover", set_cover_color, methods=["POST"]),
     Route("/api/books/{book_id}/bookmark", set_bookmark, methods=["POST"]),
     Route("/api/books/{book_id}/file", get_book_file, methods=["GET"]),
     Route("/api/books/{book_id}/jobs/{job_type}", get_job_status, methods=["GET"]),

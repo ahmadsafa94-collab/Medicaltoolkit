@@ -163,6 +163,16 @@ async def build_index(pdf_path: str, book_id: str, title: str, progress_cb=None)
     return len(chunks)
 
 
+def delete_index(book_id: str) -> None:
+    """Best-effort removal of a book's Q&A index files, if any exist (e.g. when the book itself is deleted)."""
+    meta_path, vectors_path = _index_paths(book_id)
+    for path in (meta_path, vectors_path):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
 def load_index(book_id: str) -> tuple[dict, np.ndarray] | None:
     meta_path, vectors_path = _index_paths(book_id)
     if not (os.path.exists(meta_path) and os.path.exists(vectors_path)):
