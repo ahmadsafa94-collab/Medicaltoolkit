@@ -582,10 +582,28 @@ async function renderReaderPage() {
   const containerWidth = document.getElementById("reader-canvas-wrap").clientWidth - 16;
   const baseViewport = page.getViewport({ scale: 1 });
   const fitScale = Math.max(0.5, containerWidth / baseViewport.width);
-  const viewport = page.getViewport({ scale: fitScale * readerState.zoomFactor });
-  canvas.width = viewport.width;
-  canvas.height = viewport.height;
-  await page.render({ canvasContext: ctx, viewport }).promise;
+  const displayScale = fitScale * readerState.zoomFactor;
+  // This is the CSS-pixel-sized viewport: used for the canvas's ON-SCREEN
+  // size and for the text layer, which is positioned in CSS pixels.
+  const viewport = page.getViewport({ scale: displayScale });
+
+  // A <canvas>'s backing-store resolution defaults to CSS pixels, capped
+  // at whatever size it's drawn on screen -- on a phone with a 2x-3x pixel
+  // density (nearly all of them), that means every page was rendered at
+  // roughly a THIRD of the screen's real resolution, which is exactly why
+  // text looked soft until zooming in forced more actual pixels to be
+  // drawn. Rendering at devicePixelRatio instead (capped at 2x, so a
+  // zoomed-in page on a high-DPI phone can't balloon into a huge canvas
+  // and risk running out of memory) fixes that at the default zoom level
+  // too, not just when zoomed in.
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const renderViewport = page.getViewport({ scale: displayScale * dpr });
+  canvas.width = Math.floor(renderViewport.width);
+  canvas.height = Math.floor(renderViewport.height);
+  canvas.style.width = `${viewport.width}px`;
+  canvas.style.height = `${viewport.height}px`;
+
+  await page.render({ canvasContext: ctx, viewport: renderViewport }).promise;
 
   // Text layer: an invisible but selectable text overlay positioned over
   // the canvas, matching every glyph pdf.js just drew as pixels -- this is
