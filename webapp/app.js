@@ -66,7 +66,7 @@ function alertMsg(msg) {
 // View switching
 // ---------------------------------------------------------------------
 
-const views = ["view-shelf", "view-upload", "view-book", "view-reader"];
+const views = ["view-shelf", "view-bookmarks", "view-upload", "view-book", "view-reader"];
 let viewStack = ["view-shelf"];
 
 function showView(id, { pushHistory = true } = {}) {
@@ -140,21 +140,214 @@ function renderShelf(grid, books) {
 }
 
 function bookTile(book) {
+  const wrap = document.createElement("div");
+  wrap.className = "book-tile-wrap";
+
   const btn = document.createElement("button");
   btn.className = "book-tile";
   const dot = book.qa_indexed ? '<span class="status-dot" title="Indexed for AI Q&A"></span>' : "";
+  const coverStyle = book.cover_color ? ` style="background:${book.cover_color}"` : "";
   btn.innerHTML = `
-    <div class="book-cover">📘${dot}</div>
+    <div class="book-cover"${coverStyle}>📘${dot}</div>
     <div class="book-title-label">${escapeHtml(book.title)}</div>
   `;
   btn.addEventListener("click", () => openBook(book.book_id));
-  return btn;
+
+  const menuBtn = document.createElement("button");
+  menuBtn.className = "book-menu-btn";
+  menuBtn.textContent = "⋮";
+  menuBtn.title = "Book options";
+  menuBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    openBookMenu(book);
+  });
+
+  wrap.appendChild(btn);
+  wrap.appendChild(menuBtn);
+  return wrap;
 }
 
 function escapeHtml(s) {
   const d = document.createElement("div");
   d.textContent = s;
   return d.innerHTML;
+}
+
+// ---------------------------------------------------------------------
+// Book ⋮ menu (rename / cover color / delete) -- a generic bottom action
+// sheet, reused for all three so there's one popup pattern in the app
+// rather than three different ones.
+// ---------------------------------------------------------------------
+
+const COVER_COLORS = ["#8a5a3c", "#c0392b", "#2678b6", "#2e8b57", "#8e44ad", "#e67e22", "#34495e", "#d4af37"];
+
+function showActionSheet(html) {
+  document.getElementById("action-sheet").innerHTML = html;
+  document.getElementById("action-sheet-backdrop").hidden = false;
+}
+
+function hideActionSheet() {
+  document.getElementById("action-sheet-backdrop").hidden = true;
+  document.getElementById("action-sheet").innerHTML = "";
+}
+
+document.getElementById("action-sheet-backdrop").addEventListener("click", (e) => {
+  if (e.target.id === "action-sheet-backdrop") hideActionSheet();
+});
+
+function openBookMenu(book) {
+  showActionSheet(`
+    <div class="sheet-title">${escapeHtml(book.title)}</div>
+    <button id="sheet-edit-name">✏️ Edit name</button>
+    <button id="sheet-change-cover">🎨 Change cover color</button>
+    <button id="sheet-delete" class="danger">🗑 Delete book</button>
+  `);
+  document.getElementById("sheet-edit-name").addEventListener("click", () => promptRenameFromShelf(book));
+  document.getElementById("sheet-change-cover").addEventListener("click", () => openCoverPicker(book));
+  document.getElementById("sheet-delete").addEventListener("click", () => confirmDeleteBook(book));
+}
+
+function promptRenameFromShelf(book) {
+  showActionSheet(`
+    <div class="sheet-title">Rename book</div>
+    <div class="name-editor" style="padding: 0 20px 18px;">
+      <input id="sheet-rename-input" type="text" maxlength="200" value="${escapeHtml(book.title)}" />
+      <button id="sheet-rename-save" class="btn">Save</button>
+    </div>
+  `);
+  const input = document.getElementById("sheet-rename-input");
+  input.focus();
+  input.select();
+  const save = async () => {
+    const newTitle = input.value.trim();
+    if (!newTitle) {
+      alertMsg("Title can't be empty.");
+      return;
+    }
+    try {
+      await api(`/api/books/${book.book_id}/rename`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: newTitle }),
+      });
+    } catch (e) {
+      alertMsg("Couldn't rename this book: " + e.message);
+      return;
+    }
+    hideActionSheet();
+    // Keep the open book detail view (if this is the currently-open book)
+    // in sync too, since renaming now happens from the shelf, not from
+    // inside the book itself.
+    if (currentBook && currentBook.book_id === book.book_id) {
+      currentBook.title = newTitle;
+      renderBookHeader();
+    }
+    loadShelf();
+  };
+  document.getElementById("sheet-rename-save").addEventListener("click", save);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") save();
+  });
+}
+
+function openCoverPicker(book) {
+  const swatches = COVER_COLORS
+    .map(
+      (c) =>
+        `<button class="color-swatch ${book.cover_color === c ? "selected" : ""}" data-color="${c}" style="background:${c}" title="${c}"></button>`
+    )
+    .join("");
+  showActionSheet(`
+    <div class="sheet-title">Cover color</div>
+    <div class="color-swatch-row">${swatches}</div>
+  `);
+  document.querySelectorAll(".color-swatch").forEach((sw) => {
+    sw.addEventListener("click", async () => {
+      try {
+        await api(`/api/books/${book.book_id}/cover`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ color: sw.dataset.color }),
+        });
+      } catch (e) {
+        alertMsg("Couldn't change the cover color: " + e.message);
+        return;
+      }
+      hideActionSheet();
+      loadShelf();
+    });
+  });
+}
+
+function confirmDeleteBook(book) {
+  const doDelete = async () => {
+    try {
+      await api(`/api/books/${book.book_id}`, { method: "DELETE" });
+    } catch (e) {
+      alertMsg("Couldn't delete this book: " + e.message);
+      return;
+    }
+    if (currentBook && currentBook.book_id === book.book_id) {
+      showView("view-shelf", { pushHistory: false });
+      viewStack = ["view-shelf"];
+    }
+    loadShelf();
+  };
+  const message = `Delete "${book.title}"? This can't be undone.`;
+  hideActionSheet();
+  if (tg && tg.showConfirm) {
+    tg.showConfirm(message, (ok) => {
+      if (ok) doDelete();
+    });
+  } else if (window.confirm(message)) {
+    doDelete();
+  }
+}
+
+// ---------------------------------------------------------------------
+// Bookmarks (main shelf page): one row per book that currently has a
+// bookmark set, tapping jumps straight into that book's reader at that
+// exact page.
+// ---------------------------------------------------------------------
+
+document.getElementById("btn-bookmarks").addEventListener("click", () => {
+  showView("view-bookmarks");
+  loadBookmarks();
+});
+
+async function loadBookmarks() {
+  const list = document.getElementById("bookmarks-list");
+  const empty = document.getElementById("bookmarks-empty");
+  list.innerHTML = "";
+  let books;
+  try {
+    ({ books } = await api("/api/books"));
+  } catch (e) {
+    alertMsg("Couldn't load bookmarks: " + e.message);
+    return;
+  }
+  const bookmarked = books.filter((b) => b.bookmark_page);
+  empty.hidden = bookmarked.length > 0;
+  bookmarked.forEach((book) => {
+    const row = document.createElement("button");
+    row.className = "bookmark-row";
+    const coverStyle = book.cover_color ? ` style="background:${book.cover_color}"` : "";
+    row.innerHTML = `
+      <span class="bookmark-cover"${coverStyle}>📘</span>
+      <span class="bookmark-info">
+        <span class="bookmark-title">${escapeHtml(book.title)}</span>
+        <span class="muted">Page ${book.bookmark_page}</span>
+      </span>
+      <span class="bookmark-chevron">›</span>
+    `;
+    row.addEventListener("click", () => openBookAtPage(book.book_id, book.bookmark_page));
+    list.appendChild(row);
+  });
+}
+
+async function openBookAtPage(bookId, page) {
+  await openBook(bookId);
+  await openReader(page);
 }
 
 document.getElementById("btn-add-book").addEventListener("click", () => {
@@ -233,7 +426,6 @@ async function openBook(bookId) {
   renderBookHeader();
   document.getElementById("book-panel").hidden = true;
   document.getElementById("book-panel").innerHTML = "";
-  document.getElementById("book-name-editor").hidden = true;
   showView("view-book");
 }
 
@@ -257,40 +449,6 @@ function panel(html) {
   p.innerHTML = html;
   return p;
 }
-
-// ---------------------------------------------------------------------
-// Book detail: edit name
-// ---------------------------------------------------------------------
-
-document.getElementById("book-edit-name").addEventListener("click", () => {
-  document.getElementById("book-name-input").value = currentBook.title;
-  document.getElementById("book-name-editor").hidden = false;
-  document.getElementById("book-name-input").focus();
-});
-
-document.getElementById("book-name-cancel").addEventListener("click", () => {
-  document.getElementById("book-name-editor").hidden = true;
-});
-
-document.getElementById("book-name-save").addEventListener("click", async () => {
-  const newTitle = document.getElementById("book-name-input").value.trim();
-  if (!newTitle) {
-    alertMsg("Title can't be empty.");
-    return;
-  }
-  try {
-    currentBook = await api(`/api/books/${currentBook.book_id}/rename`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title: newTitle }),
-    });
-  } catch (e) {
-    alertMsg("Couldn't rename this book: " + e.message);
-    return;
-  }
-  document.getElementById("book-name-editor").hidden = true;
-  renderBookHeader();
-});
 
 document.querySelectorAll(".action-btn").forEach((btn) => {
   btn.addEventListener("click", () => {
@@ -391,7 +549,7 @@ const ZOOM_STEP = 0.2;
 const ZOOM_MIN = 0.5;
 const ZOOM_MAX = 3;
 
-async function openReader() {
+async function openReader(targetPage) {
   showView("view-reader");
   document.getElementById("reader-page-label").textContent = "Loading…";
   document.getElementById("reader-goto-row").hidden = true;
@@ -403,8 +561,9 @@ async function openReader() {
       httpHeaders: { "X-Telegram-Init-Data": INIT_DATA },
     });
     readerState.pdf = await loadingTask.promise;
-    // Resume from the bookmark if one is set, rather than always page 1.
-    readerState.pageNum = currentBook.bookmark_page || 1;
+    // targetPage (from a bookmark tap) wins; otherwise resume from the
+    // book's own bookmark if one is set, otherwise page 1.
+    readerState.pageNum = targetPage || currentBook.bookmark_page || 1;
     readerState.zoomFactor = 1;
     updateZoomLabel();
     renderReaderPage();
@@ -427,6 +586,26 @@ async function renderReaderPage() {
   canvas.width = viewport.width;
   canvas.height = viewport.height;
   await page.render({ canvasContext: ctx, viewport }).promise;
+
+  // Text layer: an invisible but selectable text overlay positioned over
+  // the canvas, matching every glyph pdf.js just drew as pixels -- this is
+  // what makes "select and copy text from the book" actually work, since
+  // a <canvas> render on its own is just an image with no selectable text.
+  const textLayerDiv = document.getElementById("reader-text-layer");
+  textLayerDiv.innerHTML = "";
+  textLayerDiv.style.width = `${viewport.width}px`;
+  textLayerDiv.style.height = `${viewport.height}px`;
+  if (typeof pdfjsLib.renderTextLayer === "function") {
+    try {
+      const textContent = await page.getTextContent();
+      await pdfjsLib.renderTextLayer({ textContentSource: textContent, container: textLayerDiv, viewport }).promise;
+    } catch (_) {
+      // Non-fatal -- the page still displays fine, it just won't be
+      // selectable for this one page (e.g. a scanned/image-only page with
+      // no extractable text at all).
+    }
+  }
+
   document.getElementById("reader-page-label").textContent =
     `Page ${readerState.pageNum} / ${readerState.pdf.numPages}`;
   updateBookmarkButton();
@@ -463,6 +642,64 @@ document.getElementById("reader-zoom-out").addEventListener("click", () => {
   updateZoomLabel();
   renderReaderPage();
 });
+
+// ---------------------------------------------------------------------
+// Pinch to zoom (two-finger touch)
+// ---------------------------------------------------------------------
+//
+// Re-rendering the actual PDF page (page.render()) on every touchmove tick
+// would be far too slow to track a finger smoothly, so during the pinch we
+// just apply a cheap CSS transform: scale() to the already-rendered canvas
+// for instant visual feedback, and only do the real, crisp pdf.js
+// re-render once (on touchend) at the final zoom level.
+let pinchState = null;
+
+function touchDistance(touches) {
+  const dx = touches[0].clientX - touches[1].clientX;
+  const dy = touches[0].clientY - touches[1].clientY;
+  return Math.hypot(dx, dy);
+}
+
+const readerCanvasWrap = document.getElementById("reader-canvas-wrap");
+
+readerCanvasWrap.addEventListener(
+  "touchstart",
+  (e) => {
+    if (e.touches.length === 2) {
+      pinchState = { startDist: touchDistance(e.touches), startZoom: readerState.zoomFactor, liveZoom: null };
+    }
+  },
+  { passive: true }
+);
+
+readerCanvasWrap.addEventListener(
+  "touchmove",
+  (e) => {
+    if (!pinchState || e.touches.length !== 2) return;
+    e.preventDefault();
+    const dist = touchDistance(e.touches);
+    const liveZoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, pinchState.startZoom * (dist / pinchState.startDist)));
+    pinchState.liveZoom = liveZoom;
+    // Scale the whole page container (canvas + text layer together) so the
+    // selectable text overlay stays visually aligned with the image during
+    // the live gesture, not just the canvas underneath it.
+    document.getElementById("reader-page-container").style.transform = `scale(${liveZoom / readerState.zoomFactor})`;
+  },
+  { passive: false }
+);
+
+function endPinch() {
+  if (!pinchState) return;
+  document.getElementById("reader-page-container").style.transform = "";
+  if (pinchState.liveZoom != null && pinchState.liveZoom !== readerState.zoomFactor) {
+    readerState.zoomFactor = +pinchState.liveZoom.toFixed(2);
+    updateZoomLabel();
+    renderReaderPage();
+  }
+  pinchState = null;
+}
+readerCanvasWrap.addEventListener("touchend", endPinch);
+readerCanvasWrap.addEventListener("touchcancel", endPinch);
 
 document.getElementById("reader-goto").addEventListener("click", () => {
   if (!readerState.pdf) return;

@@ -12,8 +12,9 @@
 
   <!-- ============ SHELF (root) ============ -->
   <section id="view-shelf" class="view">
-    <header class="topbar">
+    <header class="topbar shelf-topbar">
       <h1>📚 Book Shelf</h1>
+      <button id="btn-bookmarks" class="link-btn">🔖 Bookmarks</button>
     </header>
     <div id="shelf-empty" class="empty-state" hidden>
       <p>No books yet.</p>
@@ -22,6 +23,16 @@
     <div id="shelf-grid" class="shelf-grid"></div>
     <button id="btn-add-book" class="fab" title="Add a book">+</button>
     <input id="file-input" type="file" accept="application/pdf" hidden />
+  </section>
+
+  <!-- ============ BOOKMARKS ============ -->
+  <section id="view-bookmarks" class="view" hidden>
+    <header class="topbar"><h1>🔖 Bookmarks</h1></header>
+    <div id="bookmarks-empty" class="empty-state" hidden>
+      <p>No bookmarks yet.</p>
+      <p class="muted">Open a book's reader and tap 🔖 Bookmark this page.</p>
+    </div>
+    <div id="bookmarks-list" class="bookmarks-list"></div>
   </section>
 
   <!-- ============ UPLOAD PROGRESS ============ -->
@@ -36,15 +47,7 @@
   <!-- ============ BOOK DETAIL ============ -->
   <section id="view-book" class="view" hidden>
     <header class="topbar">
-      <div class="book-title-row">
-        <h1 id="book-title">Book</h1>
-        <button id="book-edit-name" class="icon-btn" title="Edit name">✏️</button>
-      </div>
-      <div id="book-name-editor" class="name-editor" hidden>
-        <input id="book-name-input" type="text" maxlength="200" />
-        <button id="book-name-save" class="btn">Save</button>
-        <button id="book-name-cancel" class="btn secondary">Cancel</button>
-      </div>
+      <h1 id="book-title">Book</h1>
       <p id="book-meta" class="muted"></p>
     </header>
     <div class="action-grid">
@@ -88,9 +91,17 @@
       <button id="reader-goto-cancel" class="btn secondary">Cancel</button>
     </div>
     <div id="reader-canvas-wrap">
-      <canvas id="reader-canvas"></canvas>
+      <div id="reader-page-container">
+        <canvas id="reader-canvas"></canvas>
+        <div id="reader-text-layer" class="textLayer"></div>
+      </div>
     </div>
   </section>
+
+  <!-- ============ ACTION SHEET (book ⋮ menu, cover picker, shelf rename) ============ -->
+  <div id="action-sheet-backdrop" class="sheet-backdrop" hidden>
+    <div id="action-sheet" class="action-sheet"></div>
+  </div>
 
   <script src="app.js"></script>
 </body>

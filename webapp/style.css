@@ -34,6 +34,9 @@ body {
 .topbar h1 { margin: 0; font-size: 20px; }
 .muted { color: var(--hint); font-size: 13px; margin: 4px 0 0; }
 
+.topbar.shelf-topbar { display: flex; align-items: center; justify-content: space-between; }
+.link-btn { border: none; background: rgba(0,0,0,0.06); color: var(--text); padding: 8px 12px; border-radius: 10px; font-size: 13px; flex-shrink: 0; }
+
 /* ---------- Shelf ---------- */
 
 .empty-state { text-align: center; padding: 60px 20px; }
@@ -53,7 +56,7 @@ body {
   gap: 14px;
   padding: 6px 6px 12px;
 }
-.shelf-row .book-tile { flex: 1 1 0; min-width: 0; max-width: 76px; }
+.shelf-row .book-tile-wrap { flex: 1 1 0; min-width: 0; max-width: 76px; position: relative; }
 
 .shelf-ledge {
   height: 12px;
@@ -63,7 +66,13 @@ body {
   box-shadow: 0 3px 6px rgba(0,0,0,0.3), inset 0 -3px 0 rgba(0,0,0,0.2), inset 0 1px 0 rgba(255,255,255,0.15);
 }
 
-.book-tile { display: flex; flex-direction: column; align-items: center; cursor: pointer; border: none; background: none; padding: 0; }
+.book-tile { display: flex; flex-direction: column; align-items: center; cursor: pointer; border: none; background: none; padding: 0; width: 100%; }
+.book-menu-btn {
+  position: absolute; top: -4px; right: 4px; z-index: 3;
+  width: 22px; height: 22px; border-radius: 50%; border: none;
+  background: rgba(0,0,0,0.55); color: #fff; font-size: 13px; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+}
 .book-cover {
   width: 100%;
   aspect-ratio: 2/3;
@@ -111,20 +120,55 @@ body {
   box-shadow: 0 4px 12px rgba(0,0,0,0.3);
 }
 
-/* ---------- Book detail header / edit name ---------- */
-
-.book-title-row { display: flex; align-items: center; gap: 8px; }
-.book-title-row h1 { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.icon-btn {
-  border: none; background: rgba(0,0,0,0.06); color: var(--text);
-  width: 32px; height: 32px; border-radius: 50%; font-size: 14px; flex-shrink: 0;
-}
+/* ---------- Reusable small inline text-entry row (reader "jump to page",
+   the shelf's rename-from-⋮-menu form) ---------- */
 
 .name-editor { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
 .name-editor input {
   flex: 1; min-width: 120px; padding: 8px 10px; border-radius: 8px;
   border: 1px solid rgba(0,0,0,0.15); font-size: 14px; color: var(--text); background: var(--secondary-bg);
 }
+
+/* ---------- Action sheet (⋮ book menu: rename / cover color / delete) ---------- */
+
+.sheet-backdrop {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.45); z-index: 50;
+  display: flex; align-items: flex-end; justify-content: center;
+}
+.action-sheet {
+  background: var(--secondary-bg); width: 100%; max-width: 480px;
+  border-radius: 16px 16px 0 0; padding: 6px 0 24px;
+}
+.action-sheet .sheet-title {
+  padding: 12px 20px 8px; font-size: 12px; color: var(--hint);
+  text-transform: uppercase; letter-spacing: 0.02em;
+}
+.action-sheet > button {
+  display: block; width: 100%; text-align: left; padding: 14px 20px;
+  border: none; background: none; color: var(--text); font-size: 15px;
+}
+.action-sheet > button.danger { color: var(--danger); }
+.action-sheet > button:not(:last-child) { border-bottom: 1px solid rgba(0,0,0,0.08); }
+
+.color-swatch-row { display: flex; flex-wrap: wrap; gap: 12px; padding: 4px 20px 18px; }
+.color-swatch { width: 36px; height: 36px; border-radius: 50%; border: 3px solid transparent; padding: 0; }
+.color-swatch.selected { border-color: var(--text); }
+
+/* ---------- Bookmarks list ---------- */
+
+.bookmarks-list { display: flex; flex-direction: column; gap: 8px; padding: 8px 16px 24px; }
+.bookmark-row {
+  display: flex; align-items: center; gap: 12px; padding: 10px 12px;
+  border: none; border-radius: 12px; background: var(--secondary-bg); color: var(--text); text-align: left; width: 100%;
+}
+.bookmark-cover {
+  width: 32px; height: 44px; border-radius: 3px 6px 6px 3px; flex-shrink: 0;
+  background: linear-gradient(135deg, var(--shelf-wood), var(--shelf-wood-dark));
+  display: flex; align-items: center; justify-content: center; color: #fff; font-size: 14px;
+}
+.bookmark-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.bookmark-title { font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bookmark-chevron { color: var(--hint); font-size: 18px; flex-shrink: 0; }
 
 /* ---------- Panels / buttons ---------- */
 
@@ -134,6 +178,11 @@ body {
   border-radius: 12px;
   padding: 16px;
 }
+/* Explicit, rather than relying on the default: some in-app WebViews
+   (Telegram's included) are inconsistent about honoring text selection
+   on tap-and-hold unless it's asked for directly. Applies to summaries,
+   chapter lists, quiz text, and Ask AI answers/citations. */
+.panel, .panel * { -webkit-user-select: text; user-select: text; }
 
 .progress-track { height: 8px; border-radius: 4px; background: rgba(0,0,0,0.08); overflow: hidden; }
 .progress-fill { height: 100%; background: var(--button); transition: width 0.2s; }
@@ -229,7 +278,36 @@ body {
 }
 #reader-zoom-label { flex-shrink: 0; font-size: 12px; }
 
-#reader-canvas-wrap { display: flex; justify-content: center; padding: 8px; overflow: auto; }
-#reader-canvas { max-width: 100%; box-shadow: 0 2px 10px rgba(0,0,0,0.2); background: #fff; }
+/* #reader-canvas-wrap scrolls (overflow:auto) rather than the canvas being
+   capped at max-width:100% -- that cap was the actual zoom bug: it let the
+   canvas's pixel buffer grow on zoom-in but forced its ON-SCREEN size back
+   down to the container width every time, so tapping +/- visibly did
+   nothing. Letting the page container overflow and scroll is what makes a
+   zoomed-in page actually look and behave zoomed in. */
+#reader-canvas-wrap { display: flex; justify-content: center; padding: 8px; overflow: auto; touch-action: pan-x pan-y; }
+#reader-page-container { position: relative; display: inline-block; }
+#reader-canvas { display: block; box-shadow: 0 2px 10px rgba(0,0,0,0.2); background: #fff; }
+
+/* Minimal pdf.js text-layer styles (hand-written subset of pdf.js's own
+   text_layer_builder.css, since we only load the core pdf.min.js bundle
+   from cdnjs, not the full pdf_viewer.css). Text spans are positioned
+   exactly over their matching glyphs on the canvas below and made
+   invisible (color: transparent) but selectable, so the page LOOKS like a
+   normal rendered image but its text can actually be selected and copied. */
+.textLayer {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  line-height: 1;
+  opacity: 1;
+}
+.textLayer span, .textLayer br {
+  color: transparent;
+  position: absolute;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0% 0%;
+}
+.textLayer ::selection { background: rgba(38, 120, 182, 0.35); }
 
 .spinner-line { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--hint); }
