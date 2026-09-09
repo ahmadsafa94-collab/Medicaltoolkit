@@ -95,7 +95,19 @@ MAX_SHELF_UPLOAD_PAGES = 1500
 # following the same "never let the user stare at a spinner forever"
 # principle as PDF_PROCESSING_TIMEOUT_SECONDS/QA_INDEXING_TIMEOUT_SECONDS.
 CHAPTER_DIVISION_TIMEOUT_SECONDS = 750
-BOOK_SUMMARY_TIMEOUT_SECONDS = 900  # whole-book summaries make one Claude call per chapter -- generous on purpose
-CHAPTER_SUMMARY_TIMEOUT_SECONDS = 120
+# Whole-book summaries now map-reduce EACH chapter that's long enough to need
+# it (see chapter_ai.summarize_chapter_full), not just make one call per
+# chapter -- raised from 900 to give a book with several long chapters
+# enough room to actually finish instead of timing out partway through.
+BOOK_SUMMARY_TIMEOUT_SECONDS = 1500
+# Raised from 120: a single chapter's summary can now be several sequential
+# Claude calls (map-reduce) for a long chapter instead of always being one
+# call, since it covers the WHOLE chapter rather than truncating it.
+CHAPTER_SUMMARY_TIMEOUT_SECONDS = 300
 QUIZ_GENERATION_TIMEOUT_SECONDS = 180
 ASK_TIMEOUT_SECONDS = 30
+# "Send chapter files to my chat" from the Book Shelf mini app: splits the
+# book into one PDF per chapter and sends each as a Telegram document, same
+# work bot.py's chat-upload flow does synchronously -- generous since it
+# scales with chapter count and each document send has its own network cost.
+SEND_CHAPTER_FILES_TIMEOUT_SECONDS = 300

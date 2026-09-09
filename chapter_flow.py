@@ -18,13 +18,53 @@ from aiogram.types import CallbackQuery
 
 import chapter_ai
 import session_cache
+from keyboards import chapter_ai_kb
 from telegram_helpers import send_long_text
 
 logger = logging.getLogger(__name__)
 
 router = Router(name="chapter_flow")
 
-_GENERATION_TIMEOUT_SECONDS = 60
+# Generous enough to cover a long chapter's map-reduce summary (several
+# sequential Claude calls -- see chapter_ai.summarize_chapter_full), not
+# just a single quick call the way this used to only need to.
+_GENERATION_TIMEOUT_SECONDS = 240
+
+
+async def build_chapter_ai_kb(chapter: dict, path: str):
+    """
+    Extracts this chapter's text from its just-created split PDF and caches
+    it (via session_cache) BEFORE bot.py's cleanup step deletes that file --
+    the button handlers below only ever read from this cache, never from
+    disk, since the file is gone by the time a button is actually tapped.
+    Returns the "Summarize"/"Quiz me" keyboard, or None if text extraction
+    fails (e.g. a scanned/image-only chapter) so that chapter's document
+    still sends successfully, just without those buttons.
+
+    Lives here (rather than in bot.py, where it used to) so that
+    webapp_api.py -- which cannot import bot.py, see bot_instance.py's
+    docstring -- can reuse it too, for the Book Shelf mini app's own
+    "send chapter files to my chat" feature.
+
+    Extracts with MAX_CHARS_HARD_CAP rather than the smaller
+    MAX_CHARS_PER_CHAPTER default: that's what lets the "Summarize" button
+    below cover the WHOLE chapter (via chapter_ai.summarize_chapter_full's
+    map-reduce) instead of silently stopping after the first ~60,000
+    characters the way it used to. The "Quiz me" button still trims back
+    down to MAX_CHARS_PER_CHAPTER itself before calling Claude -- a
+    multi-question quiz doesn't need the same fix, and keeping its prompt
+    small keeps its cost/latency exactly what it was before.
+    """
+    try:
+        text, hard_truncated = await asyncio.to_thread(
+            chapter_ai.extract_chapter_text, path, chapter_ai.MAX_CHARS_HARD_CAP
+        )
+    except chapter_ai.ChapterAIError:
+        logger.info("No extractable text for chapter '%s' -- sending without AI buttons", chapter.get("title"))
+        return None
+
+    cache_id = session_cache.put({"title": chapter["title"], "text": text, "hard_truncated": hard_truncated})
+    return chapter_ai_kb(cache_id)
 
 _AI_DISCLAIMER = (
     "\n\n⚠️ AI-generated study aid -- may contain errors or omissions. "
@@ -56,7 +96,7 @@ async def handle_chapter_summarize(callback: CallbackQuery):
 
     try:
         summary = await asyncio.wait_for(
-            asyncio.to_thread(chapter_ai.summarize_chapter, title, entry["text"], entry["truncated"]),
+            asyncio.to_thread(chapter_ai.summarize_chapter_full, title, entry["text"], entry["hard_truncated"]),
             timeout=_GENERATION_TIMEOUT_SECONDS,
         )
     except asyncio.TimeoutError:
@@ -86,9 +126,18 @@ async def handle_chapter_quiz(callback: CallbackQuery):
     await callback.answer("Generating quiz...")
     title = entry["title"]
 
+    # The cached text is extracted up to the generous MAX_CHARS_HARD_CAP (so
+    # "Summarize" above can cover the whole chapter) -- trim it back down to
+    # the smaller MAX_CHARS_PER_CHAPTER here so a multi-question quiz keeps
+    # its original, smaller cost/latency profile rather than inheriting
+    # summarize's much larger budget.
+    full_text = entry["text"]
+    quiz_text = full_text[: chapter_ai.MAX_CHARS_PER_CHAPTER]
+    quiz_truncated = len(full_text) > chapter_ai.MAX_CHARS_PER_CHAPTER
+
     try:
         quiz = await asyncio.wait_for(
-            asyncio.to_thread(chapter_ai.quiz_chapter, title, entry["text"], entry["truncated"]),
+            asyncio.to_thread(chapter_ai.quiz_chapter, title, quiz_text, quiz_truncated),
             timeout=_GENERATION_TIMEOUT_SECONDS,
         )
     except asyncio.TimeoutError:

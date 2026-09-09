@@ -31,8 +31,12 @@ import asyncio
 import logging
 import os
 import re
+import shutil
 import time
+import uuid
 
+from aiogram.exceptions import TelegramAPIError
+from aiogram.types import BufferedInputFile
 from starlette.applications import Starlette
 from starlette.exceptions import HTTPException
 from starlette.requests import Request
@@ -45,6 +49,8 @@ import library
 import pdf_export
 import pdf_qa
 import quiz_ai
+from bot_instance import bot as tg_bot
+from chapter_flow import build_chapter_ai_kb
 from config import (
     ANTHROPIC_API_KEY,  # noqa: F401 -- imported so a missing key fails fast at startup, same as bot.py
     ASK_TIMEOUT_SECONDS,
@@ -56,6 +62,7 @@ from config import (
     MAX_SHELF_UPLOAD_PAGES,
     QA_INDEXING_TIMEOUT_SECONDS,
     QUIZ_GENERATION_TIMEOUT_SECONDS,
+    SEND_CHAPTER_FILES_TIMEOUT_SECONDS,
 )
 from paths import safe_pdf_filename, unique_path, user_dir
 from pdf_processor import (
@@ -64,7 +71,9 @@ from pdf_processor import (
     count_pages,
     detect_chapters,
     extract_page_previews,
+    split_pdf_by_chapters,
 )
+from telegram_helpers import send_documents_by_chat_id
 from webapp_auth import AuthError, validate_init_data
 
 logger = logging.getLogger(__name__)
@@ -216,6 +225,8 @@ async def delete_book(request: Request):
 
     library.remove_book(user["id"], book_id, delete_file=True)
     pdf_qa.delete_index(book_id)
+    library.delete_qa_sessions_for_book(user["id"], book_id)
+    library.delete_quiz_attempts_for_book(user["id"], book_id)
     return JSONResponse({"deleted": True, "book_id": book_id})
 
 
@@ -440,6 +451,61 @@ async def divide_into_chapters(request: Request):
     return JSONResponse({"started": started})
 
 
+async def send_chapter_files(request: Request):
+    """
+    Physically splits the book into one PDF per chapter (pdf_processor's
+    split_pdf_by_chapters -- the same function bot.py's chat-upload flow
+    uses) and sends each one as a Telegram document straight to the user's
+    chat, exactly like a chat-based PDF upload does. The Book Shelf mini
+    app itself only ever kept chapter BOUNDARIES (library.set_chapters),
+    never split files, since the in-app reader/summarize/quiz features all
+    work fine against page ranges of the original PDF -- this endpoint is
+    the one place a mini-app user gets actual standalone per-chapter files
+    to keep or share, by asking for them explicitly.
+
+    Runs as a background job (like every other multi-minute mini-app
+    action) since splitting a long book AND sending many documents one at
+    a time (flood-control pacing included) can take a while.
+    """
+    user = require_user(request)
+    book_id = request.path_params["book_id"]
+    book = _book_or_404(user["id"], book_id)
+    chapters = book.get("chapters") or []
+    if not chapters:
+        raise ApiError(status_code=409, detail="Divide this book into chapters first.")
+
+    async def job():
+        output_dir = os.path.join(user_dir(user["id"]), "shelf_chapter_sends", book_id)
+        shutil.rmtree(output_dir, ignore_errors=True)
+        try:
+            try:
+                output_paths = await asyncio.to_thread(
+                    split_pdf_by_chapters, book["pdf_path"], chapters, output_dir
+                )
+            except Exception as e:
+                raise RuntimeError(f"Couldn't split this book into chapter files: {e}")
+
+            sent, total = await asyncio.wait_for(
+                send_documents_by_chat_id(
+                    tg_bot, user["id"], chapters, output_paths, get_reply_markup=build_chapter_ai_kb
+                ),
+                timeout=SEND_CHAPTER_FILES_TIMEOUT_SECONDS,
+            )
+            if sent == 0:
+                raise RuntimeError(
+                    "Couldn't send any chapter files to your chat -- make sure you've started a chat with the bot."
+                )
+            return {"sent": sent, "total": total}
+        finally:
+            # The files just delivered via Telegram serve no further purpose
+            # sitting on disk -- clean them up the same way bot.py's own
+            # chapter-send flow does, whether sending succeeded or not.
+            shutil.rmtree(output_dir, ignore_errors=True)
+
+    started = start_job(book_id, "send_chapters", job())
+    return JSONResponse({"started": started})
+
+
 # ---------------------------------------------------------------------------
 # 2. Read -- the reader itself is client-side pdf.js against /file; no
 #    separate endpoint needed.
@@ -475,14 +541,20 @@ async def summarize(request: Request):
 
         async def job():
             try:
-                text, truncated = await asyncio.to_thread(
+                # Extracted with MAX_CHARS_HARD_CAP (not the smaller
+                # MAX_CHARS_PER_CHAPTER) and summarized via
+                # summarize_chapter_full's map-reduce -- this is what makes a
+                # long chapter's summary actually cover the WHOLE chapter
+                # instead of only its first ~60,000 characters.
+                text, hard_truncated = await asyncio.to_thread(
                     chapter_ai.extract_text_for_page_range,
                     book["pdf_path"],
                     chapter["start_page"],
                     chapter["end_page"],
+                    chapter_ai.MAX_CHARS_HARD_CAP,
                 )
                 return await asyncio.wait_for(
-                    asyncio.to_thread(chapter_ai.summarize_chapter, chapter["title"], text, truncated),
+                    asyncio.to_thread(chapter_ai.summarize_chapter_full, chapter["title"], text, hard_truncated),
                     timeout=CHAPTER_SUMMARY_TIMEOUT_SECONDS,
                 )
             except chapter_ai.ChapterAIError as e:
@@ -555,6 +627,9 @@ async def ask_book(request: Request):
         raise ApiError(status_code=400, detail="Invalid JSON body.")
     question = (body.get("question") or "").strip()
     raw_history = body.get("history") or []
+    raw_session_id = body.get("session_id")
+    session_id = raw_session_id.strip() if isinstance(raw_session_id, str) and raw_session_id.strip() else None
+    mode = body.get("mode") if body.get("mode") in ("single", "conversational") else "single"
 
     if not book.get("qa_indexed"):
         raise ApiError(status_code=409, detail="Index this book for Q&A first (tap 'Ask questions using AI').")
@@ -589,14 +664,57 @@ async def ask_book(request: Request):
         logger.exception("Book Q&A failed for book_id=%s", book_id)
         raise ApiError(status_code=500, detail="Something went wrong answering that. Please try again.")
 
+    # session_id is a client-generated thread id (see app.js's genId()) --
+    # every question asked in the same Ask AI thread carries the same one,
+    # so the whole conversation lands in one history entry for "🕘 History"
+    # to reopen later, not just this single exchange. Persistence failing
+    # should never take down an otherwise-successful answer, so it's
+    # best-effort and logged rather than raised.
+    if session_id:
+        try:
+            library.append_qa_turn(
+                user["id"], book_id, session_id, mode, question, result["answer"], result.get("sources", [])
+            )
+        except Exception:
+            logger.exception("Failed to persist Q&A turn to history for book_id=%s", book_id)
+
     return JSONResponse(result)
+
+
+async def list_qa_sessions_endpoint(request: Request):
+    user = require_user(request)
+    book_id = request.path_params["book_id"]
+    _book_or_404(user["id"], book_id)
+    return JSONResponse({"sessions": library.list_qa_sessions(user["id"], book_id)})
+
+
+async def get_qa_session_endpoint(request: Request):
+    user = require_user(request)
+    book_id = request.path_params["book_id"]
+    _book_or_404(user["id"], book_id)
+    session_id = request.path_params["session_id"]
+    session = library.get_qa_session(user["id"], book_id, session_id)
+    if session is None:
+        raise ApiError(status_code=404, detail="Conversation not found.")
+    return JSONResponse(session)
 
 
 async def export_answer_pdf(request: Request):
     """
     Renders one already-answered Q&A exchange (question + Claude's answer +
-    its numbered sources) as a downloadable PDF, for the "Export as PDF"
-    button under each answer in the mini app's Ask AI panel.
+    its numbered sources) as a PDF and sends it as a Telegram document to
+    the user's own chat with the bot, for the "Export as PDF" button under
+    each answer in the mini app's Ask AI panel.
+
+    Sent via Telegram rather than streamed back as an HTTP response: this
+    runs inside Telegram's in-app WebView, which has no native "save file"
+    UI, and the standard web trick (an object URL + hidden <a download>)
+    doesn't reliably save anything a user can find afterwards there --
+    confirmed broken in practice. Every user of this mini app already has
+    an open chat with this exact bot (that's how they got here), so
+    delivering the file where Telegram itself already knows how to offer a
+    download is the reliable option, same reasoning as bot.py's own
+    chapter-file/drug-lookup PDF exports.
 
     Deliberately takes the question/answer/sources straight from the
     request body instead of re-running pdf_qa.answer_question() -- the
@@ -653,11 +771,20 @@ async def export_answer_pdf(request: Request):
         raise ApiError(status_code=500, detail="Couldn't build the PDF. Please try again.")
 
     filename = safe_pdf_filename((book.get("title") or "qa-answer") + " - Q&A")
-    return StreamingResponse(
-        iter([pdf_bytes]),
-        media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-    )
+    try:
+        await tg_bot.send_document(
+            chat_id=user["id"],
+            document=BufferedInputFile(pdf_bytes, filename=filename),
+            caption=f"📄 Q&A export -- {book.get('title') or 'your book'}",
+        )
+    except TelegramAPIError:
+        logger.exception("Failed to send Q&A export PDF to chat_id=%s", user["id"])
+        raise ApiError(
+            status_code=502,
+            detail="Couldn't send that to your Telegram chat. Make sure you've started a chat with the bot, then try again.",
+        )
+
+    return JSONResponse({"sent": True})
 
 
 # ---------------------------------------------------------------------------
@@ -703,6 +830,99 @@ async def create_quiz(request: Request):
     return JSONResponse({"started": started})
 
 
+async def save_quiz_attempt_endpoint(request: Request):
+    """
+    Records one finished (or ended-early) quiz attempt for "🕘 Quiz History"
+    to list and reopen later, called when the user taps "🏁 End Test".
+
+    The score is computed HERE from `questions` + `answers`, never trusted
+    from the client, even though this is a personal study history with no
+    competitive stakes -- it's just as easy to get right server-side, and
+    it means a frontend bug can never silently write a wrong score into a
+    student's own history.
+    """
+    user = require_user(request)
+    book_id = request.path_params["book_id"]
+    book = _book_or_404(user["id"], book_id)
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise ApiError(status_code=400, detail="Invalid JSON body.")
+
+    questions = body.get("questions")
+    answers = body.get("answers")
+    difficulty = body.get("difficulty")
+    chapter_titles = body.get("chapter_titles")
+
+    if not isinstance(questions, list) or not questions:
+        raise ApiError(status_code=400, detail="No questions to record.")
+    if not isinstance(answers, list) or len(answers) != len(questions):
+        raise ApiError(status_code=400, detail="answers must be a list the same length as questions.")
+    if not isinstance(chapter_titles, list):
+        chapter_titles = []
+    if difficulty not in quiz_ai.VALID_DIFFICULTIES:
+        difficulty = "medium"
+
+    validated_questions = []
+    correct_count = 0
+    for q, a in zip(questions, answers):
+        if not isinstance(q, dict) or "question" not in q or "options" not in q or "correct_index" not in q:
+            raise ApiError(status_code=400, detail="Malformed question entry.")
+        options = q["options"]
+        if not isinstance(options, list) or len(options) != 4:
+            raise ApiError(status_code=400, detail="Question does not have exactly 4 options.")
+        ci = q["correct_index"]
+        if isinstance(ci, bool) or not isinstance(ci, int) or not (0 <= ci < 4):
+            raise ApiError(status_code=400, detail="Invalid correct_index in question.")
+        # a is the user's chosen option index for this question, or null/None
+        # if they never answered it before ending the test early.
+        chosen = a if (isinstance(a, int) and not isinstance(a, bool) and 0 <= a < 4) else None
+        if chosen is not None and chosen == ci:
+            correct_count += 1
+        validated_questions.append(
+            {
+                "question": str(q["question"]),
+                "options": [str(o) for o in options],
+                "correct_index": ci,
+                "explanation": str(q.get("explanation", "")),
+            }
+        )
+
+    total = len(validated_questions)
+    attempt = {
+        "attempt_id": uuid.uuid4().hex[:12],
+        "created_at": time.time(),
+        "difficulty": difficulty,
+        "chapter_titles": [str(t) for t in chapter_titles][:50],
+        "questions": validated_questions,
+        "answers": [a if (isinstance(a, int) and not isinstance(a, bool) and 0 <= a < 4) else None for a in answers],
+        "correct_count": correct_count,
+        "total": total,
+        "percentage": round(100 * correct_count / total, 1) if total else 0,
+    }
+    library.save_quiz_attempt(user["id"], book_id, attempt)
+    return JSONResponse(attempt)
+
+
+async def list_quiz_attempts_endpoint(request: Request):
+    user = require_user(request)
+    book_id = request.path_params["book_id"]
+    _book_or_404(user["id"], book_id)
+    return JSONResponse({"attempts": library.list_quiz_attempts(user["id"], book_id)})
+
+
+async def get_quiz_attempt_endpoint(request: Request):
+    user = require_user(request)
+    book_id = request.path_params["book_id"]
+    _book_or_404(user["id"], book_id)
+    attempt_id = request.path_params["attempt_id"]
+    attempt = library.get_quiz_attempt(user["id"], book_id, attempt_id)
+    if attempt is None:
+        raise ApiError(status_code=404, detail="Quiz attempt not found.")
+    return JSONResponse(attempt)
+
+
 # ---------------------------------------------------------------------------
 # App wiring
 # ---------------------------------------------------------------------------
@@ -720,11 +940,17 @@ routes = [
     Route("/api/books/{book_id}/file", get_book_file, methods=["GET"]),
     Route("/api/books/{book_id}/jobs/{job_type}", get_job_status, methods=["GET"]),
     Route("/api/books/{book_id}/chapters", divide_into_chapters, methods=["POST"]),
+    Route("/api/books/{book_id}/chapters/send", send_chapter_files, methods=["POST"]),
     Route("/api/books/{book_id}/summarize", summarize, methods=["POST"]),
     Route("/api/books/{book_id}/index", index_book, methods=["POST"]),
     Route("/api/books/{book_id}/ask", ask_book, methods=["POST"]),
     Route("/api/books/{book_id}/ask/export", export_answer_pdf, methods=["POST"]),
+    Route("/api/books/{book_id}/qa/sessions", list_qa_sessions_endpoint, methods=["GET"]),
+    Route("/api/books/{book_id}/qa/sessions/{session_id}", get_qa_session_endpoint, methods=["GET"]),
     Route("/api/books/{book_id}/quiz", create_quiz, methods=["POST"]),
+    Route("/api/books/{book_id}/quiz/attempts", save_quiz_attempt_endpoint, methods=["POST"]),
+    Route("/api/books/{book_id}/quiz/attempts", list_quiz_attempts_endpoint, methods=["GET"]),
+    Route("/api/books/{book_id}/quiz/attempts/{attempt_id}", get_quiz_attempt_endpoint, methods=["GET"]),
     Mount("/webapp", app=StaticFiles(directory=_WEBAPP_DIR, html=True), name="webapp"),
 ]
 

@@ -23,11 +23,29 @@ from pdf_processor import client  # reuse the same Anthropic client instance, no
 
 logger = logging.getLogger(__name__)
 
-# Bounds how much chapter text gets sent to Claude per call -- keeps API cost
-# and latency predictable even for an unusually long chapter, at the cost of
-# the summary/quiz only covering the first ~15k tokens' worth of the chapter
-# if it's truncated (flagged to the user when that happens).
+# Bounds how much chapter text gets sent to Claude in ONE call. This used to
+# also be the hard ceiling on how much of a chapter a summary/quiz could ever
+# cover -- extract_chapter_text()/extract_text_for_page_range() would simply
+# drop everything past this many characters, which is why a long chapter's
+# summary used to come back flagged "based on its first portion only" even
+# though the whole chapter was right there. It's still used that way by
+# quiz_chapter() (a multi-question quiz doesn't need every last paragraph)
+# and by quiz_ai.py's multi-chapter context budget, but summarize_chapter_full()
+# below no longer treats it as a ceiling on the WHOLE chapter -- it's now just
+# the chunk size for a map-reduce over chapters longer than this, so nothing
+# gets silently dropped. See MAX_CHARS_HARD_CAP for the actual (much larger)
+# ceiling summaries use.
 MAX_CHARS_PER_CHAPTER = 60_000
+
+# The real ceiling for "the whole chapter," used by summarize_chapter_full()
+# (and summarize_whole_book()'s per-chapter step) instead of the smaller
+# MAX_CHARS_PER_CHAPTER. Real textbook chapters -- even long ones -- are
+# essentially never this long (at ~2,000 characters/page this is roughly 200
+# pages), so this is a safety net against a mis-detected "chapter" that's
+# actually most of the book turning one summary into an unbounded number of
+# sequential Claude calls, not a limit anyone should expect to hit in normal
+# use.
+MAX_CHARS_HARD_CAP = 400_000
 
 
 class ChapterAIError(Exception):
@@ -123,6 +141,69 @@ def summarize_chapter(title: str, text: str, truncated: bool) -> str:
     return summary + note
 
 
+def summarize_chapter_full(title: str, text: str, hard_truncated: bool = False) -> str:
+    """
+    Summarize an ENTIRE chapter regardless of length, via map-reduce when
+    it's longer than one Claude call can comfortably take:
+      1. Map: split into sequential MAX_CHARS_PER_CHAPTER-sized chunks,
+         extract each chunk's key concepts/terms/high-yield facts as notes.
+      2. Reduce: synthesize all those notes into ONE cohesive study summary
+         in the same 3-part structure summarize_chapter() produces.
+    A chapter that fits in a single call (the common case) just calls
+    summarize_chapter() directly -- no map-reduce overhead for a normal-
+    sized chapter. Same overall shape as summarize_whole_book(), one level
+    down (chunks of a chapter instead of chapters of a book).
+
+    `text` should already be extracted with a generous cap (see
+    MAX_CHARS_HARD_CAP) rather than the smaller MAX_CHARS_PER_CHAPTER --
+    this is what actually fixes the old "summary only covers the first
+    portion" behavior for a real textbook chapter. `hard_truncated` flags
+    the rare case where even THAT cap was hit (a mis-detected "chapter"
+    that's actually most of the book), in which case the summary still
+    only covers what was extracted, same as before but far less likely to
+    ever trigger.
+    Synchronous -- run via asyncio.to_thread from an async handler.
+    """
+    if len(text) <= MAX_CHARS_PER_CHAPTER:
+        summary = summarize_chapter(title, text, truncated=False)
+    else:
+        chunks = [text[i:i + MAX_CHARS_PER_CHAPTER] for i in range(0, len(text), MAX_CHARS_PER_CHAPTER)]
+        part_notes = []
+        for i, chunk in enumerate(chunks):
+            part_prompt = (
+                f"You are helping a medical student review part {i + 1} of {len(chunks)} (in sequence) of the "
+                f"textbook chapter '{title}'. Extract this portion's key concepts, terms, and high-yield facts "
+                "as concise plain-text bullet points (using '-', no markdown headers). Be faithful to the text "
+                "-- do not add outside facts not supported by it."
+            )
+            try:
+                part_notes.append(_call_claude(part_prompt, chunk, max_tokens=1200))
+            except Exception as e:
+                raise ChapterAIError(f"Claude request failed summarizing part {i + 1}/{len(chunks)}: {e}")
+
+        combined = "\n\n".join(f"[Part {i + 1} of {len(chunks)}]\n{notes}" for i, notes in enumerate(part_notes))
+        reduce_prompt = (
+            f"You are helping a medical student review the textbook chapter '{title}'. Below are notes "
+            "extracted from each sequential part of this (long) chapter. Synthesize them into ONE cohesive "
+            "study summary, structured as: 1) a one-paragraph overview, 2) key concepts/terms as short bullet "
+            "points (plain text bullets using '-', no markdown headers), 3) any especially high-yield facts, "
+            "numbers, or classifications worth memorizing. Merge duplicate or related points across parts "
+            "rather than just concatenating them. Keep the whole summary under ~700 words."
+        )
+        try:
+            summary = _call_claude(reduce_prompt, combined, max_tokens=2200)
+        except Exception as e:
+            raise ChapterAIError(f"Claude request failed combining chapter parts: {e}")
+
+    if hard_truncated:
+        summary += (
+            "\n\n_(Note: this chapter was extremely long (over "
+            f"{MAX_CHARS_HARD_CAP:,} characters) -- the summary covers roughly its first "
+            f"{MAX_CHARS_HARD_CAP:,} characters.)_"
+        )
+    return summary
+
+
 def quiz_chapter(title: str, text: str, truncated: bool, num_questions: int = 5) -> str:
     """Synchronous -- run via asyncio.to_thread from an async handler."""
     system_prompt = (
@@ -178,8 +259,15 @@ def summarize_whole_book(title: str, pdf_path: str, chapters: list[dict], progre
     chapter_summaries = []
     for i, chapter in enumerate(chapters):
         try:
-            text, truncated = extract_text_for_page_range(pdf_path, chapter["start_page"], chapter["end_page"])
-            summary = summarize_chapter(chapter["title"], text, truncated)
+            # Extracted with the generous MAX_CHARS_HARD_CAP (not the smaller
+            # MAX_CHARS_PER_CHAPTER) and summarized via summarize_chapter_full's
+            # map-reduce, same fix as the single-chapter summary path -- a
+            # long chapter inside a whole-book summary no longer gets quietly
+            # cut short before the rest of the book even gets synthesized in.
+            text, hard_truncated = extract_text_for_page_range(
+                pdf_path, chapter["start_page"], chapter["end_page"], MAX_CHARS_HARD_CAP
+            )
+            summary = summarize_chapter_full(chapter["title"], text, hard_truncated)
             chapter_summaries.append(f"## {chapter['title']}\n{summary}")
         except ChapterAIError as e:
             logger.warning("Skipping chapter '%s' in whole-book summary: %s", chapter["title"], e)

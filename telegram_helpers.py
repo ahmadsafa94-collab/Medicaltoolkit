@@ -10,6 +10,7 @@ route-registration modules.
 import asyncio
 import logging
 
+from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter, TelegramAPIError
 from aiogram.types import Message, FSInputFile, BufferedInputFile
 
@@ -107,6 +108,55 @@ async def send_documents_safely(
                 # Covers things like "file too large" for a single oversized
                 # chapter -- log it and move on to the rest instead of
                 # aborting the whole delivery.
+                logger.exception("Failed to send chapter %d (%s)", idx, path)
+                break
+
+        if idx < len(output_paths) - 1:
+            await asyncio.sleep(0.5)  # stay well under flood-control thresholds for document sends
+
+    return sent, len(output_paths)
+
+
+async def send_documents_by_chat_id(
+    bot: Bot, chat_id: int, chapters: list[dict], output_paths: list[str], get_reply_markup=None
+) -> tuple[int, int]:
+    """
+    Same as send_documents_safely above, but for callers that only have a
+    `chat_id` and a Bot instance -- not an aiogram Message to call
+    `.answer_document()` on. This is what webapp_api.py's "send chapter
+    files to my chat" mini-app feature needs: it's an HTTP request handler,
+    not a Telegram update handler, so there's no incoming Message to reply
+    to, only the user's own Telegram id (which IS their private-chat chat_id).
+
+    Kept as a near-duplicate of send_documents_safely rather than a shared
+    helper underneath both -- the two entry points (`message.answer_document`
+    vs `bot.send_document(chat_id=...)`) don't share a common call signature
+    worth abstracting over, and this keeps each version simple to read on
+    its own.
+    """
+    sent = 0
+    for idx, (chapter, path) in enumerate(zip(chapters, output_paths)):
+        caption = f"{chapter['title']} (from page {chapter['start_page']})"
+
+        reply_markup = None
+        if get_reply_markup is not None:
+            try:
+                reply_markup = await get_reply_markup(chapter, path)
+            except Exception:
+                logger.exception("Failed to build reply_markup for chapter %d (%s)", idx, path)
+
+        for _retry in range(3):
+            try:
+                await bot.send_document(
+                    chat_id=chat_id, document=FSInputFile(path), caption=caption[:1024], reply_markup=reply_markup
+                )
+                sent += 1
+                break
+            except TelegramRetryAfter as e:
+                logger.warning("Flood control hit sending chapter %d, waiting %s seconds", idx, e.retry_after)
+                await asyncio.sleep(e.retry_after + 0.5)
+                continue
+            except TelegramAPIError:
                 logger.exception("Failed to send chapter %d (%s)", idx, path)
                 break
 

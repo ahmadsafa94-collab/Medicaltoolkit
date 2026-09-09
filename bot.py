@@ -16,7 +16,7 @@ import re
 import shutil
 
 import uvicorn
-from aiogram import Bot, Dispatcher, F
+from aiogram import Dispatcher, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.exceptions import TelegramBadRequest, TelegramAPIError
@@ -35,7 +35,6 @@ from aiogram.types import (
 )
 
 from config import (
-    TELEGRAM_BOT_TOKEN,
     STORAGE_DIR,
     MAX_UPLOAD_BYTES,
     PDF_PROCESSING_TIMEOUT_SECONDS,
@@ -59,7 +58,6 @@ from keyboards import (
     drug_search_inline_kb,
     drug_sections_kb,
     recent_list_kb,
-    chapter_ai_kb,
     make_searchable_kb,
     BTN_DOSE,
     BTN_UPLOAD,
@@ -73,20 +71,19 @@ from telegram_helpers import send_long_text, send_documents_safely, send_table_e
 from renal_flow import register_renal_handlers
 from calc_flow import register_calc_handlers, cmd_calculators
 from interaction_flow import register_interaction_handlers, cmd_interactions
-from chapter_flow import register_chapter_handlers
+from chapter_flow import register_chapter_handlers, build_chapter_ai_kb
 from book_qa_flow import register_book_qa_handlers, show_book_picker
-import chapter_ai
 import glossary
 import library
 import pdf_export
 import session_cache
 import user_history
+from bot_instance import bot
 from webapp_api import app as webapp_app
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
 
 # The "Calculate dose by renal function" conversation (multi-step eGFR/CrCl
@@ -599,26 +596,6 @@ async def handle_section_tap(callback: CallbackQuery):
         await send_table_entries(callback.message, drug_name, table_entries)
 
 
-async def _build_chapter_ai_kb(chapter: dict, path: str):
-    """
-    Extracts this chapter's text from its just-created split PDF and caches
-    it (via session_cache) BEFORE bot.py's cleanup step deletes that file --
-    chapter_flow.py's button handlers only ever read from this cache, never
-    from disk, since the file is gone by the time a button is actually
-    tapped. Returns the "Summarize"/"Quiz me" keyboard, or None if text
-    extraction fails (e.g. a scanned/image-only chapter) so that chapter's
-    document still sends successfully, just without those buttons.
-    """
-    try:
-        text, truncated = await asyncio.to_thread(chapter_ai.extract_chapter_text, path)
-    except chapter_ai.ChapterAIError:
-        logger.info("No extractable text for chapter '%s' -- sending without AI buttons", chapter.get("title"))
-        return None
-
-    cache_id = session_cache.put({"title": chapter["title"], "text": text, "truncated": truncated})
-    return chapter_ai_kb(cache_id)
-
-
 @dp.message(F.document)
 async def handle_pdf_upload(message: Message):
     """
@@ -742,7 +719,7 @@ async def handle_pdf_upload(message: Message):
         )
 
         sent, total = await send_documents_safely(
-            message, chapters, output_paths, get_reply_markup=_build_chapter_ai_kb
+            message, chapters, output_paths, get_reply_markup=build_chapter_ai_kb
         )
 
         if sent < total:
