@@ -11,7 +11,33 @@ if (tg) {
 // a quick look) initData will be empty and every API call will get a clean
 // 401 from webapp_auth -- that's correct: this app only works signed-in
 // through Telegram.
-const INIT_DATA = tg ? tg.initData : "";
+//
+// On some Telegram clients (observed on Telegram Desktop and a few older
+// mobile WebView builds), `window.Telegram.WebApp` exists the instant this
+// script runs, but `tg.initData` itself is populated by the native app a
+// beat later rather than being ready synchronously. Reading it exactly
+// once at parse time can race that and capture "" permanently even for a
+// perfectly legitimate launch through the 📚 Book Shelf button -- which
+// surfaces as a confusing "Missing Telegram sign-in data" error on the
+// very first load. `let` (not `const`) plus a short retry below covers
+// that without changing behavior for clients that populate it instantly.
+let INIT_DATA = tg ? tg.initData : "";
+
+// Polls tg.initData for up to ~2s before giving up. Resolves immediately,
+// with no delay, if it was already present on the first read.
+function waitForInitData() {
+  return new Promise((resolve) => {
+    if (!tg || tg.initData) return resolve(tg ? tg.initData : "");
+    let tries = 0;
+    const timer = setInterval(() => {
+      tries++;
+      if (tg.initData || tries >= 20) {
+        clearInterval(timer);
+        resolve(tg.initData || "");
+      }
+    }, 100);
+  });
+}
 
 const MAX_QUIZ_QUESTIONS = 30;
 
@@ -628,4 +654,9 @@ function renderQuiz(questions) {
 // Init
 // ---------------------------------------------------------------------
 
-loadShelf();
+(async () => {
+  if (!INIT_DATA) {
+    INIT_DATA = await waitForInitData();
+  }
+  loadShelf();
+})();
