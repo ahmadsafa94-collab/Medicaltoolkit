@@ -529,11 +529,48 @@ function renderChapterList() {
     .join("");
   panel(`
     <ul class="chapter-list">${items}</ul>
+    <button class="btn" id="send-chapters">📤 Send chapter files to chat</button>
+    <p id="send-chapters-progress" class="muted"></p>
     <button class="btn secondary" id="redo-chapters">Re-divide</button>
   `);
   document.getElementById("redo-chapters").addEventListener("click", () => {
     currentBook.chapters_status = "none";
     handleChapters();
+  });
+  document.getElementById("send-chapters").addEventListener("click", sendChapterFilesToChat);
+}
+
+// Physically splits the book into one PDF per chapter and delivers each as
+// a Telegram document straight to the user's chat with the bot -- same as
+// what a chat-uploaded PDF gets automatically, just triggered on demand
+// from the Book Shelf mini app for a book that was uploaded/divided there.
+async function sendChapterFilesToChat() {
+  const btn = document.getElementById("send-chapters");
+  const progressEl = document.getElementById("send-chapters-progress");
+  btn.disabled = true;
+  progressEl.textContent = "Splitting and sending…";
+  try {
+    await api(`/api/books/${currentBook.book_id}/chapters/send`, { method: "POST" });
+  } catch (e) {
+    progressEl.textContent = e.message;
+    progressEl.classList.add("error-text");
+    btn.disabled = false;
+    return;
+  }
+  pollJob(currentBook.book_id, "send_chapters", {
+    onDone: (result) => {
+      progressEl.classList.remove("error-text");
+      progressEl.textContent =
+        result.sent === result.total
+          ? `Sent all ${result.total} chapter file(s) to your Telegram chat.`
+          : `Sent ${result.sent} of ${result.total} chapter file(s) -- the rest failed (they may be too large for Telegram).`;
+      btn.disabled = false;
+    },
+    onError: (msg) => {
+      progressEl.classList.add("error-text");
+      progressEl.textContent = msg;
+      btn.disabled = false;
+    },
   });
 }
 
@@ -826,10 +863,20 @@ async function runSummarize(body) {
 
 let qaHistory = [];
 let qaMode = "single"; // "single" | "conversational"
+let qaSessionId = null; // client-generated thread id -- every turn asked under it lands in the same history entry
+
+// crypto.randomUUID() isn't guaranteed in every WebView this mini app might
+// run in, so fall back to a plain timestamp+random id -- it only needs to be
+// unique enough to tell two conversation threads apart, not cryptographic.
+function genId() {
+  if (window.crypto && typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
 
 function handleAskMenu() {
   qaHistory = [];
   qaMode = "single";
+  qaSessionId = genId();
   if (!currentBook.qa_indexed) {
     panel(`
       <p>This book isn't indexed for AI Q&A yet.</p>
@@ -868,6 +915,10 @@ async function startIndexing() {
 
 function renderAskUI() {
   panel(`
+    <div class="qa-top-row">
+      <button class="link-btn" id="qa-new">🆕 New chat</button>
+      <button class="link-btn" id="qa-history">🕘 History</button>
+    </div>
     <div class="qa-mode-row">
       <button class="qa-mode-btn ${qaMode === "single" ? "selected" : ""}" data-mode="single">💬 Single answers</button>
       <button class="qa-mode-btn ${qaMode === "conversational" ? "selected" : ""}" data-mode="conversational">🔗 Conversational</button>
@@ -888,15 +939,86 @@ function renderAskUI() {
   document.getElementById("qa-input").addEventListener("keydown", (e) => {
     if (e.key === "Enter") sendQuestion();
   });
+  document.getElementById("qa-new").addEventListener("click", () => {
+    qaHistory = [];
+    qaMode = "single";
+    qaSessionId = genId();
+    renderAskUI();
+  });
+  document.getElementById("qa-history").addEventListener("click", showQaHistoryList);
   document.querySelectorAll(".qa-mode-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
       qaMode = btn.dataset.mode;
       // Switching modes mid-conversation would mix "continuous" answers
-      // with a fresh no-memory mode confusingly, so start the thread over.
+      // with a fresh no-memory mode confusingly, so start the thread over
+      // (a new history entry, not a continuation of the old one).
       qaHistory = [];
+      qaSessionId = genId();
       renderAskUI();
     });
   });
+}
+
+// "🕘 History": lists past Ask AI conversations for this book (each ask
+// turn is saved server-side under its session_id -- see sendQuestion()) so
+// the user can reopen and continue one instead of it vanishing the moment
+// they leave this panel.
+async function showQaHistoryList() {
+  panel(`
+    <button class="link-btn" id="qa-hist-back">← Back</button>
+    <div id="qa-hist-list" class="bookmarks-list"><p class="muted">Loading…</p></div>
+  `);
+  document.getElementById("qa-hist-back").addEventListener("click", renderAskUI);
+
+  let sessions;
+  try {
+    const result = await api(`/api/books/${currentBook.book_id}/qa/sessions`);
+    sessions = result.sessions || [];
+  } catch (e) {
+    document.getElementById("qa-hist-list").innerHTML = `<p class="error-text">${escapeHtml(e.message)}</p>`;
+    return;
+  }
+
+  const list = document.getElementById("qa-hist-list");
+  if (!sessions.length) {
+    list.innerHTML = `<p class="muted">No past conversations yet -- ask a question to start one.</p>`;
+    return;
+  }
+  list.innerHTML = sessions
+    .map(
+      (s) => `
+      <button class="bookmark-row" data-session-id="${s.session_id}">
+        <span class="bookmark-info">
+          <strong>${escapeHtml(s.preview || "(empty)")}</strong>
+          <span class="muted">${s.turn_count} message${s.turn_count === 1 ? "" : "s"} · ${
+            s.mode === "conversational" ? "Conversational" : "Single answers"
+          } · ${new Date(s.updated_at * 1000).toLocaleString()}</span>
+        </span>
+        <span class="bookmark-chevron">›</span>
+      </button>`
+    )
+    .join("");
+  list.querySelectorAll(".bookmark-row").forEach((btn) => {
+    btn.addEventListener("click", () => openQaSession(btn.dataset.sessionId));
+  });
+}
+
+async function openQaSession(sessionId) {
+  let session;
+  try {
+    session = await api(`/api/books/${currentBook.book_id}/qa/sessions/${sessionId}`);
+  } catch (e) {
+    alertMsg("Couldn't load that conversation: " + e.message);
+    return;
+  }
+  qaSessionId = session.session_id;
+  qaMode = session.mode === "conversational" ? "conversational" : "single";
+  qaHistory = [];
+  (session.turns || []).forEach((t) => {
+    qaHistory.push({ role: "q", text: t.question });
+    qaHistory.push({ role: "a", text: t.answer, sources: t.sources || [] });
+  });
+  renderAskUI();
 }
 
 // Turns literal "[1]", "[2]" markers Claude wrote inline into small
@@ -957,39 +1079,23 @@ document.getElementById("view-book").addEventListener("click", (e) => {
   exportAnswerAsPdf(btn, questionMsg.text, answerMsg.text, answerMsg.sources || []);
 });
 
-// The api() helper always parses JSON, so a raw fetch() is used here
-// instead to get the PDF's bytes back as a Blob. Telegram's in-app
-// WebView doesn't expose a native "save file" API, so the standard
-// browser trick -- an object URL wired to a hidden <a download> that
-// gets programmatically clicked -- is what actually saves it to the
-// phone's Downloads/Files app in practice.
+// A browser-download trick (object URL + hidden <a download>) doesn't
+// reliably produce a file the user can find again inside Telegram's in-app
+// WebView -- confirmed broken in practice. The backend now sends the PDF as
+// a Telegram document straight to the user's own chat with the bot instead
+// (every mini-app user already has one, since that's how they got here), so
+// this just posts the exchange and reports whether it was sent.
 async function exportAnswerAsPdf(btn, question, answer, sources) {
   const originalLabel = btn.textContent;
   btn.disabled = true;
-  btn.textContent = "Exporting…";
+  btn.textContent = "Sending…";
   try {
-    const res = await fetch(`/api/books/${currentBook.book_id}/ask/export`, {
+    await api(`/api/books/${currentBook.book_id}/ask/export`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "X-Telegram-Init-Data": INIT_DATA },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ question, answer, sources }),
     });
-    if (!res.ok) {
-      let detail = `Export failed (${res.status})`;
-      try {
-        const data = await res.json();
-        if (data && data.detail) detail = data.detail;
-      } catch (_) { /* no JSON body */ }
-      throw new Error(detail);
-    }
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "answer.pdf";
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 30000);
+    alertMsg("Sent! Check your Telegram chat with this bot to download the PDF.");
   } catch (e) {
     alertMsg("Couldn't export: " + e.message);
   } finally {
@@ -1019,7 +1125,10 @@ async function sendQuestion() {
     const result = await api(`/api/books/${currentBook.book_id}/ask`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question, history: priorTurns }),
+      // session_id ties every turn asked in this thread to the same saved
+      // conversation server-side (see library.append_qa_turn), which is
+      // what "🕘 History" reopens later.
+      body: JSON.stringify({ question, history: priorTurns, session_id: qaSessionId, mode: qaMode }),
     });
     qaHistory[qaHistory.length - 1] = { role: "a", text: result.answer, sources: result.sources || [] };
   } catch (e) {
@@ -1033,6 +1142,11 @@ async function sendQuestion() {
 // ---------------------------------------------------------------------
 
 let quizDifficulty = "medium";
+// State for the quiz CURRENTLY on screen -- needed by "🏁 End Test" to build
+// a summary and save the attempt without re-fetching anything.
+let currentQuizQuestions = [];
+let currentQuizAnswers = [];   // parallel to currentQuizQuestions: chosen option index, or null if unanswered
+let currentQuizMeta = { difficulty: "medium", chapterTitles: [] };
 
 function handleQuizMenu() {
   const chapters = currentBook.chapters || [];
@@ -1050,6 +1164,7 @@ function handleQuizMenu() {
     )
     .join("");
   panel(`
+    <button class="link-btn" id="quiz-history">🕘 Quiz History</button>
     <p><strong>Select chapters:</strong></p>
     <ul class="chapter-list">${items}</ul>
     <p><strong>Difficulty:</strong></p>
@@ -1075,12 +1190,12 @@ function handleQuizMenu() {
   });
 
   document.getElementById("quiz-generate").addEventListener("click", runQuizGeneration);
+  document.getElementById("quiz-history").addEventListener("click", showQuizHistoryList);
 }
 
 async function runQuizGeneration() {
-  const chapterIndices = Array.from(document.querySelectorAll(".quiz-chapter-cb:checked")).map((cb) =>
-    parseInt(cb.value, 10)
-  );
+  const checkedBoxes = Array.from(document.querySelectorAll(".quiz-chapter-cb:checked"));
+  const chapterIndices = checkedBoxes.map((cb) => parseInt(cb.value, 10));
   let numQuestions = parseInt(document.getElementById("quiz-count").value, 10) || 10;
   numQuestions = Math.max(1, Math.min(MAX_QUIZ_QUESTIONS, numQuestions));
 
@@ -1088,6 +1203,12 @@ async function runQuizGeneration() {
     alertMsg("Select at least one chapter.");
     return;
   }
+
+  const chapters = currentBook.chapters || [];
+  currentQuizMeta = {
+    difficulty: quizDifficulty,
+    chapterTitles: chapterIndices.map((i) => chapters[i] && chapters[i].title).filter(Boolean),
+  };
 
   const result = document.getElementById("quiz-result");
   result.innerHTML = `<p class="spinner-line">⏳ Generating ${numQuestions} questions…</p>`;
@@ -1112,6 +1233,9 @@ async function runQuizGeneration() {
 }
 
 function renderQuiz(questions) {
+  currentQuizQuestions = questions;
+  currentQuizAnswers = new Array(questions.length).fill(null);
+
   const result = document.getElementById("quiz-result");
   const score = { correct: 0, answered: 0 };
   result.innerHTML = `<p class="quiz-score" id="quiz-score">Score: 0 / ${questions.length}</p>`;
@@ -1127,6 +1251,7 @@ function renderQuiz(questions) {
       optBtn.addEventListener("click", () => {
         if (block.dataset.answered) return;
         block.dataset.answered = "1";
+        currentQuizAnswers[qi] = oi;
         score.answered += 1;
         const buttons = block.querySelectorAll(".quiz-opt");
         buttons[q.correct_index].classList.add("correct");
@@ -1143,6 +1268,163 @@ function renderQuiz(questions) {
       block.appendChild(optBtn);
     });
     result.appendChild(block);
+  });
+
+  const endBtn = document.createElement("button");
+  endBtn.className = "btn";
+  endBtn.id = "quiz-end-test";
+  endBtn.textContent = "🏁 End Test";
+  endBtn.addEventListener("click", endQuizTest);
+  result.appendChild(endBtn);
+}
+
+// "🏁 End Test": can be tapped at any point, whether every question has been
+// answered or not (unanswered ones just count against the score, same as a
+// real exam) -- shows a summary and saves the attempt to Quiz History.
+async function endQuizTest() {
+  const questions = currentQuizQuestions;
+  const answers = currentQuizAnswers;
+  const total = questions.length;
+  let correct = 0;
+  let incorrect = 0;
+  let unanswered = 0;
+  questions.forEach((q, qi) => {
+    if (answers[qi] === null) unanswered += 1;
+    else if (answers[qi] === q.correct_index) correct += 1;
+    else incorrect += 1;
+  });
+  const percentage = total ? Math.round((1000 * correct) / total) / 10 : 0;
+
+  const result = document.getElementById("quiz-result");
+  result.innerHTML = `
+    <div class="quiz-summary">
+      <p class="quiz-summary-pct">${percentage}%</p>
+      <p class="quiz-summary-row">✅ Correct: ${correct}</p>
+      <p class="quiz-summary-row">❌ Incorrect: ${incorrect}</p>
+      <p class="quiz-summary-row">➖ Unanswered: ${unanswered}</p>
+      <p class="muted">${correct} / ${total} questions correct</p>
+      <p id="quiz-save-status" class="muted">Saving to history…</p>
+      <button class="btn secondary" id="quiz-retake">Back to quiz setup</button>
+    </div>
+  `;
+  document.getElementById("quiz-retake").addEventListener("click", handleQuizMenu);
+
+  try {
+    await api(`/api/books/${currentBook.book_id}/quiz/attempts`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        questions,
+        answers,
+        difficulty: currentQuizMeta.difficulty,
+        chapter_titles: currentQuizMeta.chapterTitles,
+      }),
+    });
+    const statusEl = document.getElementById("quiz-save-status");
+    if (statusEl) statusEl.textContent = "Saved to Quiz History.";
+  } catch (e) {
+    const statusEl = document.getElementById("quiz-save-status");
+    if (statusEl) {
+      statusEl.textContent = "Couldn't save this attempt to history: " + e.message;
+      statusEl.classList.add("error-text");
+    }
+  }
+}
+
+// "🕘 Quiz History": lists past finished/ended attempts for this book.
+async function showQuizHistoryList() {
+  panel(`
+    <button class="link-btn" id="quiz-hist-back">← Back</button>
+    <div id="quiz-hist-list" class="bookmarks-list"><p class="muted">Loading…</p></div>
+  `);
+  document.getElementById("quiz-hist-back").addEventListener("click", handleQuizMenu);
+
+  let attempts;
+  try {
+    const result = await api(`/api/books/${currentBook.book_id}/quiz/attempts`);
+    attempts = result.attempts || [];
+  } catch (e) {
+    document.getElementById("quiz-hist-list").innerHTML = `<p class="error-text">${escapeHtml(e.message)}</p>`;
+    return;
+  }
+
+  const list = document.getElementById("quiz-hist-list");
+  if (!attempts.length) {
+    list.innerHTML = `<p class="muted">No past quiz attempts yet.</p>`;
+    return;
+  }
+  list.innerHTML = attempts
+    .map(
+      (a) => `
+      <button class="bookmark-row" data-attempt-id="${a.attempt_id}">
+        <span class="bookmark-info">
+          <strong>${a.percentage}% (${a.correct_count}/${a.total}) · ${escapeHtml(a.difficulty || "medium")}</strong>
+          <span class="muted">${escapeHtml((a.chapter_titles || []).join(", ") || "All chapters")} · ${new Date(
+            a.created_at * 1000
+          ).toLocaleString()}</span>
+        </span>
+        <span class="bookmark-chevron">›</span>
+      </button>`
+    )
+    .join("");
+  list.querySelectorAll(".bookmark-row").forEach((btn) => {
+    btn.addEventListener("click", () => openQuizAttempt(btn.dataset.attemptId));
+  });
+}
+
+async function openQuizAttempt(attemptId) {
+  let attempt;
+  try {
+    attempt = await api(`/api/books/${currentBook.book_id}/quiz/attempts/${attemptId}`);
+  } catch (e) {
+    alertMsg("Couldn't load that quiz attempt: " + e.message);
+    return;
+  }
+  renderQuizReview(attempt);
+}
+
+// Read-only replay of a past attempt: each question shows the correct
+// answer and the user's own pick (if any) already marked, no further
+// interaction -- this is a review, not a retake.
+function renderQuizReview(attempt) {
+  panel(`
+    <button class="link-btn" id="quiz-review-back">← Back to history</button>
+    <div class="quiz-summary">
+      <p class="quiz-summary-pct">${attempt.percentage}%</p>
+      <p class="muted">${attempt.correct_count} / ${attempt.total} questions correct</p>
+    </div>
+    <div id="quiz-review-list"></div>
+  `);
+  document.getElementById("quiz-review-back").addEventListener("click", showQuizHistoryList);
+
+  const list = document.getElementById("quiz-review-list");
+  attempt.questions.forEach((q, qi) => {
+    const chosen = attempt.answers[qi];
+    const block = document.createElement("div");
+    block.className = "quiz-q";
+    block.innerHTML = `<div class="q-text">${qi + 1}. ${escapeHtml(q.question)}</div>`;
+    q.options.forEach((opt, oi) => {
+      const optBtn = document.createElement("button");
+      optBtn.className = "quiz-opt";
+      optBtn.disabled = true;
+      optBtn.textContent = opt;
+      if (oi === q.correct_index) optBtn.classList.add("correct");
+      else if (oi === chosen) optBtn.classList.add("wrong");
+      block.appendChild(optBtn);
+    });
+    if (chosen === null) {
+      const skipped = document.createElement("div");
+      skipped.className = "muted";
+      skipped.textContent = "(left unanswered)";
+      block.appendChild(skipped);
+    }
+    if (q.explanation) {
+      const exp = document.createElement("div");
+      exp.className = "quiz-explain";
+      exp.textContent = q.explanation;
+      block.appendChild(exp);
+    }
+    list.appendChild(block);
   });
 }
 
