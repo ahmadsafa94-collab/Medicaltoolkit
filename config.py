@@ -157,3 +157,7 @@ VOYAGE_PRICE_PER_MILLION_USD = 0.06
 # How many of the most recent server-side exceptions the admin panel's
 # "Recent errors" view keeps around (see bot.py's global_error_handler).
 MAX_RECENT_ERRORS = 50
+
+# How many of the most recent 🐞 Report a problem submissions the admin
+# panel's "Reported problems" view keeps around (see admin_log.py).
+MAX_RECENT_REPORTS = 100

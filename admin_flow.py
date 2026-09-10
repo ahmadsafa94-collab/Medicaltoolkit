@@ -6,8 +6,8 @@ message can never be replayed by a non-admin to reach an admin action.
 
 Covers: bot-wide stats, subscription lookup/grant/revoke, a running API cost
 dashboard, broadcast, block/unblock, a "test functionality" smoke-test menu,
-and recent server-side errors -- see keyboards.py's admin_menu_kb() for the
-top-level menu these all hang off of.
+recent server-side errors, and user-submitted 🐞 problem reports -- see
+keyboards.py's admin_menu_kb() for the top-level menu these all hang off of.
 """
 
 import asyncio
@@ -122,6 +122,22 @@ async def handle_errors(callback: CallbackQuery):
     for e in errors:
         when = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(e["ts"]))
         lines.append(f"`{when}` [{e.get('context', '?')}] {e['error']}")
+    await callback.message.answer("\n".join(lines)[:4000], parse_mode="Markdown")
+
+
+@router.callback_query(F.data == "admin:reports")
+async def handle_reports(callback: CallbackQuery):
+    if not await _require_admin_callback(callback):
+        return
+    await callback.answer()
+    reports = admin_log.recent_reports(10)
+    if not reports:
+        await callback.message.answer("🐞 No problems reported recently.")
+        return
+    lines = ["🐞 *Reported problems* (most recent first)", ""]
+    for r in reports:
+        when = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(r["ts"]))
+        lines.append(f"`{when}` {r['who']} (id {r['user_id']}):\n{r['text']}\n")
     await callback.message.answer("\n".join(lines)[:4000], parse_mode="Markdown")
 
 
@@ -295,14 +311,15 @@ async def handle_test_run(callback: CallbackQuery):
 @router.message(Command("replyuser"))
 async def cmd_reply_user(message: Message):
     """
-    /replyuser <user_id> <message> -- the admin's reply half of both
-    user-initiated contact flows in customer_flow.py: "pay another way"
-    (handle_contact_admin_send) and "🐞 Report a problem / Suggest"
-    (handle_feedback_send). Both forward the user's message to every admin
-    and tell them to expect a reply via this exact command. Deliberately a
-    plain command rather than an FSM step: an admin might field several of
-    these at once, interleaved with other chat activity, and a stateful
-    "who am I replying to right now" flow would make that awkward.
+    /replyuser <user_id> <message> -- the admin's reply half of every
+    user-initiated contact flow in customer_flow.py: "pay another way"
+    (handle_contact_admin_send), "🐞 Report a problem" (handle_feedback_send),
+    and "🆘 Support" (handle_support_send). All three forward the user's
+    message to every admin and tell them to expect a reply via this exact
+    command. Deliberately a plain command rather than an FSM step: an admin
+    might field several of these at once, interleaved with other chat
+    activity, and a stateful "who am I replying to right now" flow would
+    make that awkward.
     """
     if not await _require_admin_message(message):
         return

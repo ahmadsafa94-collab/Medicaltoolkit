@@ -12,19 +12,18 @@ from aiogram.types import (
 )
 
 BTN_DOSE = "💊 Dose Lookup"
-BTN_UPLOAD = "📄 Upload PDF"
-BTN_HELP = "ℹ️ Help"
+BTN_PDF_SPLIT = "✂️ PDF Splitter"
 BTN_CALC = "🧮 Calculators"
 BTN_INTERACTIONS = "🔀 Interactions"
 BTN_ASK = "💬 Ask My Books"
 BTN_SHELF = "📚 Book Shelf"
-BTN_GLOSSARY = "📖 Glossary"
 BTN_RECENT = "🕘 Recent"
 BTN_BOOKMARKS = "🔖 Bookmarks"
 BTN_MY_PLAN = "⭐ My Plan"
 BTN_STUDY_TOOLS = "🧠 Study Tools"
 BTN_ADMIN = "🛠 Admin Panel"
 BTN_FEEDBACK = "🐞 Report a problem"
+BTN_SUPPORT = "🆘 Support"
 
 
 def main_menu_kb(webapp_url: str = "", is_admin: bool = False) -> ReplyKeyboardMarkup:
@@ -36,22 +35,36 @@ def main_menu_kb(webapp_url: str = "", is_admin: bool = False) -> ReplyKeyboardM
     longer prints a text list of slash-commands (that list went stale
     easily and duplicated what's already discoverable here). Every button
     below maps to the exact same handler its equivalent slash-command uses,
-    so nothing was removed, just moved: BTN_GLOSSARY/BTN_RECENT/BTN_BOOKMARKS
-    call cmd_glossary/cmd_recent/cmd_bookmarks directly with no arguments,
-    same as typing the bare command. /pregnancy and /unbookmark are the only
-    two commands NOT mirrored here, since both require a typed argument
-    (a drug name) with no natural button equivalent -- they're still covered
-    in /help. BTN_MY_PLAN opens the customer subscription panel (customer_flow.py)
-    and BTN_STUDY_TOOLS opens an inline menu (study_tools_kb() below) for
-    ECG/lab interpretation, flashcards, OSCE practice, the image quiz, and
-    notes -- kept off the main keyboard itself so it doesn't grow without
-    bound as more study features are added. BTN_ADMIN only appears for
-    Telegram user ids in config.ADMIN_USER_IDS (admin_flow.py). BTN_FEEDBACK
-    opens the same "message the admin" prompt as /feedback (customer_flow.py's
-    _prompt_feedback) -- kept as a fixed keyboard button rather than only an
-    inline one under /help since a persistent button is far more reliably
-    discovered/tapped than either a typed slash-command or a button buried in
-    a text message the user has to scroll back to.
+    so nothing was removed, just moved: BTN_RECENT/BTN_BOOKMARKS call
+    cmd_recent/cmd_bookmarks directly with no arguments, same as typing the
+    bare command. /pregnancy, /unbookmark, and /glossary are not mirrored
+    here (no persistent button; still reachable by typing the command) --
+    the first two need a typed argument with no natural button equivalent,
+    and glossary was dropped from the fixed keyboard to make room. BTN_MY_PLAN
+    opens the customer subscription panel (customer_flow.py) and BTN_STUDY_TOOLS
+    opens an inline menu (study_tools_kb() below) for ECG/lab interpretation,
+    flashcards, OSCE practice, the image quiz, and notes -- kept off the main
+    keyboard itself so it doesn't grow without bound as more study features
+    are added. BTN_ADMIN only appears for Telegram user ids in
+    config.ADMIN_USER_IDS (admin_flow.py). BTN_FEEDBACK opens the same
+    "message the admin" prompt as /feedback (customer_flow.py's
+    _prompt_feedback) for reporting a bug or suggesting something -- logged
+    durably (admin_log.record_report) as well as forwarded live, so it backs
+    the admin panel's "🐞 Reported problems" view. BTN_SUPPORT is the general
+    "get help now" channel (/support, customer_flow.py's _prompt_support):
+    forwarded live to every admin the same way, but NOT logged as a report --
+    it replaces the old ℹ️ Help button's keyboard slot, since a fixed button
+    that puts the user straight in touch with the admin is more useful there
+    than a static wall of command descriptions (still available via /help).
+    BTN_PDF_SPLIT ("✂️ PDF Splitter") is a DELIBERATELY different, lighter
+    action than sending a PDF straight to the chat: sending a PDF directly
+    (bot.py's handle_pdf_upload, unrelated to this keyboard) splits AND saves
+    the book into the user's library, offering to index it for 💬 Ask My Books
+    and putting it on 📚 Book Shelf. Tapping this button first (bot.py's
+    btn_pdf_split / handle_pdf_split_only) does ONLY the split -- chapters are
+    sent back as plain documents with nothing written to the library and no
+    Ask My Books/Book Shelf offer -- for someone who just wants a quick,
+    disposable chapter split.
 
     IMPORTANT: the Book Shelf button here is a PLAIN text button, not a
     `web_app` KeyboardButton. An earlier version attached web_app directly
@@ -69,13 +82,13 @@ def main_menu_kb(webapp_url: str = "", is_admin: bool = False) -> ReplyKeyboardM
     rows = [
         [KeyboardButton(text=BTN_DOSE), KeyboardButton(text=BTN_CALC)],
         [KeyboardButton(text=BTN_INTERACTIONS), KeyboardButton(text=BTN_ASK)],
-        [KeyboardButton(text=BTN_UPLOAD), KeyboardButton(text=BTN_GLOSSARY)],
-        [KeyboardButton(text=BTN_RECENT), KeyboardButton(text=BTN_BOOKMARKS)],
-        [KeyboardButton(text=BTN_MY_PLAN), KeyboardButton(text=BTN_STUDY_TOOLS)],
+        [KeyboardButton(text=BTN_PDF_SPLIT), KeyboardButton(text=BTN_RECENT)],
+        [KeyboardButton(text=BTN_BOOKMARKS), KeyboardButton(text=BTN_MY_PLAN)],
+        [KeyboardButton(text=BTN_STUDY_TOOLS), KeyboardButton(text=BTN_SUPPORT)],
     ]
     if webapp_url:
         rows.append([KeyboardButton(text=BTN_SHELF)])
-    rows.append([KeyboardButton(text=BTN_HELP), KeyboardButton(text=BTN_FEEDBACK)])
+    rows.append([KeyboardButton(text=BTN_FEEDBACK)])
     if is_admin:
         rows.append([KeyboardButton(text=BTN_ADMIN)])
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True, is_persistent=True)
@@ -336,6 +349,7 @@ def admin_menu_kb() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="📢 Broadcast", callback_data="admin:broadcast")],
             [InlineKeyboardButton(text="🧪 Test functionality", callback_data="admin:test")],
             [InlineKeyboardButton(text="🪵 Recent errors", callback_data="admin:errors")],
+            [InlineKeyboardButton(text="🐞 Reported problems", callback_data="admin:reports")],
         ]
     )
 

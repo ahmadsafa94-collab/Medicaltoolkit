@@ -19,6 +19,7 @@ import uvicorn
 from aiogram import Dispatcher, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.exceptions import TelegramBadRequest, TelegramAPIError
 from aiogram.types import (
     Message,
@@ -61,19 +62,18 @@ from keyboards import (
     make_searchable_kb,
     study_tools_kb,
     BTN_DOSE,
-    BTN_UPLOAD,
-    BTN_HELP,
+    BTN_PDF_SPLIT,
     BTN_CALC,
     BTN_INTERACTIONS,
     BTN_ASK,
     BTN_SHELF,
-    BTN_GLOSSARY,
     BTN_RECENT,
     BTN_BOOKMARKS,
     BTN_MY_PLAN,
     BTN_STUDY_TOOLS,
     BTN_ADMIN,
     BTN_FEEDBACK,
+    BTN_SUPPORT,
 )
 from telegram_helpers import send_long_text, send_documents_safely, send_table_entries
 from renal_flow import register_renal_handlers
@@ -104,6 +104,12 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 dp = Dispatcher()
+
+
+class SplitStates(StatesGroup):
+    """FSM state for the ✂️ PDF Splitter button -- see btn_pdf_split/handle_pdf_split_only below."""
+
+    awaiting_pdf = State()
 
 # The "Calculate dose by renal function" conversation (multi-step eGFR/CrCl
 # calculator) lives in its own module since it's a self-contained FSM flow --
@@ -290,18 +296,13 @@ async def cmd_help(message: Message):
         "/bookmarks - drugs you've saved with the 🔖 button after a /dose lookup "
         "(remove one with /unbookmark <name>).\n\n"
         "/feedback - report a problem or suggest something; goes straight to the admin "
-        "(same as the 🐞 Report a problem button in the menu below)."
+        "(same as the 🐞 Report a problem button in the menu below).\n\n"
+        "/support - get help directly from the admin (same as the 🆘 Support button in the menu below).\n\n"
+        "✂️ PDF Splitter (menu button) - splits an uploaded PDF into one file per chapter "
+        "and sends them straight back, without saving the book or offering to index it for "
+        "💬 Ask My Books/📚 Book Shelf. Sending a PDF directly to the chat (no button first) still "
+        "does the full flow: split, save to your library, and offer indexing."
     )
-
-
-@dp.message(F.text == BTN_HELP)
-async def btn_help(message: Message):
-    await cmd_help(message)
-
-
-@dp.message(F.text == BTN_UPLOAD)
-async def btn_upload(message: Message):
-    await message.answer("Send me a .pdf file as a document (attach → file) and I'll split it into chapters.")
 
 
 @dp.message(F.text == BTN_CALC)
@@ -317,11 +318,6 @@ async def btn_interactions(message: Message, state: FSMContext):
 @dp.message(F.text == BTN_ASK)
 async def btn_ask(message: Message):
     await show_book_picker(message)
-
-
-@dp.message(F.text == BTN_GLOSSARY)
-async def btn_glossary(message: Message):
-    await cmd_glossary(message)
 
 
 @dp.message(F.text == BTN_RECENT)
@@ -354,6 +350,27 @@ async def btn_admin(message: Message, state: FSMContext):
 @dp.message(F.text == BTN_FEEDBACK)
 async def btn_feedback(message: Message, state: FSMContext):
     await customer_flow._prompt_feedback(message.answer, state)
+
+
+@dp.message(F.text == BTN_SUPPORT)
+async def btn_support(message: Message, state: FSMContext):
+    await customer_flow._prompt_support(message.answer, state)
+
+
+@dp.message(F.text == BTN_PDF_SPLIT)
+async def btn_pdf_split(message: Message, state: FSMContext):
+    await state.set_state(SplitStates.awaiting_pdf)
+    await message.answer(
+        "✂️ Send the PDF you want split into chapters. I'll send the chapters straight back as "
+        "separate files -- nothing is saved to your library or offered for 💬 Ask My Books/📚 Book Shelf. "
+        "/cancel to abort."
+    )
+
+
+@dp.message(Command("cancel"), SplitStates.awaiting_pdf)
+async def cancel_pdf_split(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Cancelled.")
 
 
 @dp.message(F.text == BTN_DOSE)
@@ -705,6 +722,112 @@ async def handle_section_tap(callback: CallbackQuery):
     if table_entries:
         drug_name = sections.get("_name", "Drug")
         await send_table_entries(callback.message, drug_name, table_entries)
+
+
+@dp.message(F.document, SplitStates.awaiting_pdf)
+async def handle_pdf_split_only(message: Message, state: FSMContext):
+    """
+    The ✂️ PDF Splitter button's document handler -- registered (and so
+    matched) before the general handle_pdf_upload below, since aiogram
+    tries handlers on the same router in registration order and this one's
+    SplitStates.awaiting_pdf filter only matches right after btn_pdf_split
+    set that state. Deliberately a stripped-down copy of handle_pdf_upload's
+    download/split steps rather than a shared helper with a "should I save"
+    flag: it skips the library.add_book/set_chapters registration, the
+    "make searchable" offer, and the chapter-AI (Summarize/Quiz) buttons on
+    each sent chapter entirely -- a plain split-and-send, nothing kept on
+    the server past this request and nothing surfaced on 📚 Book Shelf or
+    💬 Ask My Books.
+    """
+    await state.clear()
+    doc = message.document
+    file_name = doc.file_name or ""
+
+    if doc.mime_type != "application/pdf" and not file_name.lower().endswith(".pdf"):
+        await message.answer("That doesn't look like a PDF. Please send a .pdf file.")
+        return
+
+    if doc.file_size and doc.file_size > MAX_UPLOAD_BYTES:
+        await message.answer(
+            f"That file is {doc.file_size / 1024 / 1024:.1f}MB, which is over "
+            f"Telegram's {MAX_UPLOAD_BYTES // 1024 // 1024}MB limit for bot downloads. "
+            "Please split it yourself first, or send a smaller file."
+        )
+        return
+
+    status_msg = await message.answer("Got it. Downloading...")
+
+    workdir = user_dir(message.from_user.id)
+    local_pdf_path = os.path.join(workdir, safe_pdf_filename(file_name))
+    output_dir = os.path.join(workdir, "chapters_split_only")
+
+    try:
+        file = await bot.get_file(doc.file_id)
+        await bot.download_file(file.file_path, destination=local_pdf_path)
+    except TelegramAPIError as e:
+        logger.exception("Failed to download uploaded PDF for split-only")
+        await status_msg.edit_text(f"Couldn't download that file from Telegram: {e}")
+        return
+
+    await status_msg.edit_text("Downloaded. Reading pages and detecting chapters with AI...")
+
+    shutil.rmtree(output_dir, ignore_errors=True)
+
+    loop = asyncio.get_running_loop()
+
+    def progress_cb(done: int, total_pages: int) -> None:
+        async def _edit():
+            try:
+                await status_msg.edit_text(
+                    "Downloaded. Reading pages and detecting chapters with AI... "
+                    f"({done}/{total_pages} pages read)"
+                )
+            except TelegramBadRequest:
+                pass  # unchanged text, or edited too soon after the last edit -- harmless
+            except Exception:
+                logger.exception("Failed to post PDF-splitting progress update")
+
+        asyncio.run_coroutine_threadsafe(_edit(), loop)
+
+    try:
+        try:
+            chapters, output_paths = await asyncio.wait_for(
+                asyncio.to_thread(process_pdf, local_pdf_path, output_dir, progress_cb),
+                timeout=PDF_PROCESSING_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            await status_msg.edit_text(
+                "This PDF is taking too long to process (over "
+                f"{PDF_PROCESSING_TIMEOUT_SECONDS // 60} minutes) -- it's likely "
+                "very long or has complex, image/table-heavy pages. Try a "
+                "shorter book, or split it into smaller files yourself first."
+            )
+            return
+        except ChapterDetectionError as e:
+            await status_msg.edit_text(f"Couldn't split this PDF: {e}")
+            return
+        except Exception as e:
+            logger.exception("Unexpected error splitting PDF (split-only)")
+            await status_msg.edit_text(f"Something went wrong: {e}")
+            return
+
+        await status_msg.edit_text(f"Found {len(chapters)} chapter(s). Sending them now...")
+
+        sent, total = await send_documents_safely(message, chapters, output_paths)
+
+        if sent < total:
+            await message.answer(
+                f"Sent {sent} of {total} chapter(s) -- the rest failed to send "
+                "(they may be too large for Telegram). Check the logs, or try again."
+            )
+        else:
+            await message.answer("Done. Tap ✂️ PDF Splitter again anytime.")
+    finally:
+        try:
+            os.remove(local_pdf_path)
+        except OSError:
+            pass
+        shutil.rmtree(output_dir, ignore_errors=True)
 
 
 @dp.message(F.document)

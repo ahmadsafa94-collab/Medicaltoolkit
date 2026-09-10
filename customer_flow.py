@@ -21,6 +21,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, LabeledPrice, Message, PreCheckoutQuery
 
+import admin_log
 import language
 import subscriptions
 from config import ADMIN_USER_IDS, PREMIUM_MONTHLY_STARS, PREMIUM_YEARLY_STARS, PREMIUM_MONTH_DAYS, PREMIUM_YEAR_DAYS
@@ -37,6 +38,7 @@ class CustomerStates(StatesGroup):
     awaiting_contact_admin_message = State()
     awaiting_lab_text = State()
     awaiting_feedback_message = State()
+    awaiting_support_message = State()
 
 
 def _plan_summary_text(user_id: int) -> str:
@@ -240,6 +242,9 @@ async def handle_feedback_send(message: Message, state: FSMContext):
 
     user = message.from_user
     who = f"@{user.username}" if getattr(user, "username", None) else f"id {user.id}"
+
+    admin_log.record_report(user.id, who, text)
+
     sent_to_any = False
     for admin_id in ADMIN_USER_IDS:
         try:
@@ -256,6 +261,59 @@ async def handle_feedback_send(message: Message, state: FSMContext):
 
     if sent_to_any:
         await message.answer("Thanks -- sent to the admin.")
+    else:
+        await message.answer("Couldn't reach the admin right now, but it's logged for the admin to review -- please try again later too.")
+
+
+async def _prompt_support(answer_fn, state: FSMContext):
+    if not ADMIN_USER_IDS:
+        await answer_fn("This bot doesn't have an admin contact configured yet -- please try again later.")
+        return
+    await state.set_state(CustomerStates.awaiting_support_message)
+    await answer_fn(
+        "🆘 Send your message and the admin will read it and reply to you here directly. /cancel to abort."
+    )
+
+
+@router.message(Command("support"))
+async def cmd_support(message: Message, state: FSMContext):
+    await _prompt_support(message.answer, state)
+
+
+@router.message(Command("cancel"), CustomerStates.awaiting_support_message)
+async def handle_support_cancel(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Cancelled.")
+
+
+@router.message(CustomerStates.awaiting_support_message)
+async def handle_support_send(message: Message, state: FSMContext):
+    await state.clear()
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer("Empty message -- not sent.")
+        return
+
+    from bot_instance import bot as tg_bot
+
+    user = message.from_user
+    who = f"@{user.username}" if getattr(user, "username", None) else f"id {user.id}"
+    sent_to_any = False
+    for admin_id in ADMIN_USER_IDS:
+        try:
+            await tg_bot.send_message(
+                chat_id=admin_id,
+                text=(
+                    f"🆘 Support request from {who} (id {user.id}):\n\n{text}\n\n"
+                    f"Reply with: /replyuser {user.id} <your message>"
+                ),
+            )
+            sent_to_any = True
+        except TelegramAPIError:
+            logger.warning("Failed to forward support message to admin %s", admin_id)
+
+    if sent_to_any:
+        await message.answer("Sent to the admin -- they'll message you here directly.")
     else:
         await message.answer("Couldn't reach the admin right now -- please try again later.")
 
