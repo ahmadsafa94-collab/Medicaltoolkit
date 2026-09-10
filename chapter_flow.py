@@ -18,6 +18,7 @@ from aiogram.types import CallbackQuery
 
 import chapter_ai
 import session_cache
+import subscriptions
 from keyboards import chapter_ai_kb
 from telegram_helpers import send_long_text
 
@@ -91,6 +92,13 @@ async def handle_chapter_summarize(callback: CallbackQuery):
     if entry is None:
         return
 
+    try:
+        subscriptions.check_and_consume(callback.from_user.id, "summaries")
+    except subscriptions.QuotaExceeded as e:
+        await callback.answer()
+        await callback.message.answer(str(e))
+        return
+
     await callback.answer("Generating summary...")
     title = entry["title"]
 
@@ -121,6 +129,13 @@ async def handle_chapter_quiz(callback: CallbackQuery):
     cache_id = callback.data.split(":", 2)[2]
     entry = await _get_chapter_entry(callback, cache_id)
     if entry is None:
+        return
+
+    try:
+        subscriptions.check_and_consume(callback.from_user.id, "quizzes")
+    except subscriptions.QuotaExceeded as e:
+        await callback.answer()
+        await callback.message.answer(str(e))
         return
 
     await callback.answer("Generating quiz...")
@@ -155,6 +170,51 @@ async def handle_chapter_quiz(callback: CallbackQuery):
     ok = await send_long_text(callback.message.answer, text)
     if not ok:
         await callback.message.answer("Couldn't send the quiz (Telegram rejected the message).")
+
+
+@router.callback_query(F.data.startswith("chai:mnem:"))
+async def handle_chapter_mnemonics(callback: CallbackQuery):
+    cache_id = callback.data.split(":", 2)[2]
+    entry = await _get_chapter_entry(callback, cache_id)
+    if entry is None:
+        return
+
+    try:
+        subscriptions.check_and_consume(callback.from_user.id, "summaries")
+    except subscriptions.QuotaExceeded as e:
+        await callback.answer()
+        await callback.message.answer(str(e))
+        return
+
+    await callback.answer("Generating mnemonics...")
+    title = entry["title"]
+    language = subscriptions.get_language(callback.from_user.id)
+
+    # Trimmed to MAX_CHARS_PER_CHAPTER, same reasoning as "Quiz me" above --
+    # a mnemonic list only needs the chapter's key facts, not its full text.
+    full_text = entry["text"]
+    mnem_text = full_text[: chapter_ai.MAX_CHARS_PER_CHAPTER]
+
+    try:
+        mnemonics = await asyncio.wait_for(
+            asyncio.to_thread(chapter_ai.generate_mnemonics, title, mnem_text, language),
+            timeout=_GENERATION_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        await callback.message.answer("Generating mnemonics took too long. Please try again.")
+        return
+    except chapter_ai.ChapterAIError as e:
+        await callback.message.answer(f"Couldn't generate mnemonics: {e}")
+        return
+    except Exception:
+        logger.exception("Unexpected error generating mnemonics for chapter '%s'", title)
+        await callback.message.answer("Something went wrong generating mnemonics. Please try again.")
+        return
+
+    text = f"🧠 *Mnemonics -- {title}*\n\n{mnemonics}{_AI_DISCLAIMER}"
+    ok = await send_long_text(callback.message.answer, text)
+    if not ok:
+        await callback.message.answer("Couldn't send the mnemonics (Telegram rejected the message).")
 
 
 def register_chapter_handlers(dp) -> None:

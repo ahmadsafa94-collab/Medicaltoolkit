@@ -39,6 +39,7 @@ from aiogram.types import CallbackQuery, Message
 import library
 import pdf_qa
 import session_cache
+import subscriptions
 from config import QA_INDEXING_TIMEOUT_SECONDS
 from keyboards import book_picker_kb
 from telegram_helpers import send_long_text
@@ -115,6 +116,12 @@ async def handle_book_question(message: Message, state: FSMContext):
     question = (message.text or "").strip()
     if not question:
         await message.answer("Please send your question as text.")
+        return
+
+    try:
+        subscriptions.check_and_consume(message.from_user.id, "questions")
+    except subscriptions.QuotaExceeded as e:
+        await message.answer(str(e))
         return
 
     status_msg = await message.answer("Searching the book...")

@@ -59,6 +59,7 @@ from keyboards import (
     drug_sections_kb,
     recent_list_kb,
     make_searchable_kb,
+    study_tools_kb,
     BTN_DOSE,
     BTN_UPLOAD,
     BTN_HELP,
@@ -66,6 +67,12 @@ from keyboards import (
     BTN_INTERACTIONS,
     BTN_ASK,
     BTN_SHELF,
+    BTN_GLOSSARY,
+    BTN_RECENT,
+    BTN_BOOKMARKS,
+    BTN_MY_PLAN,
+    BTN_STUDY_TOOLS,
+    BTN_ADMIN,
 )
 from telegram_helpers import send_long_text, send_documents_safely, send_table_entries
 from renal_flow import register_renal_handlers
@@ -73,10 +80,21 @@ from calc_flow import register_calc_handlers, cmd_calculators
 from interaction_flow import register_interaction_handlers, cmd_interactions
 from chapter_flow import register_chapter_handlers, build_chapter_ai_kb
 from book_qa_flow import register_book_qa_handlers, show_book_picker
+import admin_flow
+import admin_log
+import customer_flow
+import drug_qa_flow
+import ecg_lab_flow
+import flashcard_flow
+import flashcards
 import glossary
 import library
+import notes_flow
+import osce_flow
 import pdf_export
+import radiology_flow
 import session_cache
+import subscriptions
 import user_history
 from bot_instance import bot
 from webapp_api import app as webapp_app
@@ -105,15 +123,52 @@ register_chapter_handlers(dp)
 # "Ask my book" semantic Q&A (Voyage embeddings + Claude) -- see book_qa_flow.py.
 register_book_qa_handlers(dp)
 
+# Admin panel (stats/subs/cost/broadcast/test/errors) -- see admin_flow.py.
+admin_flow.register_admin_handlers(dp)
+
+# Customer "My Plan" panel: usage, Telegram Stars upgrade, pay-another-way
+# contact-admin flow, referrals, payment history, language -- see customer_flow.py.
+customer_flow.register_customer_handlers(dp)
+
+# Study Tools -> ECG / Lab interpretation (Premium, one free trial each) --
+# see ecg_lab_flow.py.
+ecg_lab_flow.register_ecg_lab_handlers(dp)
+
+# Study Tools -> Ask About Drugs (free-form Q&A grounded in a single drug's
+# FDA label -- also reachable straight from a /dose lookup's section menu)
+# -- see drug_qa_flow.py.
+drug_qa_flow.register_drug_qa_handlers(dp)
+
+# Study Tools -> Flashcards (SM-2 spaced repetition + Anki .apkg export) --
+# see flashcard_flow.py.
+flashcard_flow.register_flashcard_handlers(dp)
+
+# Study Tools -> OSCE-style case practice -- see osce_flow.py.
+osce_flow.register_osce_handlers(dp)
+
+# Study Tools -> Radiology/histology image quiz -- see radiology_flow.py.
+radiology_flow.register_radiology_handlers(dp)
+
+# Study Tools -> My Notes (personal note-taking synced to bookmarks) --
+# see notes_flow.py.
+notes_flow.register_notes_handlers(dp)
+
 
 @dp.errors()
 async def global_error_handler(event, exception):
     """
     Last-resort safety net: logs the FULL traceback for any exception that
     escapes an individual handler, so a bug never just silently disappears
-    with 'nothing happens' and no trace in the logs.
+    with 'nothing happens' and no trace in the logs. Also feeds admin_log's
+    small durable ring-buffer so an admin can see the same thing from inside
+    the bot chat (🛠 Admin Panel -> Recent errors) without needing Railway
+    log access.
     """
     logger.exception("Unhandled exception in update %s: %s", event, exception)
+    try:
+        admin_log.record_error(exception, context=str(event))
+    except Exception:
+        logger.exception("Failed to record error to admin_log (non-fatal)")
     return True  # mark as handled so aiogram doesn't re-raise
 
 
@@ -125,24 +180,40 @@ async def global_error_handler(event, exception):
 
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
+    """
+    Deliberately short: this used to print a full "Commands:" text list,
+    which duplicated (and could drift out of sync with) the persistent
+    keyboard below -- every one of those commands now has a button here
+    instead, so the keyboard itself IS the menu. /help still has the full
+    rundown for anyone who wants the details on what each button does.
+
+    Also: records this user in the global index (touch_user -- captures
+    their @username too, which subscriptions._save() alone never does), and
+    parses a "?start=ref_<id>" deep-link payload (see customer_flow.py's
+    handle_referral for how that link is generated) so a brand-new user who
+    arrived via a friend's referral link gets credited once they later pay
+    -- see subscriptions.register_referral/maybe_credit_referral.
+    """
+    user_id = message.from_user.id
+    subscriptions.touch_user(user_id, message.from_user.username)
+
+    args = message.text.split(maxsplit=1)
+    if len(args) > 1:
+        payload = args[1].strip()
+        if payload.startswith("ref_"):
+            try:
+                referrer_id = int(payload[len("ref_"):])
+            except ValueError:
+                referrer_id = None
+            if referrer_id is not None:
+                subscriptions.register_referral(user_id, referrer_id)
+
     await message.answer(
-        "Welcome to the Medical Student Toolkit bot.\n\n"
-        "Send me a textbook PDF and I'll split it into chapters using AI.\n\n"
-        "Commands:\n"
-        "/start - this message\n"
-        "/help - how to use the bot\n"
-        "/dose <drug> - FDA label dosing & reference info\n"
-        "/calculators - BMI/BSA, corrected labs, MELD, CHA₂DS₂-VASc, Wells' criteria, and more\n"
-        "/interactions - add multiple drugs and cross-check their FDA labels for mentions of each other\n"
-        "/pregnancy <drug> - just the Pregnancy & Nursing/Lactation sections of a drug's FDA label\n"
-        "/glossary <term> - common medical abbreviations & lab reference ranges\n"
-        "/recent - your last few /dose lookups, tap to look up again\n"
-        "/bookmarks - drugs you've bookmarked (via the 🔖 button after /dose)\n"
-        "/ask - ask your indexed books questions in plain language, AI answers with page citations\n\n"
-        "📚 Book Shelf (button below) opens a full mini app for your uploaded books -- browse them on a "
-        "shelf, read them with a built-in PDF viewer, divide them into chapters, summarize the whole book "
-        "or one chapter, ask AI questions, and generate a custom quiz.",
-        reply_markup=main_menu_kb(WEBAPP_URL),
+        "Welcome to the Medical Student Toolkit bot 👋\n\n"
+        "Use the buttons below to get started, or just send me a textbook "
+        "PDF and I'll split it into chapters using AI.\n\n"
+        "Tap ℹ️ Help anytime for details on everything the bot can do.",
+        reply_markup=main_menu_kb(WEBAPP_URL, is_admin=subscriptions.is_admin(user_id)),
     )
 
 
@@ -243,6 +314,38 @@ async def btn_interactions(message: Message, state: FSMContext):
 @dp.message(F.text == BTN_ASK)
 async def btn_ask(message: Message):
     await show_book_picker(message)
+
+
+@dp.message(F.text == BTN_GLOSSARY)
+async def btn_glossary(message: Message):
+    await cmd_glossary(message)
+
+
+@dp.message(F.text == BTN_RECENT)
+async def btn_recent(message: Message):
+    await cmd_recent(message)
+
+
+@dp.message(F.text == BTN_BOOKMARKS)
+async def btn_bookmarks(message: Message):
+    await cmd_bookmarks(message)
+
+
+@dp.message(F.text == BTN_MY_PLAN)
+async def btn_my_plan(message: Message):
+    await customer_flow._show_plan(message.answer, message.from_user.id)
+
+
+@dp.message(F.text == BTN_STUDY_TOOLS)
+async def btn_study_tools(message: Message):
+    await message.answer(
+        "🧠 *Study Tools*\n\nPick one:", parse_mode="Markdown", reply_markup=study_tools_kb()
+    )
+
+
+@dp.message(F.text == BTN_ADMIN)
+async def btn_admin(message: Message, state: FSMContext):
+    await admin_flow.cmd_admin(message, state)
 
 
 @dp.message(F.text == BTN_DOSE)
@@ -790,6 +893,49 @@ async def handle_pdf_upload(message: Message):
         shutil.rmtree(output_dir, ignore_errors=True)
 
 
+_REMINDER_CHECK_INTERVAL_SECONDS = 3600  # checked hourly; should_send_reminder_today enforces "at most once/day"
+
+
+async def _daily_flashcard_reminder_loop():
+    """
+    Background task, run alongside polling/the webapp server (see main()'s
+    asyncio.gather below), that nudges each user -- at most once per UTC
+    calendar day -- about flashcards due for spaced-repetition review.
+
+    Checked hourly rather than at one fixed time of day: what actually
+    enforces "at most once per day" is flashcards.should_send_reminder_today,
+    so a restart/redeploy mid-day can never cause a duplicate reminder, and a
+    user's first-ever due cards still get flagged within an hour rather than
+    waiting for some fixed clock time that may not suit every user's timezone.
+    """
+    while True:
+        try:
+            for user_id in subscriptions.all_user_ids():
+                try:
+                    if not flashcards.should_send_reminder_today(user_id):
+                        continue
+                    books = library.list_books(user_id)
+                    if not books:
+                        continue
+                    due = flashcards.count_due_all_books(user_id, list(books.keys()))
+                    if due <= 0:
+                        continue
+                    await bot.send_message(
+                        chat_id=user_id,
+                        text=f"🗂 You have {due} flashcard(s) due for review today. "
+                        "Tap 🧠 Study Tools -> 🗂 Flashcards to review them.",
+                    )
+                    flashcards.mark_reminder_sent(user_id)
+                except TelegramAPIError:
+                    logger.warning("Flashcard reminder failed for user %s (likely blocked the bot)", user_id)
+                except Exception:
+                    logger.exception("Flashcard reminder check failed for user %s", user_id)
+                await asyncio.sleep(0.05)  # keep this loop from hammering Telegram's rate limits
+        except Exception:
+            logger.exception("Flashcard reminder loop iteration failed -- will retry next interval")
+        await asyncio.sleep(_REMINDER_CHECK_INTERVAL_SECONDS)
+
+
 async def main():
     """
     Runs the chat bot's polling loop and the Book Shelf mini app's web
@@ -835,6 +981,7 @@ async def main():
     await asyncio.gather(
         dp.start_polling(bot),
         server.serve(),
+        _daily_flashcard_reminder_loop(),
     )
 
 

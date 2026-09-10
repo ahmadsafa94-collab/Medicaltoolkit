@@ -16,6 +16,7 @@ import json
 import logging
 import re
 
+import cost_ledger
 from config import CLAUDE_MODEL
 from pdf_processor import client  # reuse the shared Anthropic client instance
 from chapter_ai import extract_text_for_page_range, ChapterAIError, MAX_CHARS_PER_CHAPTER
@@ -46,7 +47,7 @@ class QuizError(Exception):
 
 
 def generate_quiz(
-    book_title: str, pdf_path: str, chapters: list[dict], difficulty: str, num_questions: int
+    book_title: str, pdf_path: str, chapters: list[dict], difficulty: str, num_questions: int, language: str = "English"
 ) -> list[dict]:
     """
     Synchronous -- run via asyncio.to_thread from an async handler.
@@ -96,7 +97,8 @@ def generate_quiz(
         '[{"question": "...", "options": ["...", "...", "...", "..."], "correct_index": 0, '
         '"explanation": "..."}, ...] '
         "options must have exactly 4 entries, correct_index is a 0-based index into options, and explanation "
-        "is a one-sentence justification referencing the source material."
+        "is a one-sentence justification referencing the source material. "
+        f"Write the question, options, and explanation text in {language}."
     )
 
     try:
@@ -108,6 +110,11 @@ def generate_quiz(
         )
     except Exception as e:
         raise QuizError(f"Claude request failed: {e}")
+
+    try:
+        cost_ledger.record_claude_response("quiz", response)
+    except Exception:
+        logger.exception("Cost ledger logging failed (non-fatal)")
 
     raw = "".join(block.text for block in response.content if block.type == "text").strip()
     raw = re.sub(r"^```json|```$", "", raw.strip(), flags=re.MULTILINE).strip()

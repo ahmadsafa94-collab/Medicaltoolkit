@@ -13,11 +13,13 @@ but it's still AI-generated free text, so every output here is clearly
 labeled as such and never presented as authoritative on its own.
 """
 
+import json
 import logging
 import re
 
 import pdfplumber
 
+import cost_ledger
 from config import CLAUDE_MODEL
 from pdf_processor import client  # reuse the same Anthropic client instance, not a second one
 
@@ -111,7 +113,7 @@ def extract_text_for_page_range(
     return full_text[:max_chars], truncated
 
 
-def _call_claude(system_prompt: str, user_content: str, max_tokens: int) -> str:
+def _call_claude(system_prompt: str, user_content: str, max_tokens: int, feature: str = "chapter_ai") -> str:
     """Synchronous call (the anthropic SDK's default client is sync) -- callers run this via asyncio.to_thread."""
     response = client.messages.create(
         model=CLAUDE_MODEL,
@@ -119,10 +121,14 @@ def _call_claude(system_prompt: str, user_content: str, max_tokens: int) -> str:
         system=system_prompt,
         messages=[{"role": "user", "content": user_content}],
     )
+    try:
+        cost_ledger.record_claude_response(feature, response)
+    except Exception:
+        logger.exception("Cost ledger logging failed (non-fatal)")
     return "".join(block.text for block in response.content if block.type == "text").strip()
 
 
-def summarize_chapter(title: str, text: str, truncated: bool) -> str:
+def summarize_chapter(title: str, text: str, truncated: bool, language: str = "English") -> str:
     """Synchronous -- run via asyncio.to_thread from an async handler."""
     system_prompt = (
         "You are helping a medical student review a textbook chapter. Produce a concise, well-organized "
@@ -130,10 +136,11 @@ def summarize_chapter(title: str, text: str, truncated: bool) -> str:
         "2) key concepts/terms as short bullet points (plain text bullets using '-', no markdown headers), "
         "3) any especially high-yield facts, numbers, or classifications worth memorizing. "
         "Be faithful to the provided text -- do not add outside facts not supported by it. "
-        "Keep the whole summary under ~500 words."
+        "Keep the whole summary under ~500 words. "
+        f"Respond in {language}."
     )
     try:
-        summary = _call_claude(system_prompt, f"Chapter title: {title}\n\n{text}", max_tokens=2000)
+        summary = _call_claude(system_prompt, f"Chapter title: {title}\n\n{text}", max_tokens=2000, feature="chapter_summary")
     except Exception as e:
         raise ChapterAIError(f"Claude request failed: {e}")
 
@@ -141,7 +148,7 @@ def summarize_chapter(title: str, text: str, truncated: bool) -> str:
     return summary + note
 
 
-def summarize_chapter_full(title: str, text: str, hard_truncated: bool = False) -> str:
+def summarize_chapter_full(title: str, text: str, hard_truncated: bool = False, language: str = "English") -> str:
     """
     Summarize an ENTIRE chapter regardless of length, via map-reduce when
     it's longer than one Claude call can comfortably take:
@@ -165,7 +172,7 @@ def summarize_chapter_full(title: str, text: str, hard_truncated: bool = False) 
     Synchronous -- run via asyncio.to_thread from an async handler.
     """
     if len(text) <= MAX_CHARS_PER_CHAPTER:
-        summary = summarize_chapter(title, text, truncated=False)
+        summary = summarize_chapter(title, text, truncated=False, language=language)
     else:
         chunks = [text[i:i + MAX_CHARS_PER_CHAPTER] for i in range(0, len(text), MAX_CHARS_PER_CHAPTER)]
         part_notes = []
@@ -174,10 +181,10 @@ def summarize_chapter_full(title: str, text: str, hard_truncated: bool = False) 
                 f"You are helping a medical student review part {i + 1} of {len(chunks)} (in sequence) of the "
                 f"textbook chapter '{title}'. Extract this portion's key concepts, terms, and high-yield facts "
                 "as concise plain-text bullet points (using '-', no markdown headers). Be faithful to the text "
-                "-- do not add outside facts not supported by it."
+                f"-- do not add outside facts not supported by it. Respond in {language}."
             )
             try:
-                part_notes.append(_call_claude(part_prompt, chunk, max_tokens=1200))
+                part_notes.append(_call_claude(part_prompt, chunk, max_tokens=1200, feature="chapter_summary"))
             except Exception as e:
                 raise ChapterAIError(f"Claude request failed summarizing part {i + 1}/{len(chunks)}: {e}")
 
@@ -188,10 +195,10 @@ def summarize_chapter_full(title: str, text: str, hard_truncated: bool = False) 
             "study summary, structured as: 1) a one-paragraph overview, 2) key concepts/terms as short bullet "
             "points (plain text bullets using '-', no markdown headers), 3) any especially high-yield facts, "
             "numbers, or classifications worth memorizing. Merge duplicate or related points across parts "
-            "rather than just concatenating them. Keep the whole summary under ~700 words."
+            f"rather than just concatenating them. Keep the whole summary under ~700 words. Respond in {language}."
         )
         try:
-            summary = _call_claude(reduce_prompt, combined, max_tokens=2200)
+            summary = _call_claude(reduce_prompt, combined, max_tokens=2200, feature="chapter_summary")
         except Exception as e:
             raise ChapterAIError(f"Claude request failed combining chapter parts: {e}")
 
@@ -204,22 +211,97 @@ def summarize_chapter_full(title: str, text: str, hard_truncated: bool = False) 
     return summary
 
 
-def quiz_chapter(title: str, text: str, truncated: bool, num_questions: int = 5) -> str:
+def quiz_chapter(title: str, text: str, truncated: bool, num_questions: int = 5, language: str = "English") -> str:
     """Synchronous -- run via asyncio.to_thread from an async handler."""
     system_prompt = (
         f"You are helping a medical student self-test on a textbook chapter. Write exactly {num_questions} "
         "multiple-choice questions (4 options: A-D) based ONLY on the chapter text the user provides -- do "
         "not introduce outside facts. After all the questions, include an 'Answers' section listing the "
         "correct letter and a one-sentence explanation for each, referencing the chapter content. "
-        "Use plain text only (no markdown headers, '-' for any bullets)."
+        f"Use plain text only (no markdown headers, '-' for any bullets). Respond in {language}."
     )
     try:
-        quiz = _call_claude(system_prompt, f"Chapter title: {title}\n\n{text}", max_tokens=2500)
+        quiz = _call_claude(system_prompt, f"Chapter title: {title}\n\n{text}", max_tokens=2500, feature="chapter_quiz")
     except Exception as e:
         raise ChapterAIError(f"Claude request failed: {e}")
 
     note = "\n\n_(Note: this chapter was long, so questions are based on its first portion only.)_" if truncated else ""
     return quiz + note
+
+
+def generate_mnemonics(title: str, text: str, language: str = "English") -> str:
+    """
+    Ask Claude for a short set of memory aids (acronyms, rhymes, vivid short
+    phrases) covering a chapter's highest-yield facts -- a lighter-weight
+    sibling of summarize_chapter_full, same "faithful to the provided text"
+    guardrail. Synchronous -- run via asyncio.to_thread from an async handler.
+    """
+    system_prompt = (
+        "You are helping a medical student memorize a textbook chapter. Read the chapter text and produce "
+        "3-6 mnemonics (acronyms, rhymes, or short vivid phrases) that help remember its most important, "
+        "easily-confused, or list-heavy facts (e.g. classifications, drug lists, diagnostic criteria, steps "
+        "in a process). For each mnemonic: state the mnemonic itself, then one line spelling out exactly what "
+        "each letter/part stands for, then the specific fact(s) it's for. Only use facts actually present in "
+        "the chapter text -- do not invent outside facts. Plain text only (no markdown headers, '-' for any "
+        f"bullets). Respond in {language}."
+    )
+    try:
+        return _call_claude(system_prompt, f"Chapter title: {title}\n\n{text}", max_tokens=1500, feature="mnemonics")
+    except Exception as e:
+        raise ChapterAIError(f"Claude request failed: {e}")
+
+
+def generate_flashcards(title: str, text: str, num_cards: int = 12, language: str = "English") -> list[dict]:
+    """
+    Ask Claude for a set of front/back spaced-repetition flashcards covering
+    a chapter's key facts -- returns STRUCTURED JSON (same
+    validate-then-use pattern as quiz_ai.generate_quiz) so flashcards.py can
+    store each card individually for SM-2 scheduling, rather than one big
+    text blob. Synchronous -- run via asyncio.to_thread from an async handler.
+    """
+    system_prompt = (
+        f"You are writing {num_cards} spaced-repetition flashcards for a medical student reviewing a "
+        "textbook chapter. Each card should test ONE specific, well-defined fact -- prefer many focused "
+        "cards over few broad ones. Base every card ONLY on the chapter text provided -- do not add outside "
+        "facts. Respond with ONLY a JSON array, no markdown fences, no preamble. Format: "
+        '[{"front": "question or prompt", "back": "concise answer"}, ...] '
+        f"Write the front/back text in {language}."
+    )
+    try:
+        response = client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=min(150 * num_cards + 400, 4000),
+            system=system_prompt,
+            messages=[{"role": "user", "content": f"Chapter title: {title}\n\n{text}"}],
+        )
+    except Exception as e:
+        raise ChapterAIError(f"Claude request failed: {e}")
+
+    try:
+        cost_ledger.record_claude_response("flashcards", response)
+    except Exception:
+        logger.exception("Cost ledger logging failed (non-fatal)")
+
+    raw = "".join(block.text for block in response.content if block.type == "text").strip()
+    raw = re.sub(r"^```json|```$", "", raw.strip(), flags=re.MULTILINE).strip()
+
+    try:
+        cards = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise ChapterAIError(f"Could not parse Claude's flashcard response as JSON: {e}\nRaw: {raw[:500]}")
+
+    if not isinstance(cards, list) or not cards:
+        raise ChapterAIError("Claude returned no flashcards.")
+
+    validated = []
+    for c in cards:
+        if not isinstance(c, dict) or not c.get("front") or not c.get("back"):
+            continue  # skip a malformed single card rather than failing the whole batch
+        validated.append({"front": str(c["front"]), "back": str(c["back"])})
+
+    if not validated:
+        raise ChapterAIError("Claude's flashcard response had no usable cards.")
+    return validated
 
 
 # Sanity cap on how many chapters a whole-book summary will walk -- a
@@ -234,7 +316,7 @@ MAX_CHAPTERS_FOR_WHOLE_BOOK_SUMMARY = 80
 MAX_COMBINED_SUMMARY_CHARS = MAX_CHARS_PER_CHAPTER * 2
 
 
-def summarize_whole_book(title: str, pdf_path: str, chapters: list[dict], progress_cb=None) -> str:
+def summarize_whole_book(title: str, pdf_path: str, chapters: list[dict], progress_cb=None, language: str = "English") -> str:
     """
     Map-reduce summary for a whole book: summarize each chapter's text
     individually (map), then ask Claude to synthesize those chapter
@@ -267,7 +349,7 @@ def summarize_whole_book(title: str, pdf_path: str, chapters: list[dict], progre
             text, hard_truncated = extract_text_for_page_range(
                 pdf_path, chapter["start_page"], chapter["end_page"], MAX_CHARS_HARD_CAP
             )
-            summary = summarize_chapter_full(chapter["title"], text, hard_truncated)
+            summary = summarize_chapter_full(chapter["title"], text, hard_truncated, language=language)
             chapter_summaries.append(f"## {chapter['title']}\n{summary}")
         except ChapterAIError as e:
             logger.warning("Skipping chapter '%s' in whole-book summary: %s", chapter["title"], e)
@@ -289,9 +371,9 @@ def summarize_whole_book(title: str, pdf_path: str, chapters: list[dict], progre
         "2) the major themes/sections and how they relate to each other, "
         "3) the highest-yield facts worth remembering across the whole book. "
         "Do not just concatenate the chapter summaries -- synthesize them. Plain text only "
-        "(no markdown headers, '-' for any bullets), under ~700 words."
+        f"(no markdown headers, '-' for any bullets), under ~700 words. Respond in {language}."
     )
     try:
-        return _call_claude(system_prompt, combined, max_tokens=2500)
+        return _call_claude(system_prompt, combined, max_tokens=2500, feature="book_summary")
     except Exception as e:
         raise ChapterAIError(f"Claude request failed: {e}")

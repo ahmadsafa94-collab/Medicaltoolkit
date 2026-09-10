@@ -34,6 +34,7 @@ import numpy as np
 import pdfplumber
 import voyageai
 
+import cost_ledger
 from config import (
     CLAUDE_MODEL,
     VOYAGE_API_KEY,
@@ -112,6 +113,15 @@ async def embed_texts(texts: list[str], input_type: str) -> list[list[float]]:
             voyage_client.embed, batch, model=VOYAGE_MODEL, input_type=input_type
         )
         all_embeddings.extend(result.embeddings)
+        try:
+            # Voyage's Python SDK doesn't return per-call token usage, so this
+            # is a rough ~4-chars-per-token estimate, good enough for the
+            # admin cost dashboard (Voyage is already the cheapest line item
+            # by a wide margin -- see the delivered pricing roadmap).
+            approx_tokens = sum(len(t) for t in batch) // 4
+            cost_ledger.record_voyage_tokens("book_indexing", approx_tokens)
+        except Exception:
+            logger.exception("Cost ledger logging failed (non-fatal)")
     return all_embeddings
 
 
@@ -205,7 +215,9 @@ async def search_index(meta: dict, vectors: np.ndarray, question: str, top_k: in
 MAX_HISTORY_TURNS = 6  # older turns are dropped rather than growing the prompt without bound
 
 
-async def answer_question(book_id: str, question: str, history: list[dict] | None = None) -> dict:
+async def answer_question(
+    book_id: str, question: str, history: list[dict] | None = None, language: str = "English"
+) -> dict:
     """
     Full Q&A flow for a previously-indexed book: retrieve relevant passages,
     ask Claude to answer using ONLY those passages, with numbered inline
@@ -260,6 +272,7 @@ async def answer_question(book_id: str, question: str, history: list[dict] | Non
             "excerpts. Do not reuse or reference citation numbers from earlier turns.\n"
             if history else ""
         )
+        + f"6. Respond in {language}.\n"
         + f"\nEXCERPTS:\n{context}"
     )
 
@@ -279,6 +292,11 @@ async def answer_question(book_id: str, question: str, history: list[dict] | Non
         )
     except Exception as e:
         raise IndexingError(f"Claude request failed: {e}")
+
+    try:
+        cost_ledger.record_claude_response("ask_ai", response)
+    except Exception:
+        logger.exception("Cost ledger logging failed (non-fatal)")
 
     answer_text = "".join(block.text for block in response.content if block.type == "text").strip()
 

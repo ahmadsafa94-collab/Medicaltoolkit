@@ -111,3 +111,49 @@ ASK_TIMEOUT_SECONDS = 30
 # work bot.py's chat-upload flow does synchronously -- generous since it
 # scales with chapter count and each document send has its own network cost.
 SEND_CHAPTER_FILES_TIMEOUT_SECONDS = 300
+
+# --- Admin / premium subscription system ---
+
+# Telegram numeric user IDs (not usernames -- Telegram doesn't hand a bot a
+# stable username, only a numeric id) allowed into the admin panel. Comma-
+# separated in the env var, e.g. "111111111,222222222". A user's numeric id
+# is shown to them by @userinfobot, or appears in this bot's own /whoami.
+ADMIN_USER_IDS = {
+    int(x) for x in os.environ.get("ADMIN_USER_IDS", "").replace(" ", "").split(",") if x
+}
+
+# Free-tier monthly caps on the Claude-token-heavy features -- see
+# subscriptions.py. Everything else (dose lookup, interactions, calculators,
+# glossary) stays free and uncapped since it doesn't call Claude at all.
+FREE_MONTHLY_SUMMARIES = 3
+FREE_MONTHLY_QUIZZES = 3
+FREE_MONTHLY_QUESTIONS = 20
+
+# ECG/lab interpretation (see ecg_lab_ai.py) are Premium-only, but every free
+# user gets exactly one free trial of EACH before being asked to upgrade.
+ECG_FREE_TRIALS = 1
+LAB_FREE_TRIALS = 1
+
+# Telegram Stars pricing (currency code "XTR" in sendInvoice). 1 Star was
+# roughly $0.016 to purchase as of Sept 2026 -- 300/2500 Stars land close to
+# a $4.99/mo, $39.99/yr price point after that conversion. See the delivered
+# roadmap doc for the full cost-vs-price reasoning.
+PREMIUM_MONTHLY_STARS = 300
+PREMIUM_YEARLY_STARS = 2500
+PREMIUM_MONTH_DAYS = 30
+PREMIUM_YEAR_DAYS = 365
+
+# Both sides of a referral get this many bonus days of Premium once the
+# REFERRED user completes their first successful Stars payment.
+REFERRAL_BONUS_DAYS = 30
+
+# Claude/Voyage per-million-token USD prices, used only to estimate spend
+# for the admin cost dashboard (cost_ledger.py) -- NOT sent to either API.
+# Update these if Anthropic/Voyage change their published rates.
+CLAUDE_INPUT_PRICE_PER_MILLION_USD = 2.0
+CLAUDE_OUTPUT_PRICE_PER_MILLION_USD = 10.0
+VOYAGE_PRICE_PER_MILLION_USD = 0.06
+
+# How many of the most recent server-side exceptions the admin panel's
+# "Recent errors" view keeps around (see bot.py's global_error_handler).
+MAX_RECENT_ERRORS = 50

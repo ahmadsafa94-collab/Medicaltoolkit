@@ -20,6 +20,7 @@ import anthropic
 import pdfplumber
 from pypdf import PdfReader, PdfWriter
 
+import cost_ledger
 from config import ANTHROPIC_API_KEY, CLAUDE_MODEL, MAX_PAGES_PER_PASS, ANTHROPIC_CLIENT_TIMEOUT_SECONDS
 
 # Explicit timeout -- the SDK's own default is ~10 minutes, which is far too
@@ -108,6 +109,10 @@ def detect_chapters(previews: list[str]) -> list[dict]:
         system=system_prompt,
         messages=[{"role": "user", "content": numbered_text}],
     )
+    try:
+        cost_ledger.record_claude_response("chapter_split", response)
+    except Exception:
+        pass  # cost logging must never break chapter detection itself
 
     raw = "".join(block.text for block in response.content if block.type == "text").strip()
     raw = re.sub(r"^```json|```$", "", raw.strip(), flags=re.MULTILINE).strip()

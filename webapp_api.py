@@ -51,6 +51,7 @@ import library
 import pdf_export
 import pdf_qa
 import quiz_ai
+import subscriptions
 from bot_instance import bot as tg_bot
 from chapter_flow import build_chapter_ai_kb
 from config import (
@@ -580,6 +581,11 @@ async def summarize(request: Request):
 
         job_type = "summary:book"
 
+    try:
+        subscriptions.check_and_consume(user["id"], "summaries")
+    except subscriptions.QuotaExceeded as e:
+        raise ApiError(status_code=402, detail=str(e))
+
     started = start_job(book_id, job_type, job())
     return JSONResponse({"started": started, "job_type": job_type})
 
@@ -685,6 +691,11 @@ async def ask_book(request: Request):
         raise ApiError(status_code=409, detail="Index this book for Q&A first (tap 'Ask questions using AI').")
     if not question:
         raise ApiError(status_code=400, detail="Question can't be empty.")
+
+    try:
+        subscriptions.check_and_consume(user["id"], "questions")
+    except subscriptions.QuotaExceeded as e:
+        raise ApiError(status_code=402, detail=str(e))
 
     # history is only ever client-supplied conversation state for THIS
     # book/session (see app.js's "Conversational" mode) -- validated
@@ -864,6 +875,11 @@ async def create_quiz(request: Request):
         selected = [chapters[i] for i in chapter_indices]
     except (IndexError, TypeError):
         raise ApiError(status_code=400, detail="Invalid chapter_indices.")
+
+    try:
+        subscriptions.check_and_consume(user["id"], "quizzes")
+    except subscriptions.QuotaExceeded as e:
+        raise ApiError(status_code=402, detail=str(e))
 
     async def job():
         try:
