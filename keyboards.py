@@ -318,6 +318,17 @@ def my_plan_kb(is_premium: bool, premium_stars: int, yearly_stars: int) -> Inlin
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def help_kb() -> InlineKeyboardMarkup:
+    """
+    Shown under /help. Routes into the same "message the admin" pattern
+    customer_flow.py already uses for plan:contact_admin (feedback:start,
+    handled there) rather than a separate contact mechanism.
+    """
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="🐞 Report a problem / Suggest something", callback_data="feedback:start")]]
+    )
+
+
 # ---------------------------------------------------------------------------
 # Admin panel
 # ---------------------------------------------------------------------------

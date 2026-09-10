@@ -36,6 +36,7 @@ _PLAN_PAYLOAD_TO_DAYS = {"premium_month": PREMIUM_MONTH_DAYS, "premium_year": PR
 class CustomerStates(StatesGroup):
     awaiting_contact_admin_message = State()
     awaiting_lab_text = State()
+    awaiting_feedback_message = State()
 
 
 def _plan_summary_text(user_id: int) -> str:
@@ -203,6 +204,66 @@ async def handle_contact_admin_send(message: Message, state: FSMContext):
         await message.answer("Sent to the admin -- they'll message you here directly.")
     else:
         await message.answer("Couldn't reach the admin right now -- please try Stars instead, or try again later.")
+
+
+async def _prompt_feedback(answer_fn, state: FSMContext):
+    if not ADMIN_USER_IDS:
+        await answer_fn("This bot doesn't have an admin contact configured yet -- please try again later.")
+        return
+    await state.set_state(CustomerStates.awaiting_feedback_message)
+    await answer_fn(
+        "🐞 Describe the problem you ran into, or the feature you'd like to see, in one message -- "
+        "the admin will get it and can message you back here. /cancel to abort."
+    )
+
+
+@router.message(Command("feedback"))
+async def cmd_feedback(message: Message, state: FSMContext):
+    await _prompt_feedback(message.answer, state)
+
+
+@router.callback_query(F.data == "feedback:start")
+async def handle_feedback_prompt(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await _prompt_feedback(callback.message.answer, state)
+
+
+@router.message(Command("cancel"), CustomerStates.awaiting_feedback_message)
+async def handle_feedback_cancel(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Cancelled.")
+
+
+@router.message(CustomerStates.awaiting_feedback_message)
+async def handle_feedback_send(message: Message, state: FSMContext):
+    await state.clear()
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer("Empty message -- not sent.")
+        return
+
+    from bot_instance import bot as tg_bot
+
+    user = message.from_user
+    who = f"@{user.username}" if getattr(user, "username", None) else f"id {user.id}"
+    sent_to_any = False
+    for admin_id in ADMIN_USER_IDS:
+        try:
+            await tg_bot.send_message(
+                chat_id=admin_id,
+                text=(
+                    f"🐞 Report/suggestion from {who} (id {user.id}):\n\n{text}\n\n"
+                    f"Reply with: /replyuser {user.id} <your message>"
+                ),
+            )
+            sent_to_any = True
+        except TelegramAPIError:
+            logger.warning("Failed to forward feedback message to admin %s", admin_id)
+
+    if sent_to_any:
+        await message.answer("Thanks -- sent to the admin.")
+    else:
+        await message.answer("Couldn't reach the admin right now -- please try again later.")
 
 
 @router.callback_query(F.data == "plan:referral")

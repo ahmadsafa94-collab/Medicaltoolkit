@@ -60,6 +60,7 @@ from keyboards import (
     recent_list_kb,
     make_searchable_kb,
     study_tools_kb,
+    help_kb,
     BTN_DOSE,
     BTN_UPLOAD,
     BTN_HELP,
@@ -287,7 +288,10 @@ async def cmd_help(message: Message):
         "lab reference range. Run /glossary with no term to see what's covered.\n\n"
         "/recent - re-open one of your last few /dose lookups.\n\n"
         "/bookmarks - drugs you've saved with the 🔖 button after a /dose lookup "
-        "(remove one with /unbookmark <name>)."
+        "(remove one with /unbookmark <name>).\n\n"
+        "/feedback - report a problem or suggest something; goes straight to the admin "
+        "(same as the button below).",
+        reply_markup=help_kb(),
     )
 
 

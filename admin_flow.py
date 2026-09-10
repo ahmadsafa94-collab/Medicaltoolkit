@@ -295,13 +295,14 @@ async def handle_test_run(callback: CallbackQuery):
 @router.message(Command("replyuser"))
 async def cmd_reply_user(message: Message):
     """
-    /replyuser <user_id> <message> -- the admin's reply half of the "pay
-    another way" contact flow (see customer_flow.py's handle_contact_admin_send,
-    which tells the user's forwarded request to expect a reply via this
-    exact command). Deliberately a plain command rather than an FSM step:
-    an admin might field several of these at once, interleaved with other
-    chat activity, and a stateful "who am I replying to right now" flow
-    would make that awkward.
+    /replyuser <user_id> <message> -- the admin's reply half of both
+    user-initiated contact flows in customer_flow.py: "pay another way"
+    (handle_contact_admin_send) and "🐞 Report a problem / Suggest"
+    (handle_feedback_send). Both forward the user's message to every admin
+    and tell them to expect a reply via this exact command. Deliberately a
+    plain command rather than an FSM step: an admin might field several of
+    these at once, interleaved with other chat activity, and a stateful
+    "who am I replying to right now" flow would make that awkward.
     """
     if not await _require_admin_message(message):
         return
