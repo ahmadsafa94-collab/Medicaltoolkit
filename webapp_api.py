@@ -582,6 +582,54 @@ async def summarize(request: Request):
     return JSONResponse({"started": started, "job_type": job_type})
 
 
+async def export_summary_pdf(request: Request):
+    """
+    Renders an already-generated summary (whole-book or single-chapter) as
+    a PDF and sends it as a Telegram document to the user's own chat with
+    the bot, for the "📄 Export as PDF" button under the summary in the
+    mini app's Summarize panel. Same reasoning and pattern as
+    export_answer_pdf (Ask AI's own PDF export): the frontend already has
+    the exact summary text on screen, and Telegram's in-app WebView has no
+    reliable way to save a browser-triggered download, so the bot delivers
+    it instead.
+    """
+    user = require_user(request)
+    book_id = request.path_params["book_id"]
+    book = _book_or_404(user["id"], book_id)
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise ApiError(status_code=400, detail="Invalid JSON body.")
+
+    text = (body.get("text") or "").strip()
+    title = (body.get("title") or "").strip() or book.get("title") or "Summary"
+    if not text:
+        raise ApiError(status_code=400, detail="Nothing to export -- generate a summary first.")
+
+    try:
+        pdf_bytes = await asyncio.to_thread(pdf_export.generate_text_pdf, title, text)
+    except Exception:
+        logger.exception("Summary PDF export failed for book_id=%s", book_id)
+        raise ApiError(status_code=500, detail="Couldn't build the PDF. Please try again.")
+
+    filename = safe_pdf_filename(f"{title} - Summary")
+    try:
+        await tg_bot.send_document(
+            chat_id=user["id"],
+            document=BufferedInputFile(pdf_bytes, filename=filename),
+            caption=f"📝 Summary -- {title}",
+        )
+    except TelegramAPIError:
+        logger.exception("Failed to send summary export PDF to chat_id=%s", user["id"])
+        raise ApiError(
+            status_code=502,
+            detail="Couldn't send that to your Telegram chat. Make sure you've started a chat with the bot, then try again.",
+        )
+
+    return JSONResponse({"sent": True})
+
+
 # ---------------------------------------------------------------------------
 # 4. Ask questions using AI (reuses the pdf_qa module built for /ask in chat)
 # ---------------------------------------------------------------------------
@@ -942,6 +990,7 @@ routes = [
     Route("/api/books/{book_id}/chapters", divide_into_chapters, methods=["POST"]),
     Route("/api/books/{book_id}/chapters/send", send_chapter_files, methods=["POST"]),
     Route("/api/books/{book_id}/summarize", summarize, methods=["POST"]),
+    Route("/api/books/{book_id}/summarize/export", export_summary_pdf, methods=["POST"]),
     Route("/api/books/{book_id}/index", index_book, methods=["POST"]),
     Route("/api/books/{book_id}/ask", ask_book, methods=["POST"]),
     Route("/api/books/{book_id}/ask/export", export_answer_pdf, methods=["POST"]),
