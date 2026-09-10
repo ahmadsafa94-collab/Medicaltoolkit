@@ -51,6 +51,7 @@ _TEST_CHAPTER_TEXT = (
 class AdminStates(StatesGroup):
     awaiting_lookup = State()
     awaiting_broadcast = State()
+    awaiting_custom_days = State()
 
 
 async def _require_admin_message(message: Message) -> bool:
@@ -218,6 +219,52 @@ async def handle_grant(callback: CallbackQuery):
     subscriptions.grant_premium(target_id, days=days, source="admin")
     await callback.answer(f"Granted {days} day(s) of Premium.")
     await _send_lookup_result(callback.message.answer, target_id)
+
+
+@router.callback_query(F.data.startswith("admin:grantcustom:"))
+async def handle_grant_custom_prompt(callback: CallbackQuery, state: FSMContext):
+    if not await _require_admin_callback(callback):
+        return
+    target_id = int(callback.data.split(":", 2)[2])
+    await callback.answer()
+    await state.set_state(AdminStates.awaiting_custom_days)
+    await state.update_data(grant_target_id=target_id)
+    await callback.message.answer(
+        f"Send the number of days of Premium to grant user {target_id} (whole number, e.g. 45). /cancel to abort."
+    )
+
+
+@router.message(Command("cancel"), AdminStates.awaiting_custom_days)
+async def handle_grant_custom_cancel(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Cancelled.")
+
+
+@router.message(AdminStates.awaiting_custom_days)
+async def handle_grant_custom_days(message: Message, state: FSMContext):
+    if not await _require_admin_message(message):
+        await state.clear()
+        return
+
+    data = await state.get_data()
+    target_id = data.get("grant_target_id")
+    if target_id is None:
+        await state.clear()
+        await message.answer("This session expired. Open 💳 Subscriptions and try again.")
+        return
+
+    try:
+        days = int((message.text or "").strip())
+        if days <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("Please send a positive whole number of days (e.g. 45), or /cancel to abort.")
+        return
+
+    await state.clear()
+    subscriptions.grant_premium(target_id, days=days, source="admin")
+    await message.answer(f"Granted {days} day(s) of Premium.")
+    await _send_lookup_result(message.answer, target_id)
 
 
 @router.callback_query(F.data.startswith("admin:revoke:"))

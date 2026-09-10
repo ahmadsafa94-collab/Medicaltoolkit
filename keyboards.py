@@ -379,6 +379,7 @@ def admin_lookup_result_kb(target_id: int, blocked: bool) -> InlineKeyboardMarku
             InlineKeyboardButton(text="+30d", callback_data=f"admin:grant:{target_id}:30"),
             InlineKeyboardButton(text="+365d", callback_data=f"admin:grant:{target_id}:365"),
         ],
+        [InlineKeyboardButton(text="✏️ Custom amount", callback_data=f"admin:grantcustom:{target_id}")],
         [InlineKeyboardButton(text="🚫 Revoke premium", callback_data=f"admin:revoke:{target_id}")],
     ]
     if blocked:
