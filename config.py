@@ -18,7 +18,19 @@ WEBAPP_URL = os.environ.get("WEBAPP_URL", "")
 # assign a dynamic port (Heroku, Render, etc.) set $PORT themselves.
 PORT = int(os.environ.get("PORT", 8000))
 
-# Where uploaded PDFs and split chapters get stored, per user
+# Where EVERYTHING this bot persists lives, per user -- uploaded PDFs/split
+# chapters, subscriptions.py's plan/usage/trial data, library.py's book
+# registry, admin_log.py's error/report logs, cost_ledger.py's spend log,
+# notes.py, flashcards.py, user_history.py, and (via QA_INDEX_DIR below,
+# which defaults UNDER this same directory) the "Ask my book" search indexes.
+#
+# IMPORTANT: on a host with an ephemeral filesystem (Railway, Heroku, most
+# container platforms), the default "./storage" is wiped on every redeploy
+# -- restart, new build, even just a config-var change can trigger one.
+# To keep data across deploys, set STORAGE_DIR to a path backed by a
+# persistent volume (e.g. Railway: Add a Volume to this service, mount it
+# at /data, then set STORAGE_DIR=/data as an environment variable) BEFORE
+# real users start accumulating data there.
 STORAGE_DIR = os.environ.get("STORAGE_DIR", "./storage")
 
 # Claude model to use for chapter-boundary detection and Q&A answers
@@ -69,8 +81,12 @@ ANTHROPIC_CLIENT_TIMEOUT_SECONDS = 120
 VOYAGE_CLIENT_TIMEOUT_SECONDS = 60
 VOYAGE_CLIENT_MAX_RETRIES = 2
 
-# "Ask my book" (RAG) settings
-QA_INDEX_DIR = os.environ.get("QA_INDEX_DIR", "./storage/qa_indexes")
+# "Ask my book" (RAG) settings. Defaults UNDER STORAGE_DIR (not an
+# independent "./storage/qa_indexes" literal) so that setting/mounting a
+# volume at STORAGE_DIR alone is enough to persist everything -- indexes
+# included -- across a redeploy; override separately only if you actually
+# want them on different storage.
+QA_INDEX_DIR = os.environ.get("QA_INDEX_DIR", os.path.join(STORAGE_DIR, "qa_indexes"))
 QA_CHUNK_SIZE_CHARS = 1200      # ~250-300 tokens per chunk
 QA_CHUNK_OVERLAP_CHARS = 200    # keeps sentences that straddle a chunk boundary searchable from both sides
 QA_TOP_K = 6                    # how many chunks to feed Claude per question

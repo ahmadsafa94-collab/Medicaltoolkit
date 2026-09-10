@@ -29,7 +29,10 @@ logger = logging.getLogger(__name__)
 
 router = Router(name="ecg_lab_flow")
 
-_GENERATION_TIMEOUT_SECONDS = 60
+# Raised from 60: ecg_lab_ai.py now runs a draft PLUS an independent verify
+# pass (two sequential Claude calls, one of them often a vision call) for
+# every interpretation, so the old single-call budget is no longer enough.
+_GENERATION_TIMEOUT_SECONDS = 100
 
 
 class EcgLabStates(StatesGroup):
@@ -146,7 +149,7 @@ async def handle_ecg_image(message: Message, state: FSMContext):
         return
 
     await state.clear()
-    status = await message.answer("Analyzing the ECG...")
+    status = await message.answer("Analyzing the ECG, then double-checking the read...")
     language = subscriptions.get_language(message.from_user.id)
     try:
         result = await asyncio.wait_for(
@@ -179,7 +182,7 @@ async def handle_lab_text(message: Message, state: FSMContext):
         return
 
     await state.clear()
-    status = await message.answer("Interpreting...")
+    status = await message.answer("Interpreting, then double-checking...")
     language = subscriptions.get_language(message.from_user.id)
     try:
         result = await asyncio.wait_for(
@@ -214,7 +217,7 @@ async def handle_lab_image(message: Message, state: FSMContext):
         return
 
     await state.clear()
-    status = await message.answer("Reading and interpreting...")
+    status = await message.answer("Reading and interpreting, then double-checking...")
     language = subscriptions.get_language(message.from_user.id)
     try:
         result = await asyncio.wait_for(
