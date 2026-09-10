@@ -88,7 +88,9 @@ async def handle_stats(callback: CallbackQuery):
         f"Premium users: {stats['premium_users']}\n"
         f"Active (7d): {stats['active_7d']}\n"
         f"Active (30d): {stats['active_30d']}\n\n"
-        f"This month ({revenue['period']}): {revenue['stars_total']} Stars across {revenue['payments_count']} payment(s)"
+        f"This month ({revenue['period']}): {revenue['stars_total']} Stars across {revenue['payments_count']} payment(s)\n\n"
+        f"🤝 Affiliate program: {stats['referred_signups']} signup(s) via a referral link, "
+        f"{stats['referral_conversions']} converted to a paid Premium purchase"
     )
     await callback.message.answer(text, parse_mode="Markdown")
 
@@ -139,6 +141,25 @@ async def handle_reports(callback: CallbackQuery):
         when = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(r["ts"]))
         lines.append(f"`{when}` {r['who']} (id {r['user_id']}):\n{r['text']}\n")
     await callback.message.answer("\n".join(lines)[:4000], parse_mode="Markdown")
+
+
+@router.callback_query(F.data == "admin:referrals")
+async def handle_referral_leaderboard(callback: CallbackQuery):
+    if not await _require_admin_callback(callback):
+        return
+    await callback.answer()
+    leaderboard = subscriptions.get_referral_leaderboard(10)
+    if not leaderboard:
+        await callback.message.answer("🤝 No affiliate conversions yet -- nobody's referral link has led to a paid signup.")
+        return
+    lines = ["🤝 *Top Referrers* (by converted/paying signups)", ""]
+    for i, row in enumerate(leaderboard, start=1):
+        username = subscriptions.get_username(row["user_id"])
+        who = f"@{username}" if username else f"id {row['user_id']}"
+        lines.append(
+            f"{i}. {who} -- {row['converted_count']} converted, {row['bonus_days_earned']} bonus day(s) earned"
+        )
+    await callback.message.answer("\n".join(lines), parse_mode="Markdown")
 
 
 @router.callback_query(F.data == "admin:subs")

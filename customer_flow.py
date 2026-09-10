@@ -24,7 +24,14 @@ from aiogram.types import CallbackQuery, LabeledPrice, Message, PreCheckoutQuery
 import admin_log
 import language
 import subscriptions
-from config import ADMIN_USER_IDS, PREMIUM_MONTHLY_STARS, PREMIUM_YEARLY_STARS, PREMIUM_MONTH_DAYS, PREMIUM_YEAR_DAYS
+from config import (
+    ADMIN_USER_IDS,
+    PREMIUM_MONTHLY_STARS,
+    PREMIUM_YEARLY_STARS,
+    PREMIUM_MONTH_DAYS,
+    PREMIUM_YEAR_DAYS,
+    REFERRAL_BONUS_DAYS,
+)
 from keyboards import my_plan_kb
 
 logger = logging.getLogger(__name__)
@@ -321,16 +328,24 @@ async def handle_support_send(message: Message, state: FSMContext):
 @router.callback_query(F.data == "plan:referral")
 async def handle_referral(callback: CallbackQuery):
     await callback.answer()
-    payload = subscriptions.get_referral_link_payload(callback.from_user.id)
+    user_id = callback.from_user.id
+    payload = subscriptions.get_referral_link_payload(user_id)
 
     from bot_instance import bot as tg_bot
     bot_info = await tg_bot.get_me()
 
     link = f"https://t.me/{bot_info.username}?start={payload}"
+    stats = subscriptions.get_referral_stats(user_id)
     await callback.message.answer(
-        "🎁 *Invite a friend*\n\n"
-        f"Share this link: {link}\n\n"
-        "When they sign up and become Premium for the first time, you BOTH get a free month.",
+        "🤝 *Affiliate Program*\n\n"
+        f"Share your link: {link}\n\n"
+        f"Every friend who signs up through it and becomes Premium for the first time earns you BOTH "
+        f"{REFERRAL_BONUS_DAYS} free days of Premium -- no limit on how many times this can happen, so "
+        "the more people you bring in, the more free Premium you build up.\n\n"
+        "📊 *Your stats*\n"
+        f"Joined via your link: {stats['referred_count']}\n"
+        f"Converted to Premium: {stats['converted_count']}\n"
+        f"Bonus days earned so far: {stats['bonus_days_earned']}",
         parse_mode="Markdown",
     )
 

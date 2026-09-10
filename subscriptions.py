@@ -110,6 +110,7 @@ def _default_sub(user_id: int) -> dict:
         "language": "English",
         "referred_by": None,
         "referral_credited": False,
+        "referral_credits": [],
         "blocked": False,
         "payments": [],
         "created_at": time.time(),
@@ -244,6 +245,11 @@ def find_user_id_by_username(username: str) -> int | None:
         if (entry.get("username") or "").lower() == username:
             return int(uid_str)
     return None
+
+
+def get_username(user_id: int) -> str | None:
+    """The @username last captured for this user (via touch_user), or None if never seen/not set."""
+    return _load_index().get(str(user_id), {}).get("username")
 
 
 # ---------------------------------------------------------------------------
@@ -414,6 +420,13 @@ def maybe_credit_referral(user_id: int) -> int | None:
     Premium to BOTH the referrer and this user, on top of whatever plan they
     just bought. Returns the referrer's user_id if a credit was granted,
     else None (not referred, or already credited).
+
+    The credit is also logged onto the REFERRER's own record
+    (referral_credits) -- not just applied via grant_premium -- so
+    get_referral_stats()/get_referral_leaderboard() have an exact, permanent
+    history of who each affiliate actually converted and how many bonus
+    days they've earned, independent of whatever REFERRAL_BONUS_DAYS is
+    configured to today.
     """
     sub = _load(user_id)
     if sub.get("referral_credited") or not sub.get("referred_by"):
@@ -423,10 +436,65 @@ def maybe_credit_referral(user_id: int) -> int | None:
     grant_premium(referrer_id, REFERRAL_BONUS_DAYS, source="referral")
     grant_premium(user_id, REFERRAL_BONUS_DAYS, source="referral")
 
+    referrer_sub = _load(referrer_id)
+    referrer_sub.setdefault("referral_credits", []).append(
+        {"ts": time.time(), "days": REFERRAL_BONUS_DAYS, "referred_user_id": user_id}
+    )
+    _save(referrer_id, referrer_sub)
+
     sub = _load(user_id)
     sub["referral_credited"] = True
     _save(user_id, sub)
     return referrer_id
+
+
+def get_referral_stats(user_id: int) -> dict:
+    """
+    Rolled-up numbers for the 🤝 Affiliate Program panel (customer_flow.py's
+    handle_referral): how many people signed up via this user's link,
+    how many of those went on to convert (first Premium payment, crediting
+    the bonus), and the total bonus days earned from referrals so far.
+    referred_count scans every user's record the same way get_bot_stats/
+    get_revenue_stats already do -- fine at this bot's scale, and keeps this
+    consistent with those rather than needing a separate reverse-index.
+    """
+    referred_count = 0
+    for uid in all_user_ids():
+        if uid == user_id:
+            continue
+        if _load(uid).get("referred_by") == user_id:
+            referred_count += 1
+
+    credits = _load(user_id).get("referral_credits", [])
+    return {
+        "referred_count": referred_count,
+        "converted_count": len(credits),
+        "bonus_days_earned": sum(c.get("days", 0) for c in credits),
+    }
+
+
+def get_referral_leaderboard(limit: int = 10) -> list[dict]:
+    """
+    Top affiliates by converted referrals, for the admin panel's
+    "🤝 Top Referrers" view -- who's actually driving paying signups, not
+    just link clicks (referred_count without a conversion is free to fake
+    by spamming the link; converted_count means a real Premium purchase
+    happened).
+    """
+    rows = []
+    for uid in all_user_ids():
+        credits = _load(uid).get("referral_credits", [])
+        if not credits:
+            continue
+        rows.append(
+            {
+                "user_id": uid,
+                "converted_count": len(credits),
+                "bonus_days_earned": sum(c.get("days", 0) for c in credits),
+            }
+        )
+    rows.sort(key=lambda r: r["converted_count"], reverse=True)
+    return rows[:limit]
 
 
 # ---------------------------------------------------------------------------
@@ -438,10 +506,15 @@ def get_bot_stats() -> dict:
     ids = all_user_ids()
     now = time.time()
     premium_count = 0
+    referred_signups = 0
+    referral_conversions = 0
     for uid in ids:
         sub = _load(uid)
         if sub["plan"] == "premium" and sub["premium_until"] and sub["premium_until"] > now:
             premium_count += 1
+        if sub.get("referred_by"):
+            referred_signups += 1
+        referral_conversions += len(sub.get("referral_credits", []))
 
     idx = _load_index()
     active_7d = sum(1 for e in idx.values() if now - e.get("last_seen", 0) <= 7 * 86400)
@@ -452,6 +525,8 @@ def get_bot_stats() -> dict:
         "premium_users": premium_count,
         "active_7d": active_7d,
         "active_30d": active_30d,
+        "referred_signups": referred_signups,
+        "referral_conversions": referral_conversions,
     }
 
 

@@ -347,7 +347,7 @@ def my_plan_kb(is_premium: bool, premium_stars: int, yearly_stars: int) -> Inlin
         rows.append([InlineKeyboardButton(text=f"⭐ Upgrade -- {premium_stars} Stars/month", callback_data="plan:buy:month")])
         rows.append([InlineKeyboardButton(text=f"⭐ Upgrade -- {yearly_stars} Stars/year", callback_data="plan:buy:year")])
         rows.append([InlineKeyboardButton(text="💳 Pay another way", callback_data="plan:contact_admin")])
-    rows.append([InlineKeyboardButton(text="🎁 Invite a friend", callback_data="plan:referral")])
+    rows.append([InlineKeyboardButton(text="🤝 Affiliate Program", callback_data="plan:referral")])
     rows.append([InlineKeyboardButton(text="🧾 Payment history", callback_data="plan:history")])
     rows.append([InlineKeyboardButton(text="🌐 Language", callback_data="plan:language")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -367,6 +367,7 @@ def admin_menu_kb() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="🧪 Test functionality", callback_data="admin:test")],
             [InlineKeyboardButton(text="🪵 Recent errors", callback_data="admin:errors")],
             [InlineKeyboardButton(text="🐞 Reported problems", callback_data="admin:reports")],
+            [InlineKeyboardButton(text="🤝 Top Referrers", callback_data="admin:referrals")],
         ]
     )
 

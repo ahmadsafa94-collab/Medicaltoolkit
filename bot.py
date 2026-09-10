@@ -208,10 +208,10 @@ async def cmd_start(message: Message):
                 subscriptions.register_referral(user_id, referrer_id)
 
     await message.answer(
-        "Welcome to the Medical Student Toolkit bot 👋\n\n"
-        "Use the buttons below to get started, or just send me a textbook "
-        "PDF and I'll split it into chapters using AI.\n\n"
-        "Tap ℹ️ Help anytime for details on everything the bot can do.",
+        "Welcome to the Medical Toolkit bot 👋\n\n"
+        "I am an AI based Bot designed to help you study for your Medical exams or manage your "
+        "patients clinically.\n\n"
+        "Lets Go.",
         reply_markup=main_menu_kb(WEBAPP_URL, is_admin=subscriptions.is_admin(user_id)),
     )
 
