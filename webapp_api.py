@@ -39,6 +39,8 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.types import BufferedInputFile
 from starlette.applications import Starlette
 from starlette.exceptions import HTTPException
+from starlette.middleware import Middleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Mount, Route
@@ -1003,4 +1005,38 @@ routes = [
     Mount("/webapp", app=StaticFiles(directory=_WEBAPP_DIR, html=True), name="webapp"),
 ]
 
-app = Starlette(routes=routes, exception_handlers={HTTPException: _api_error_handler})
+
+class NoCacheStaticMiddleware(BaseHTTPMiddleware):
+    """
+    Forces every /webapp/* response (index.html, style.css, app.js) to be
+    treated as always-stale by any standards-compliant HTTP cache.
+
+    Added after a real deploy where a CSS/JS change (a new shelf
+    background, a new button) was pushed to Railway and confirmed correct
+    on disk, but Telegram's in-app WebView kept showing the OLD version
+    even after the user closed and reopened the Book Shelf mini app --
+    Starlette's default StaticFiles only sets ETag/Last-Modified, which
+    relies on the client bothering to revalidate rather than serving
+    straight from its cache, and Telegram's WebView (and some mobile
+    browsers generally) has been reported to skip that and just reuse
+    whatever it cached from the URL before. This can't force Telegram's
+    own internal caching to behave, but it removes every OTHER layer
+    (a browser disk cache, an intermediary proxy/CDN) as a possible cause,
+    and is the standard fix for "I redeployed but nothing changed" issues
+    with Telegram Mini Apps. See webapp/index.html's `?v=` query strings
+    on style.css/app.js for the other half of this fix -- a version bump
+    there changes the URL itself, which busts a cache no header can.
+    """
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        if request.url.path.startswith("/webapp/") or request.url.path == "/webapp":
+            response.headers["Cache-Control"] = "no-store, must-revalidate"
+            response.headers["Pragma"] = "no-cache"
+        return response
+
+
+app = Starlette(
+    routes=routes,
+    exception_handlers={HTTPException: _api_error_handler},
+    middleware=[Middleware(NoCacheStaticMiddleware)],
+)
