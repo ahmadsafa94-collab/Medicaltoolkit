@@ -41,6 +41,7 @@ from config import (
     PDF_PROCESSING_TIMEOUT_SECONDS,
     WEBAPP_URL,
     PORT,
+    SUPPORT_ADMIN_USERNAME,
 )
 from pdf_processor import process_pdf, ChapterDetectionError, count_pages, compute_chapter_ranges
 from paths import user_dir, safe_pdf_filename, unique_path
@@ -61,16 +62,11 @@ from keyboards import (
     recent_list_kb,
     make_searchable_kb,
     study_tools_kb,
-    BTN_DOSE,
-    BTN_PDF_SPLIT,
-    BTN_CALC,
-    BTN_INTERACTIONS,
-    BTN_ASK,
+    clinical_tools_kb,
     BTN_SHELF,
-    BTN_RECENT,
-    BTN_BOOKMARKS,
     BTN_MY_PLAN,
     BTN_STUDY_TOOLS,
+    BTN_CLINICAL_TOOLS,
     BTN_ADMIN,
     BTN_FEEDBACK,
     BTN_SUPPORT,
@@ -93,7 +89,6 @@ import library
 import notes_flow
 import osce_flow
 import pdf_export
-import radiology_flow
 import session_cache
 import subscriptions
 import user_history
@@ -107,7 +102,7 @@ dp = Dispatcher()
 
 
 class SplitStates(StatesGroup):
-    """FSM state for the ✂️ PDF Splitter button -- see btn_pdf_split/handle_pdf_split_only below."""
+    """FSM state for the ✂️ PDF Splitter (Study Tools) button -- see handle_study_pdfsplit/handle_pdf_split_only below."""
 
     awaiting_pdf = State()
 
@@ -137,11 +132,11 @@ admin_flow.register_admin_handlers(dp)
 # contact-admin flow, referrals, payment history, language -- see customer_flow.py.
 customer_flow.register_customer_handlers(dp)
 
-# Study Tools -> ECG / Lab interpretation (Premium, one free trial each) --
-# see ecg_lab_flow.py.
+# Clinical Tools -> ECG / Lab interpretation (Premium, one free trial each,
+# unlimited for admins -- see subscriptions.is_premium()) -- see ecg_lab_flow.py.
 ecg_lab_flow.register_ecg_lab_handlers(dp)
 
-# Study Tools -> Ask About Drugs (free-form Q&A grounded in a single drug's
+# Clinical Tools -> Ask About Drugs (free-form Q&A grounded in a single drug's
 # FDA label -- also reachable straight from a /dose lookup's section menu)
 # -- see drug_qa_flow.py.
 drug_qa_flow.register_drug_qa_handlers(dp)
@@ -152,9 +147,6 @@ flashcard_flow.register_flashcard_handlers(dp)
 
 # Study Tools -> OSCE-style case practice -- see osce_flow.py.
 osce_flow.register_osce_handlers(dp)
-
-# Study Tools -> Radiology/histology image quiz -- see radiology_flow.py.
-radiology_flow.register_radiology_handlers(dp)
 
 # Study Tools -> My Notes (personal note-taking synced to bookmarks) --
 # see notes_flow.py.
@@ -298,41 +290,25 @@ async def cmd_help(message: Message):
         "/feedback - report a problem or suggest something; goes straight to the admin "
         "(same as the 🐞 Report a problem button in the menu below).\n\n"
         "/support - get help directly from the admin (same as the 🆘 Support button in the menu below).\n\n"
-        "✂️ PDF Splitter (menu button) - splits an uploaded PDF into one file per chapter "
-        "and sends them straight back, without saving the book or offering to index it for "
-        "💬 Ask My Books/📚 Book Shelf. Sending a PDF directly to the chat (no button first) still "
-        "does the full flow: split, save to your library, and offer indexing."
+        "🩺 Clinical Tools (menu button) - ECG/lab interpretation, calculators, Ask About Drugs, "
+        "AI-checked drug interactions, and drug lookup.\n\n"
+        "🧠 Study Tools (menu button) - flashcards, OSCE practice, the PDF splitter (splits an "
+        "uploaded PDF into one file per chapter without saving it or offering to index it -- sending "
+        "a PDF directly to the chat still does the full save+index flow), notes, Ask My Books, and "
+        "bookmarks."
     )
-
-
-@dp.message(F.text == BTN_CALC)
-async def btn_calc(message: Message):
-    await cmd_calculators(message)
-
-
-@dp.message(F.text == BTN_INTERACTIONS)
-async def btn_interactions(message: Message, state: FSMContext):
-    await cmd_interactions(message, state)
-
-
-@dp.message(F.text == BTN_ASK)
-async def btn_ask(message: Message):
-    await show_book_picker(message)
-
-
-@dp.message(F.text == BTN_RECENT)
-async def btn_recent(message: Message):
-    await cmd_recent(message)
-
-
-@dp.message(F.text == BTN_BOOKMARKS)
-async def btn_bookmarks(message: Message):
-    await cmd_bookmarks(message)
 
 
 @dp.message(F.text == BTN_MY_PLAN)
 async def btn_my_plan(message: Message):
     await customer_flow._show_plan(message.answer, message.from_user.id)
+
+
+@dp.message(F.text == BTN_CLINICAL_TOOLS)
+async def btn_clinical_tools(message: Message):
+    await message.answer(
+        "🩺 *Clinical Tools*\n\nPick one:", parse_mode="Markdown", reply_markup=clinical_tools_kb()
+    )
 
 
 @dp.message(F.text == BTN_STUDY_TOOLS)
@@ -354,17 +330,24 @@ async def btn_feedback(message: Message, state: FSMContext):
 
 @dp.message(F.text == BTN_SUPPORT)
 async def btn_support(message: Message, state: FSMContext):
-    await customer_flow._prompt_support(message.answer, state)
-
-
-@dp.message(F.text == BTN_PDF_SPLIT)
-async def btn_pdf_split(message: Message, state: FSMContext):
-    await state.set_state(SplitStates.awaiting_pdf)
-    await message.answer(
-        "✂️ Send the PDF you want split into chapters. I'll send the chapters straight back as "
-        "separate files -- nothing is saved to your library or offered for 💬 Ask My Books/📚 Book Shelf. "
-        "/cancel to abort."
-    )
+    """
+    A real, direct Telegram chat with the admin -- not one relayed through
+    this bot -- when config.SUPPORT_ADMIN_USERNAME is set: a URL button
+    (https://t.me/<username>) is the officially reliable way to deep-link
+    into a chat regardless of whether that admin and this user have ever
+    interacted before. Falls back to the same live-forward prompt Report a
+    problem uses (customer_flow.py's _prompt_support) when no username is
+    configured, since there's nothing to link to.
+    """
+    if SUPPORT_ADMIN_USERNAME:
+        await message.answer(
+            "🆘 Tap below to open a direct chat with the admin.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="💬 Chat with the admin", url=f"https://t.me/{SUPPORT_ADMIN_USERNAME}")]]
+            ),
+        )
+    else:
+        await customer_flow._prompt_support(message.answer, state)
 
 
 @dp.message(Command("cancel"), SplitStates.awaiting_pdf)
@@ -373,14 +356,50 @@ async def cancel_pdf_split(message: Message, state: FSMContext):
     await message.answer("Cancelled.")
 
 
-@dp.message(F.text == BTN_DOSE)
-async def btn_dose(message: Message):
+@dp.callback_query(F.data == "clin:calc")
+async def handle_clin_calc(callback: CallbackQuery):
+    await callback.answer()
+    await cmd_calculators(callback.message)
+
+
+@dp.callback_query(F.data == "clin:interactions")
+async def handle_clin_interactions(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await cmd_interactions(callback.message, state)
+
+
+@dp.callback_query(F.data == "clin:dose")
+async def handle_clin_dose(callback: CallbackQuery):
+    await callback.answer()
     bot_info = await bot.get_me()
-    await message.answer(
+    await callback.message.answer(
         "Tap the button below, then start typing a drug name — "
         "you'll see live suggestions to pick from.",
         reply_markup=drug_search_inline_kb(bot_info.username),
     )
+
+
+@dp.callback_query(F.data == "study:pdfsplit")
+async def handle_study_pdfsplit(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.set_state(SplitStates.awaiting_pdf)
+    await callback.message.answer(
+        "✂️ Send the PDF you want split into chapters. I'll send the chapters straight back as "
+        "separate files -- nothing is saved to your library or offered for 💬 Ask My Books/📚 Book Shelf. "
+        "/cancel to abort."
+    )
+
+
+@dp.callback_query(F.data == "study:askbooks")
+async def handle_study_askbooks(callback: CallbackQuery):
+    await callback.answer()
+    await show_book_picker(callback.message.answer, callback.from_user.id)
+
+
+@dp.callback_query(F.data == "study:bookmarks")
+async def handle_study_bookmarks(callback: CallbackQuery):
+    await callback.answer()
+    await _send_bookmarks(callback.message.answer, callback.from_user.id)
 
 
 @dp.inline_query()
@@ -548,19 +567,23 @@ async def cmd_recent(message: Message):
     )
 
 
-@dp.message(Command("bookmarks"))
-async def cmd_bookmarks(message: Message):
-    names = await user_history.get_bookmarks(message.from_user.id)
+async def _send_bookmarks(answer_fn, user_id: int) -> None:
+    names = await user_history.get_bookmarks(user_id)
     if not names:
-        await message.answer(
+        await answer_fn(
             "No bookmarks yet -- after a /dose lookup, tap '🔖 Bookmark this drug' to save it here."
         )
         return
-    await message.answer(
+    await answer_fn(
         "🔖 *Bookmarked drugs* — tap to look up again (or /unbookmark <name> to remove one):",
         parse_mode="Markdown",
         reply_markup=recent_list_kb(names, "bookmark"),
     )
+
+
+@dp.message(Command("bookmarks"))
+async def cmd_bookmarks(message: Message):
+    await _send_bookmarks(message.answer, message.from_user.id)
 
 
 @dp.message(Command("unbookmark"))

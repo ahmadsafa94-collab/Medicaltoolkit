@@ -58,8 +58,15 @@ _NOT_A_COMMAND = F.text & ~F.text.startswith("/")
 _QA_ANSWER_TIMEOUT_SECONDS = 30
 
 
-async def show_book_picker(message: Message) -> None:
-    all_books = library.list_books(message.from_user.id)
+async def show_book_picker(answer_fn, user_id: int) -> None:
+    """
+    answer_fn/user_id rather than a Message: a callback_query-triggered
+    caller (e.g. bot.py's "study:askbooks" handler) must pass
+    callback.from_user.id, NOT callback.message.from_user.id -- the latter
+    is the BOT (sender of the message the inline keyboard is attached to),
+    not the tapping user.
+    """
+    all_books = library.list_books(user_id)
     # Every uploaded book has a registry entry now (see library.py), but only
     # ones that have actually been indexed are answerable -- filter here
     # rather than in library.list_books itself, since the Book Shelf mini
@@ -67,18 +74,18 @@ async def show_book_picker(message: Message) -> None:
     # same function.
     books = {bid: info for bid, info in all_books.items() if info.get("qa_indexed")}
     if not books:
-        await message.answer(
+        await answer_fn(
             "You don't have any searchable books yet. Open 📚 Book Shelf, pick a book, and tap "
             "'Ask questions using AI' to index it -- or upload one via chat and tap "
             "'🔍 Make this book searchable' on the result."
         )
         return
-    await message.answer("Which book do you want to ask about?", reply_markup=book_picker_kb(books))
+    await answer_fn("Which book do you want to ask about?", reply_markup=book_picker_kb(books))
 
 
 @router.message(Command("ask"))
 async def cmd_ask(message: Message):
-    await show_book_picker(message)
+    await show_book_picker(message.answer, message.from_user.id)
 
 
 @router.message(Command("cancel"), BookQAStates.awaiting_question)

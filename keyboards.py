@@ -11,16 +11,10 @@ from aiogram.types import (
     WebAppInfo,
 )
 
-BTN_DOSE = "💊 Dose Lookup"
-BTN_PDF_SPLIT = "✂️ PDF Splitter"
-BTN_CALC = "🧮 Calculators"
-BTN_INTERACTIONS = "🔀 Interactions"
-BTN_ASK = "💬 Ask My Books"
-BTN_SHELF = "📚 Book Shelf"
-BTN_RECENT = "🕘 Recent"
-BTN_BOOKMARKS = "🔖 Bookmarks"
-BTN_MY_PLAN = "⭐ My Plan"
+BTN_SHELF = "📚 BOOK SHELF"
+BTN_CLINICAL_TOOLS = "🩺 Clinical Tools"
 BTN_STUDY_TOOLS = "🧠 Study Tools"
+BTN_MY_PLAN = "⭐ My Plan"
 BTN_ADMIN = "🛠 Admin Panel"
 BTN_FEEDBACK = "🐞 Report a problem"
 BTN_SUPPORT = "🆘 Support"
@@ -31,40 +25,34 @@ def main_menu_kb(webapp_url: str = "", is_admin: bool = False) -> ReplyKeyboardM
     Built as a function (not a module-level constant) so the Book Shelf row
     can be left out entirely when webapp_url isn't configured yet.
 
-    This is the bot's single surface for "what can I do here" -- /start no
-    longer prints a text list of slash-commands (that list went stale
-    easily and duplicated what's already discoverable here). Every button
-    below maps to the exact same handler its equivalent slash-command uses,
-    so nothing was removed, just moved: BTN_RECENT/BTN_BOOKMARKS call
-    cmd_recent/cmd_bookmarks directly with no arguments, same as typing the
-    bare command. /pregnancy, /unbookmark, and /glossary are not mirrored
-    here (no persistent button; still reachable by typing the command) --
-    the first two need a typed argument with no natural button equivalent,
-    and glossary was dropped from the fixed keyboard to make room. BTN_MY_PLAN
-    opens the customer subscription panel (customer_flow.py) and BTN_STUDY_TOOLS
-    opens an inline menu (study_tools_kb() below) for ECG/lab interpretation,
-    flashcards, OSCE practice, the image quiz, and notes -- kept off the main
-    keyboard itself so it doesn't grow without bound as more study features
-    are added. BTN_ADMIN only appears for Telegram user ids in
-    config.ADMIN_USER_IDS (admin_flow.py). BTN_FEEDBACK opens the same
-    "message the admin" prompt as /feedback (customer_flow.py's
+    This is the bot's single surface for "what can I do here". Deliberately
+    small: almost everything that used to be its own fixed-keyboard button
+    now lives one tap deeper, under one of two inline submenus, so this top
+    level stays scannable as more features get added:
+
+      - BTN_CLINICAL_TOOLS opens clinical_tools_kb() below: ECG/lab
+        interpretation, calculators, Ask About Drugs, drug interactions, and
+        drug lookup.
+      - BTN_STUDY_TOOLS opens study_tools_kb() below: flashcards, OSCE
+        practice, the PDF splitter, notes, Ask My Books, and bookmarks.
+
+    BTN_SHELF ("📚 BOOK SHELF") is deliberately first and alone on its own
+    row -- the closest a plain-text ReplyKeyboardMarkup button (no bold/size
+    control in the Bot API) can get to looking "big" is a full-width row of
+    its own with no sibling button splitting it, plus the all-caps label.
+    BTN_MY_PLAN opens the customer subscription panel (customer_flow.py).
+    BTN_ADMIN only appears for Telegram user ids in config.ADMIN_USER_IDS
+    (admin_flow.py) -- and for those same ids, subscriptions.is_premium()
+    always returns True, so nothing under either submenu is ever
+    quota-limited or gated behind Premium for an admin. BTN_FEEDBACK opens
+    the same "message the admin" prompt as /feedback (customer_flow.py's
     _prompt_feedback) for reporting a bug or suggesting something -- logged
     durably (admin_log.record_report) as well as forwarded live, so it backs
-    the admin panel's "🐞 Reported problems" view. BTN_SUPPORT is the general
-    "get help now" channel (/support, customer_flow.py's _prompt_support):
-    forwarded live to every admin the same way, but NOT logged as a report --
-    it replaces the old ℹ️ Help button's keyboard slot, since a fixed button
-    that puts the user straight in touch with the admin is more useful there
-    than a static wall of command descriptions (still available via /help).
-    BTN_PDF_SPLIT ("✂️ PDF Splitter") is a DELIBERATELY different, lighter
-    action than sending a PDF straight to the chat: sending a PDF directly
-    (bot.py's handle_pdf_upload, unrelated to this keyboard) splits AND saves
-    the book into the user's library, offering to index it for 💬 Ask My Books
-    and putting it on 📚 Book Shelf. Tapping this button first (bot.py's
-    btn_pdf_split / handle_pdf_split_only) does ONLY the split -- chapters are
-    sent back as plain documents with nothing written to the library and no
-    Ask My Books/Book Shelf offer -- for someone who just wants a quick,
-    disposable chapter split.
+    the admin panel's "🐞 Reported problems" view. BTN_SUPPORT
+    (bot.py's btn_support) opens a direct Telegram chat with the admin (a
+    URL button, config.SUPPORT_ADMIN_USERNAME) when that's configured, or
+    falls back to the same live-forward prompt as Report a problem
+    (customer_flow.py's _prompt_support) when it isn't.
 
     IMPORTANT: the Book Shelf button here is a PLAIN text button, not a
     `web_app` KeyboardButton. An earlier version attached web_app directly
@@ -79,15 +67,11 @@ def main_menu_kb(webapp_url: str = "", is_admin: bool = False) -> ReplyKeyboardM
     via bot.set_chat_menu_button, also a web_app launch) is the other,
     redundant, confirmed-working entry point.
     """
-    rows = [
-        [KeyboardButton(text=BTN_DOSE), KeyboardButton(text=BTN_CALC)],
-        [KeyboardButton(text=BTN_INTERACTIONS), KeyboardButton(text=BTN_ASK)],
-        [KeyboardButton(text=BTN_PDF_SPLIT), KeyboardButton(text=BTN_RECENT)],
-        [KeyboardButton(text=BTN_BOOKMARKS), KeyboardButton(text=BTN_MY_PLAN)],
-        [KeyboardButton(text=BTN_STUDY_TOOLS), KeyboardButton(text=BTN_SUPPORT)],
-    ]
+    rows = []
     if webapp_url:
         rows.append([KeyboardButton(text=BTN_SHELF)])
+    rows.append([KeyboardButton(text=BTN_CLINICAL_TOOLS), KeyboardButton(text=BTN_STUDY_TOOLS)])
+    rows.append([KeyboardButton(text=BTN_MY_PLAN), KeyboardButton(text=BTN_SUPPORT)])
     rows.append([KeyboardButton(text=BTN_FEEDBACK)])
     if is_admin:
         rows.append([KeyboardButton(text=BTN_ADMIN)])
@@ -228,6 +212,23 @@ def interaction_menu_kb(drug_count: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def interaction_confirm_kb() -> InlineKeyboardMarkup:
+    """
+    Shown when a typed drug name didn't match the FDA database directly but
+    interaction_ai.resolve_drug_name() found a likely candidate (a typo fix
+    or a brand->generic resolution) -- the user confirms before it's added,
+    rather than it being added silently on an AI guess.
+    """
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Yes, that's it", callback_data="ix:confirm:yes"),
+                InlineKeyboardButton(text="❌ No", callback_data="ix:confirm:no"),
+            ]
+        ]
+    )
+
+
 def chapter_ai_kb(cache_id: str) -> InlineKeyboardMarkup:
     """Buttons attached to a just-sent chapter PDF: on-demand AI summary / self-test quiz / mnemonics for that chapter."""
     return InlineKeyboardMarkup(
@@ -294,19 +295,35 @@ def drug_search_inline_kb(bot_username: str) -> InlineKeyboardMarkup:
 
 
 # ---------------------------------------------------------------------------
-# Study Tools (ECG/lab interpretation, flashcards, OSCE, image quiz, notes)
+# Clinical Tools (ECG/lab interpretation, calculators, drug lookup/interactions)
+# ---------------------------------------------------------------------------
+
+def clinical_tools_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🫀 ECG Interpretation", callback_data="study:ecg")],
+            [InlineKeyboardButton(text="🧪 Lab Interpretation", callback_data="study:lab")],
+            [InlineKeyboardButton(text="🧮 Calculators", callback_data="clin:calc")],
+            [InlineKeyboardButton(text="💊 Ask About Drugs", callback_data="study:drugqa")],
+            [InlineKeyboardButton(text="🔀 Drug Interactions", callback_data="clin:interactions")],
+            [InlineKeyboardButton(text="💊 Drug Lookup", callback_data="clin:dose")],
+        ]
+    )
+
+
+# ---------------------------------------------------------------------------
+# Study Tools (flashcards, OSCE, PDF splitter, notes, Ask My Books, bookmarks)
 # ---------------------------------------------------------------------------
 
 def study_tools_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🫀 ECG Interpretation", callback_data="study:ecg")],
-            [InlineKeyboardButton(text="🧪 Lab Interpretation", callback_data="study:lab")],
-            [InlineKeyboardButton(text="💊 Ask About Drugs", callback_data="study:drugqa")],
             [InlineKeyboardButton(text="🗂 Flashcards", callback_data="study:flashcards")],
             [InlineKeyboardButton(text="🩺 OSCE Practice", callback_data="study:osce")],
-            [InlineKeyboardButton(text="🩻 Image Quiz (Radiology/Histology)", callback_data="study:imagequiz")],
+            [InlineKeyboardButton(text="✂️ PDF Splitter", callback_data="study:pdfsplit")],
             [InlineKeyboardButton(text="📓 My Notes", callback_data="study:notes")],
+            [InlineKeyboardButton(text="💬 Ask My Books", callback_data="study:askbooks")],
+            [InlineKeyboardButton(text="🔖 Bookmarks", callback_data="study:bookmarks")],
         ]
     )
 

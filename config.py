@@ -122,6 +122,15 @@ ADMIN_USER_IDS = {
     int(x) for x in os.environ.get("ADMIN_USER_IDS", "").replace(" ", "").split(",") if x
 }
 
+# Public @username (no leading "@") of the admin who should receive 🆘
+# Support taps. When set, bot.py's btn_support sends a real https://t.me/
+# link so the user lands in a genuine, direct Telegram chat with that admin
+# -- not one relayed through this bot. When unset (the default), Support
+# falls back to the same live-forward-to-every-admin prompt Report a
+# problem uses (customer_flow.py's _prompt_support), since there's no
+# username to link to.
+SUPPORT_ADMIN_USERNAME = os.environ.get("SUPPORT_ADMIN_USERNAME", "").lstrip("@").strip()
+
 # Free-tier monthly caps on the Claude-token-heavy features -- see
 # subscriptions.py. Everything else (dose lookup, interactions, calculators,
 # glossary) stays free and uncapped since it doesn't call Claude at all.

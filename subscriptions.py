@@ -170,7 +170,17 @@ def get_status(user_id: int) -> dict:
 
 
 def is_premium(user_id: int) -> bool:
-    """True if currently on an unexpired Premium plan. Auto-downgrades (and persists) an expired plan back to free."""
+    """
+    True if currently on an unexpired Premium plan, OR if this user is an
+    admin (config.ADMIN_USER_IDS) -- admins get full, unmetered access to
+    every Premium-gated feature with no subscription needed, since every
+    quota/trial check in this module (check_and_consume,
+    check_and_consume_trial, can_use_trial_or_premium) funnels through this
+    one function. Auto-downgrades (and persists) an expired plan back to
+    free for everyone else.
+    """
+    if is_admin(user_id):
+        return True
     sub = _load(user_id)
     if sub["plan"] == "premium" and sub["premium_until"] and sub["premium_until"] > time.time():
         return True

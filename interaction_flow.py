@@ -1,34 +1,29 @@
 """
 Multi-drug interaction checker.
 
-Lets the user add as many drugs as they want (via lookup_drug, the same
-openFDA-backed lookup /dose uses), then cross-checks each drug's own
-"Drug Interactions" and "Contraindications" label sections for mentions of
-every OTHER drug in the list, by name.
+Lets the user add as many drugs as they want -- via lookup_drug, the same
+openFDA-backed lookup /dose uses, with an AI fallback (interaction_ai.py's
+resolve_drug_name) when a typed name doesn't match directly, so a typo or an
+unusual brand name still resolves (with a "Did you mean X?" confirmation
+rather than silently guessing) -- then asks Claude to read each drug's own
+"Drug Interactions" and "Contraindications" label sections and describe what
+they say (or don't say) about the others.
 
-This is deliberately just a text search over each drug's own FDA label --
-NOT a curated drug-interaction database (like Lexicomp/Micromedex/an
+This is grounded ONLY in each drug's own real FDA label text (openFDA, the
+same source /dose shows verbatim) -- Claude is never asked to recall an
+interaction from its own training, only to read and summarize the fetched
+excerpts (see interaction_ai.py's system prompt). It is deliberately NOT a
+curated drug-interaction database (like Lexicomp/Micromedex/an
 interaction-checker API), and the bot says so up front and again in every
-result. Two important asymmetries this implies:
-
-  1. A hit means drug A's label happens to mention drug B by name. It does
-     NOT mean the interaction is clinically significant, nor does the
-     absence of a hit mean there is no interaction -- many real
-     interactions are described by drug CLASS ("other CNS depressants",
-     "strong CYP3A4 inhibitors") rather than by naming every specific drug,
-     and a name search can't catch those.
-  2. Interactions are usually mentioned from only one side's label (e.g.
-     warfarin's label is far more likely to name a specific NSAID than that
-     NSAID's label is to name warfarin back) -- so results are intentionally
-     checked in both directions per pair, and the direction of each hit is
-     shown rather than collapsed.
+result: a label not mentioning another drug does not mean there's no
+interaction (many are described by drug CLASS -- "other CNS depressants",
+"strong CYP3A4 inhibitors" -- rather than by naming every specific drug).
 
 Same FSM-in-its-own-router pattern as renal_flow.py / calc_flow.py.
 """
 
 import asyncio
 import logging
-import re
 
 from aiogram import Router, F
 from aiogram.filters import Command
@@ -36,8 +31,9 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
+import interaction_ai
 from drug_lookup import lookup_drug, DrugNotFoundError, DrugLookupRateLimitedError
-from keyboards import interaction_menu_kb
+from keyboards import interaction_menu_kb, interaction_confirm_kb
 from telegram_helpers import send_long_text
 
 logger = logging.getLogger(__name__)
@@ -51,29 +47,31 @@ class InteractionStates(StatesGroup):
 
 _NOT_A_COMMAND = F.text & ~F.text.startswith("/")
 
-# Not a hard technical limit -- just a point past which an N^2 cross-check
-# produces a wall of text nobody will actually read. Explained to the user
-# rather than silently enforced.
+# Not a hard technical limit -- just a point past which the interaction
+# analysis prompt gets long enough that quality/latency suffer. Explained to
+# the user rather than silently enforced.
 MAX_DRUGS = 15
 
-_RELEVANT_FIELD_LABELS = ["Drug Interactions", "Contraindications"]
-_MAX_EXCERPTS_PER_PAIR = 4
-_MIN_NAME_LEN_TO_MATCH = 3  # avoid matching on stray short tokens
+_LOOKUP_TIMEOUT_SECONDS = 25
+_RESOLVE_TIMEOUT_SECONDS = 15
+_ANALYZE_TIMEOUT_SECONDS = 45
 
 
 @router.message(Command("interactions"))
 async def cmd_interactions(message: Message, state: FSMContext):
     await state.set_state(InteractionStates.collecting)
-    await state.update_data(drugs=[])
+    await state.update_data(drugs=[], pending=None)
     await message.answer(
         "🔀 *Drug Interaction Checker*\n\n"
-        "Type a drug name to add it to the list -- add as many as you want. "
-        "When you have at least 2, tap *Check Interactions* and I'll search each drug's own FDA "
-        "label (Drug Interactions + Contraindications sections) for mentions of the others, in both directions.\n\n"
-        "⚠️ This is a *text search*, not a curated interaction database. A drug NOT being mentioned "
-        "does *not* mean there's no interaction (many are described by drug class, not by name), "
-        "and a mention doesn't automatically mean the interaction is clinically significant. "
-        "Always confirm with a dedicated interaction checker or a pharmacist before acting on this.",
+        "Type a drug name to add it to the list -- generic or brand name, and it's fine if the "
+        "spelling isn't perfect. When you have at least 2, tap *Check Interactions* and Claude will "
+        "read each drug's own FDA label (Drug Interactions + Contraindications sections) and describe "
+        "what each one says about the others.\n\n"
+        "⚠️ This is grounded in each drug's own label text, not a curated interaction database. A drug "
+        "NOT being mentioned does *not* mean there's no interaction (many are described by drug class, "
+        "not by name), and a mention doesn't automatically mean the interaction is clinically "
+        "significant. Always confirm with a dedicated interaction checker or a pharmacist before "
+        "acting on this.",
         parse_mode="Markdown",
         reply_markup=interaction_menu_kb(0),
     )
@@ -137,11 +135,48 @@ async def handle_ix_check(callback: CallbackQuery, state: FSMContext):
         await callback.message.answer("Add at least 2 drugs before checking interactions.")
         return
 
-    pair_findings = _cross_check(drugs)
-    text = _format_findings(drugs, pair_findings)
+    status = await callback.message.answer("Asking Claude to read each label...")
+    try:
+        text = await asyncio.wait_for(
+            asyncio.to_thread(interaction_ai.analyze_interactions, drugs),
+            timeout=_ANALYZE_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        await status.edit_text("That took too long. Please try again.")
+        return
+    except interaction_ai.InteractionAIError as e:
+        logger.warning("Interaction analysis failed: %s", e)
+        await status.edit_text(f"Couldn't analyze interactions right now: {e}")
+        return
+    except Exception:
+        logger.exception("Unexpected error analyzing interactions for %s", [d["name"] for d in drugs])
+        await status.edit_text("Something went wrong analyzing interactions. Please try again.")
+        return
+
+    try:
+        await status.delete()
+    except Exception:
+        pass  # not critical if the "Asking Claude..." message can't be deleted (e.g. already gone)
+
     ok = await send_long_text(callback.message.answer, text)
     if not ok:
         await callback.message.answer("Couldn't send the results (Telegram rejected the message).")
+
+
+async def _lookup_and_add(answer_fn, edit_fn, state: FSMContext, drugs: list[dict], name: str, generic: str | None, sections: dict) -> None:
+    """Shared "actually add this confirmed drug" step, used by both the direct-match and the AI-confirmed paths."""
+    if any(d["name"].lower() == name.lower() for d in drugs):
+        await edit_fn(f"{name} is already in the list.")
+        return
+
+    drugs.append({"name": name, "generic": generic, "sections": sections})
+    await state.update_data(drugs=drugs, pending=None)
+
+    await edit_fn(f"✅ Added {name}. {_list_line(drugs)}")
+    prompt = "Add another, or tap an option below:"
+    if len(drugs) >= 2:
+        prompt = "Add another, or tap 'Check Interactions' when ready:"
+    await answer_fn(prompt, reply_markup=interaction_menu_kb(len(drugs)))
 
 
 @router.message(InteractionStates.collecting, _NOT_A_COMMAND)
@@ -151,138 +186,117 @@ async def handle_ix_add_drug(message: Message, state: FSMContext):
         return
 
     drugs = data["drugs"]
-    drug_name = message.text.strip()
-    if not drug_name:
+    raw_name = message.text.strip()
+    if not raw_name:
         return
 
     if len(drugs) >= MAX_DRUGS:
         await message.answer(
-            f"That's {MAX_DRUGS} drugs already -- cross-checking every pair beyond that produces a wall "
+            f"That's {MAX_DRUGS} drugs already -- checking every one beyond that produces a wall "
             "of text nobody will read. Remove one first if you want to add another, or check interactions now.",
             reply_markup=interaction_menu_kb(len(drugs)),
         )
         return
 
-    status_msg = await message.answer(f"Looking up {drug_name}...")
+    status_msg = await message.answer(f"Looking up {raw_name}...")
 
     try:
-        sections = await asyncio.wait_for(lookup_drug(drug_name), timeout=25)
+        sections = await asyncio.wait_for(lookup_drug(raw_name), timeout=_LOOKUP_TIMEOUT_SECONDS)
     except asyncio.TimeoutError:
         await status_msg.edit_text("The FDA database took too long to respond. Please try again.")
         return
     except DrugLookupRateLimitedError as e:
         await status_msg.edit_text(str(e))
         return
-    except DrugNotFoundError as e:
-        await status_msg.edit_text(str(e))
+    except DrugNotFoundError:
+        # Direct match failed -- fall back to asking Claude what real drug this
+        # was likely meant to be (typo fix, or an uncommon brand name) before
+        # giving up. Never auto-added: the user confirms the AI's guess first.
+        await status_msg.edit_text(f"Couldn't match '{raw_name}' directly. Checking for a likely match...")
+        try:
+            candidate = await asyncio.wait_for(
+                asyncio.to_thread(interaction_ai.resolve_drug_name, raw_name),
+                timeout=_RESOLVE_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            logger.exception("interaction_ai.resolve_drug_name failed for '%s'", raw_name)
+            candidate = None
+
+        if candidate is None:
+            await status_msg.edit_text(
+                f"No FDA label found for '{raw_name}', and I couldn't confidently guess what you meant. "
+                "Try the plain generic name (e.g. 'amoxicillin' rather than 'Amoxil 500mg')."
+            )
+            return
+
+        try:
+            candidate_sections = await asyncio.wait_for(lookup_drug(candidate), timeout=_LOOKUP_TIMEOUT_SECONDS)
+        except Exception:
+            await status_msg.edit_text(
+                f"No FDA label found for '{raw_name}'. Try the plain generic name "
+                "(e.g. 'amoxicillin' rather than 'Amoxil 500mg')."
+            )
+            return
+
+        candidate_name = candidate_sections.get("_name", candidate)
+        await state.update_data(
+            pending={
+                "name": candidate_name,
+                "generic": candidate_sections.get("_generic"),
+                "sections": candidate_sections,
+            }
+        )
+        await status_msg.edit_text(
+            f"Did you mean *{candidate_name}*?", parse_mode="Markdown", reply_markup=interaction_confirm_kb()
+        )
         return
     except Exception:
-        logger.exception("Interaction-checker lookup failed for '%s'", drug_name)
-        await status_msg.edit_text(f"Lookup failed for {drug_name}. Please try again.")
+        logger.exception("Interaction-checker lookup failed for '%s'", raw_name)
+        await status_msg.edit_text(f"Lookup failed for {raw_name}. Please try again.")
         return
 
-    name = sections.get("_name", drug_name)
+    name = sections.get("_name", raw_name)
     generic = sections.get("_generic")
 
-    if any(d["name"].lower() == name.lower() for d in drugs):
-        await status_msg.edit_text(f"{name} is already in the list.")
+    async def _edit(text: str, **kwargs):
+        await status_msg.edit_text(text, **kwargs)
+
+    await _lookup_and_add(message.answer, _edit, state, drugs, name, generic, sections)
+
+
+@router.callback_query(F.data == "ix:confirm:yes", InteractionStates.collecting)
+async def handle_ix_confirm_yes(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    data = await _require_flow_data(callback, state)
+    if data is None:
         return
 
-    relevant_chunks = _extract_relevant_chunks(sections)
-    drugs.append({"name": name, "generic": generic, "chunks": relevant_chunks})
-    await state.update_data(drugs=drugs)
+    pending = data.get("pending")
+    if not pending:
+        await callback.message.answer("Nothing pending to confirm -- type a drug name to add it.")
+        return
 
-    await status_msg.edit_text(f"✅ Added {name}. {_list_line(drugs)}")
-    prompt = "Add another, or tap an option below:"
-    if len(drugs) >= 2:
-        prompt = "Add another, or tap 'Check Interactions' when ready:"
-    await message.answer(prompt, reply_markup=interaction_menu_kb(len(drugs)))
+    drugs = data["drugs"]
+
+    async def _edit(text: str, **kwargs):
+        await callback.message.answer(text, **kwargs)
+
+    await _lookup_and_add(
+        callback.message.answer, _edit, state, drugs, pending["name"], pending.get("generic"), pending["sections"]
+    )
+
+
+@router.callback_query(F.data == "ix:confirm:no", InteractionStates.collecting)
+async def handle_ix_confirm_no(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.update_data(pending=None)
+    await callback.message.answer("Okay -- type the drug name again, spelled differently, or try a generic name.")
 
 
 def _list_line(drugs: list[dict]) -> str:
     if not drugs:
         return "List is now empty."
     return "Current list: " + ", ".join(d["name"] for d in drugs)
-
-
-def _extract_relevant_chunks(sections: dict) -> list[tuple[str, str]]:
-    """Returns [(field_label, text_chunk), ...] for the interaction-relevant sections of a lookup_drug() result."""
-    chunks = []
-    for label in _RELEVANT_FIELD_LABELS:
-        data = sections.get(label)
-        if not data:
-            continue
-        for bullet in data.get("bullets", []):
-            chunks.append((label, bullet))
-        for table in data.get("tables", []):
-            chunks.append((label, table))
-    return chunks
-
-
-def _names_to_match(drug: dict) -> set:
-    names = {drug["name"]}
-    if drug.get("generic"):
-        names.add(drug["generic"])
-    return {n.strip() for n in names if n and len(n.strip()) >= _MIN_NAME_LEN_TO_MATCH}
-
-
-def _cross_check(drugs: list[dict]) -> dict:
-    """
-    For every ordered pair (source, other), search source's interaction-relevant
-    chunks for a mention of other's name/generic. Returns
-    {(source_name, other_name): [(field_label, excerpt), ...]} for pairs with
-    at least one hit -- both directions of a pair are checked and reported
-    separately, since labels commonly mention an interacting drug from only
-    one side.
-    """
-    results = {}
-    for source in drugs:
-        for other in drugs:
-            if source is other:
-                continue
-            other_names = _names_to_match(other)
-            if not other_names:
-                continue
-            pattern = re.compile("|".join(re.escape(n) for n in other_names), re.IGNORECASE)
-
-            hits = []
-            for field_label, chunk in source["chunks"]:
-                if pattern.search(chunk):
-                    excerpt = chunk if len(chunk) <= 300 else chunk[:300].rsplit(" ", 1)[0] + " [...]"
-                    hits.append((field_label, excerpt))
-                    if len(hits) >= _MAX_EXCERPTS_PER_PAIR:
-                        break
-            if hits:
-                results[(source["name"], other["name"])] = hits
-    return results
-
-
-def _format_findings(drugs: list[dict], pair_findings: dict) -> str:
-    if not pair_findings:
-        return (
-            "No direct textual mentions found between any of these drugs' own Drug Interactions / "
-            "Contraindications sections: " + ", ".join(d["name"] for d in drugs) + ".\n\n"
-            "⚠️ This does *not* mean there's no interaction -- it only means none of these labels "
-            "happened to name another one of these drugs by text. Interactions described generically "
-            "(by drug class, e.g. 'other CNS depressants' or 'strong CYP3A4 inhibitors') won't be caught "
-            "by a name-matching search like this. Use a dedicated interaction checker or pharmacist "
-            "consult before acting on this."
-        )
-
-    lines = [f"🔀 *Possible interactions among: {', '.join(d['name'] for d in drugs)}*", ""]
-    for (source_name, other_name), hits in pair_findings.items():
-        lines.append(f"*{source_name}*'s label mentions *{other_name}*:")
-        for field_label, excerpt in hits:
-            lines.append(f"  [{field_label}] “{excerpt}”")
-        lines.append("")
-
-    lines.append(
-        "⚠️ These are raw text mentions pulled from each drug's own FDA label, *not* a verified "
-        "interaction database -- and the absence of a mention above does *not* rule out an interaction "
-        "either (see the note when you started this checker). Confirm anything you're actually going to "
-        "act on with a dedicated interaction checker or a pharmacist."
-    )
-    return "\n".join(lines)
 
 
 def register_interaction_handlers(dp) -> None:
