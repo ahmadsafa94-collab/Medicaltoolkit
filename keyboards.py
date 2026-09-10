@@ -24,6 +24,7 @@ BTN_BOOKMARKS = "🔖 Bookmarks"
 BTN_MY_PLAN = "⭐ My Plan"
 BTN_STUDY_TOOLS = "🧠 Study Tools"
 BTN_ADMIN = "🛠 Admin Panel"
+BTN_FEEDBACK = "🐞 Report a problem"
 
 
 def main_menu_kb(webapp_url: str = "", is_admin: bool = False) -> ReplyKeyboardMarkup:
@@ -45,7 +46,12 @@ def main_menu_kb(webapp_url: str = "", is_admin: bool = False) -> ReplyKeyboardM
     ECG/lab interpretation, flashcards, OSCE practice, the image quiz, and
     notes -- kept off the main keyboard itself so it doesn't grow without
     bound as more study features are added. BTN_ADMIN only appears for
-    Telegram user ids in config.ADMIN_USER_IDS (admin_flow.py).
+    Telegram user ids in config.ADMIN_USER_IDS (admin_flow.py). BTN_FEEDBACK
+    opens the same "message the admin" prompt as /feedback (customer_flow.py's
+    _prompt_feedback) -- kept as a fixed keyboard button rather than only an
+    inline one under /help since a persistent button is far more reliably
+    discovered/tapped than either a typed slash-command or a button buried in
+    a text message the user has to scroll back to.
 
     IMPORTANT: the Book Shelf button here is a PLAIN text button, not a
     `web_app` KeyboardButton. An earlier version attached web_app directly
@@ -68,9 +74,8 @@ def main_menu_kb(webapp_url: str = "", is_admin: bool = False) -> ReplyKeyboardM
         [KeyboardButton(text=BTN_MY_PLAN), KeyboardButton(text=BTN_STUDY_TOOLS)],
     ]
     if webapp_url:
-        rows.append([KeyboardButton(text=BTN_SHELF), KeyboardButton(text=BTN_HELP)])
-    else:
-        rows.append([KeyboardButton(text=BTN_HELP)])
+        rows.append([KeyboardButton(text=BTN_SHELF)])
+    rows.append([KeyboardButton(text=BTN_HELP), KeyboardButton(text=BTN_FEEDBACK)])
     if is_admin:
         rows.append([KeyboardButton(text=BTN_ADMIN)])
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True, is_persistent=True)
@@ -316,17 +321,6 @@ def my_plan_kb(is_premium: bool, premium_stars: int, yearly_stars: int) -> Inlin
     rows.append([InlineKeyboardButton(text="🧾 Payment history", callback_data="plan:history")])
     rows.append([InlineKeyboardButton(text="🌐 Language", callback_data="plan:language")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def help_kb() -> InlineKeyboardMarkup:
-    """
-    Shown under /help. Routes into the same "message the admin" pattern
-    customer_flow.py already uses for plan:contact_admin (feedback:start,
-    handled there) rather than a separate contact mechanism.
-    """
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="🐞 Report a problem / Suggest something", callback_data="feedback:start")]]
-    )
 
 
 # ---------------------------------------------------------------------------

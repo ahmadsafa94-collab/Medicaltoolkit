@@ -60,7 +60,6 @@ from keyboards import (
     recent_list_kb,
     make_searchable_kb,
     study_tools_kb,
-    help_kb,
     BTN_DOSE,
     BTN_UPLOAD,
     BTN_HELP,
@@ -74,6 +73,7 @@ from keyboards import (
     BTN_MY_PLAN,
     BTN_STUDY_TOOLS,
     BTN_ADMIN,
+    BTN_FEEDBACK,
 )
 from telegram_helpers import send_long_text, send_documents_safely, send_table_entries
 from renal_flow import register_renal_handlers
@@ -290,8 +290,7 @@ async def cmd_help(message: Message):
         "/bookmarks - drugs you've saved with the 🔖 button after a /dose lookup "
         "(remove one with /unbookmark <name>).\n\n"
         "/feedback - report a problem or suggest something; goes straight to the admin "
-        "(same as the button below).",
-        reply_markup=help_kb(),
+        "(same as the 🐞 Report a problem button in the menu below)."
     )
 
 
@@ -350,6 +349,11 @@ async def btn_study_tools(message: Message):
 @dp.message(F.text == BTN_ADMIN)
 async def btn_admin(message: Message, state: FSMContext):
     await admin_flow.cmd_admin(message, state)
+
+
+@dp.message(F.text == BTN_FEEDBACK)
+async def btn_feedback(message: Message, state: FSMContext):
+    await customer_flow._prompt_feedback(message.answer, state)
 
 
 @dp.message(F.text == BTN_DOSE)

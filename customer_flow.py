@@ -222,12 +222,6 @@ async def cmd_feedback(message: Message, state: FSMContext):
     await _prompt_feedback(message.answer, state)
 
 
-@router.callback_query(F.data == "feedback:start")
-async def handle_feedback_prompt(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    await _prompt_feedback(callback.message.answer, state)
-
-
 @router.message(Command("cancel"), CustomerStates.awaiting_feedback_message)
 async def handle_feedback_cancel(message: Message, state: FSMContext):
     await state.clear()
