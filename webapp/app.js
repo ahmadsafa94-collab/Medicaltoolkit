@@ -831,6 +831,13 @@ function handleSummarizeMenu() {
 
 async function runSummarize(body) {
   const jobType = body.scope === "book" ? "summary:book" : `summary:chapter:${body.chapter_index}`;
+  // Title for the exported PDF's cover/filename -- the book's own title for
+  // a whole-book summary, "Book Title — Chapter Title" for a single chapter.
+  const summaryTitle =
+    body.scope === "book"
+      ? currentBook.title
+      : `${currentBook.title} — ${(currentBook.chapters || [])[body.chapter_index]?.title || "Chapter"}`;
+
   const result = document.getElementById("summarize-result");
   result.innerHTML = `<p class="spinner-line">⏳ <span id="summarize-progress">Starting…</span></p>`;
   try {
@@ -849,12 +856,41 @@ async function runSummarize(body) {
       if (el) el.textContent = p || "Working…";
     },
     onDone: (text) => {
-      result.innerHTML = `<div style="white-space:pre-wrap; margin-top:10px;">${escapeHtml(text)}</div>`;
+      result.innerHTML = `
+        <div style="white-space:pre-wrap; margin-top:10px;">${escapeHtml(text)}</div>
+        <button class="btn secondary" id="summarize-export" style="margin-top:12px;">📄 Export as PDF</button>
+      `;
+      document.getElementById("summarize-export").addEventListener("click", (e) =>
+        exportSummaryAsPdf(e.target, summaryTitle, text)
+      );
     },
     onError: (msg) => {
       result.innerHTML = `<p class="error-text">${escapeHtml(msg)}</p>`;
     },
   });
+}
+
+// Same reasoning as Ask AI's exportAnswerAsPdf: a browser download doesn't
+// reliably land anywhere findable inside Telegram's in-app WebView, so the
+// backend sends the PDF as a Telegram document to the user's own chat with
+// the bot instead of streaming it back over HTTP.
+async function exportSummaryAsPdf(btn, title, text) {
+  const originalLabel = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Sending…";
+  try {
+    await api(`/api/books/${currentBook.book_id}/summarize/export`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title, text }),
+    });
+    alertMsg("Sent! Check your Telegram chat with this bot to download the PDF.");
+  } catch (e) {
+    alertMsg("Couldn't export: " + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalLabel;
+  }
 }
 
 // ---------------------------------------------------------------------
@@ -1166,6 +1202,10 @@ function handleQuizMenu() {
   panel(`
     <button class="link-btn" id="quiz-history">🕘 Quiz History</button>
     <p><strong>Select chapters:</strong></p>
+    <div class="quiz-select-row">
+      <button class="link-btn" id="quiz-select-all">☑️ Select all</button>
+      <button class="link-btn" id="quiz-select-none">⬜ Unselect all</button>
+    </div>
     <ul class="chapter-list">${items}</ul>
     <p><strong>Difficulty:</strong></p>
     <div class="diff-row">
@@ -1191,6 +1231,12 @@ function handleQuizMenu() {
 
   document.getElementById("quiz-generate").addEventListener("click", runQuizGeneration);
   document.getElementById("quiz-history").addEventListener("click", showQuizHistoryList);
+  document.getElementById("quiz-select-all").addEventListener("click", () => {
+    document.querySelectorAll(".quiz-chapter-cb").forEach((cb) => { cb.checked = true; });
+  });
+  document.getElementById("quiz-select-none").addEventListener("click", () => {
+    document.querySelectorAll(".quiz-chapter-cb").forEach((cb) => { cb.checked = false; });
+  });
 }
 
 async function runQuizGeneration() {

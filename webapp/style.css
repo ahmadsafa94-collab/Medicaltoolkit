@@ -51,6 +51,33 @@ body {
 
 /* ---------- Shelf ---------- */
 
+/* A warm, dark wood backdrop behind the whole shelf -- like the inside of
+   a real wooden bookcase, rather than the app's plain default background.
+   Scoped to #view-shelf only (not the rest of the app) so reading/Q&A/
+   quiz panels elsewhere keep their normal, theme-following background --
+   deliberately hardcoded browns rather than the Telegram theme variables
+   (same choice already made for --shelf-wood/--shelf-wood-dark below) so
+   the shelf reads as "wood" consistently in both light and dark Telegram
+   themes. The repeating-linear-gradient layer adds faint horizontal grain
+   lines on top of the vertical light-to-dark gradient, suggesting a wood
+   plank's texture without needing an actual image asset.
+   Text/control colors below are overridden to warm cream tones for
+   contrast against this dark background, since --text/--hint/--link are
+   tuned for the app's normal light backdrop and would be hard to read here. */
+#view-shelf {
+  min-height: 100vh;
+  color: #f1e3cf;
+  background:
+    repeating-linear-gradient(180deg, rgba(0,0,0,0.06) 0px, rgba(0,0,0,0.06) 2px, transparent 2px, transparent 5px),
+    linear-gradient(180deg, #6b4630 0%, #5a3922 45%, #46301f 100%);
+}
+#view-shelf .topbar { background: linear-gradient(180deg, #6b4630, #5a3922); }
+#view-shelf .topbar h1 { color: #f8ecd9; }
+#view-shelf .muted { color: #d9c2a3; }
+#view-shelf .link-btn { background: rgba(255,255,255,0.18); color: #f8ecd9; }
+#view-shelf .book-title-label { color: #f1e3cf; }
+#view-shelf .empty-state { color: #e7d3ba; }
+
 .empty-state { text-align: center; padding: 60px 20px; }
 
 .shelf-grid {
@@ -267,6 +294,8 @@ body {
 .qa-input-row { display: flex; gap: 8px; }
 .qa-input-row input { flex: 1; padding: 10px; border-radius: 10px; border: 1px solid rgba(0,0,0,0.15); font-size: 14px; }
 .qa-top-row { display: flex; gap: 8px; margin-bottom: 10px; }
+
+.quiz-select-row { display: flex; gap: 8px; margin: 8px 0; }
 
 .quiz-q { margin-bottom: 18px; }
 .quiz-q .q-text { font-weight: 600; margin-bottom: 8px; }
