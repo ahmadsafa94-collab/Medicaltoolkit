@@ -4,7 +4,18 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <title>Book Shelf</title>
-  <link rel="stylesheet" href="style.css" />
+  <!--
+    The "?v=" on style.css/app.js below is a manual cache-buster: Telegram's
+    in-app WebView has been observed to keep serving an old cached copy of
+    this mini app's CSS/JS after a redeploy even with the server's own
+    Cache-Control: no-store headers (see webapp_api.py's
+    NoCacheStaticMiddleware) applied. Since a query string makes it a
+    literally different URL, no cache -- Telegram's own included -- has an
+    old copy to (incorrectly) reuse. BUMP THIS NUMBER on every deploy that
+    changes style.css or app.js, or the fix for THIS bug silently stops
+    covering your NEXT change.
+  -->
+  <link rel="stylesheet" href="style.css?v=2" />
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 </head>
@@ -103,6 +114,6 @@
     <div id="action-sheet" class="action-sheet"></div>
   </div>
 
-  <script src="app.js"></script>
+  <script src="app.js?v=2"></script>
 </body>
 </html>
