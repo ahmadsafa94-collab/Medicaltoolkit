@@ -67,7 +67,7 @@ function alertMsg(msg) {
 // View switching
 // ---------------------------------------------------------------------
 
-const views = ["view-shelf", "view-bookmarks", "view-upload", "view-book", "view-reader"];
+const views = ["view-shelf", "view-bookmarks", "view-request-book", "view-upload", "view-book", "view-reader"];
 let viewStack = ["view-shelf"];
 
 function showView(id, { pushHistory = true } = {}) {
@@ -350,6 +350,49 @@ async function openBookAtPage(bookId, page) {
   await openBook(bookId);
   await openReader(page);
 }
+
+// ---------------------------------------------------------------------
+// Request a Book: send a URL to the admin from the shelf itself (the
+// customer doesn't have this book yet, so it can't live under one book's
+// own action grid). Everything past this submit step -- the admin's price
+// quote, payment, delivery -- happens as chat messages, not in this mini
+// app, since the customer needs a live notification when the admin
+// responds and a screen left open here can't reliably deliver that.
+// ---------------------------------------------------------------------
+
+document.getElementById("btn-request-book").addEventListener("click", () => {
+  document.getElementById("request-book-url").value = "";
+  document.getElementById("request-book-note").value = "";
+  document.getElementById("request-book-result").innerHTML = "";
+  showView("view-request-book");
+});
+
+document.getElementById("request-book-send").addEventListener("click", async () => {
+  const url = document.getElementById("request-book-url").value.trim();
+  const note = document.getElementById("request-book-note").value.trim();
+  const result = document.getElementById("request-book-result");
+  if (!url) {
+    result.innerHTML = `<p class="error-text">Please enter the book's URL.</p>`;
+    return;
+  }
+  const btn = document.getElementById("request-book-send");
+  btn.disabled = true;
+  result.innerHTML = `<p class="spinner-line">⏳ Sending…</p>`;
+  try {
+    await api("/api/request-book", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url, note }),
+    });
+    result.innerHTML = `<p class="muted">✅ Sent! Check your Telegram chat with this bot for the admin's reply.</p>`;
+    document.getElementById("request-book-url").value = "";
+    document.getElementById("request-book-note").value = "";
+  } catch (e) {
+    result.innerHTML = `<p class="error-text">${escapeHtml(e.message)}</p>`;
+  } finally {
+    btn.disabled = false;
+  }
+});
 
 document.getElementById("btn-add-book").addEventListener("click", () => {
   document.getElementById("file-input").click();

@@ -47,6 +47,7 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
 import anki_export
+import book_requests
 import chapter_ai
 import flashcards
 import library
@@ -58,6 +59,7 @@ import subscriptions
 from bot_instance import bot as tg_bot
 from chapter_flow import build_chapter_ai_kb
 from config import (
+    ADMIN_USER_IDS,
     ANTHROPIC_API_KEY,  # noqa: F401 -- imported so a missing key fails fast at startup, same as bot.py
     ASK_TIMEOUT_SECONDS,
     BOOK_SUMMARY_TIMEOUT_SECONDS,
@@ -1201,6 +1203,71 @@ async def delete_note_endpoint(request: Request):
 
 
 # ---------------------------------------------------------------------------
+# 8. Request a Book -- 📚 Request a Book button on the shelf itself (not one
+# book's action grid, since the whole point is the customer doesn't have
+# the book yet). See book_requests.py for the pending -> quoted -> paid ->
+# delivered flow this kicks off; everything past this submission step
+# (the admin's price quote, the customer's Stars payment, delivery) happens
+# in chat -- admin_flow.py (/pricebook, /deliverbook) and customer_flow.py
+# (bookreq:accept/decline, handle_successful_payment) -- since the customer
+# needs a live message when the admin responds, which a mini app screen
+# sitting open in the background can't reliably give them.
+# ---------------------------------------------------------------------------
+
+async def request_book_endpoint(request: Request):
+    user = require_user(request)
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise ApiError(status_code=400, detail="Invalid JSON body.")
+
+    url = (body.get("url") or "").strip()
+    note = (body.get("note") or "").strip()[:500]
+    if not url:
+        raise ApiError(status_code=400, detail="Please enter the book's URL.")
+    if not (url.startswith("http://") or url.startswith("https://")):
+        raise ApiError(status_code=400, detail="That doesn't look like a URL -- it should start with http:// or https://.")
+    if len(url) > 2000:
+        raise ApiError(status_code=400, detail="That URL is too long.")
+
+    if not ADMIN_USER_IDS:
+        raise ApiError(status_code=503, detail="This bot doesn't have an admin contact configured yet -- please try again later.")
+
+    username = user.get("username")
+    who = f"@{username}" if username else f"id {user['id']}"
+    record = book_requests.create_request(user["id"], who, url, note)
+
+    note_line = f"\n\nNote from customer: {note}" if note else ""
+    sent_to_any = False
+    for admin_id in ADMIN_USER_IDS:
+        try:
+            await tg_bot.send_message(
+                chat_id=admin_id,
+                text=(
+                    f"📚 Book request from {who} (id {user['id']}):\n\n{url}{note_line}\n\n"
+                    f"Reply with: /pricebook {record['request_id']} <price in USD, e.g. 12.50>"
+                ),
+            )
+            sent_to_any = True
+        except TelegramAPIError:
+            logger.warning("Failed to forward book request %s to admin %s", record["request_id"], admin_id)
+
+    if not sent_to_any:
+        raise ApiError(status_code=502, detail="Couldn't reach the admin right now -- please try again later.")
+
+    try:
+        await tg_bot.send_message(
+            chat_id=user["id"],
+            text="📚 Your book request has been sent to the admin. You'll get a message right here in this chat once they quote a price.",
+        )
+    except TelegramAPIError:
+        logger.warning("Failed to send book-request confirmation to chat_id=%s", user["id"])
+
+    return JSONResponse({"sent": True, "request_id": record["request_id"]})
+
+
+# ---------------------------------------------------------------------------
 # App wiring
 # ---------------------------------------------------------------------------
 
@@ -1237,6 +1304,7 @@ routes = [
     Route("/api/books/{book_id}/notes", list_notes_endpoint, methods=["GET"]),
     Route("/api/books/{book_id}/notes", add_note_endpoint, methods=["POST"]),
     Route("/api/books/{book_id}/notes/{note_id}", delete_note_endpoint, methods=["DELETE"]),
+    Route("/api/request-book", request_book_endpoint, methods=["POST"]),
     Mount("/webapp", app=StaticFiles(directory=_WEBAPP_DIR, html=True), name="webapp"),
 ]
 

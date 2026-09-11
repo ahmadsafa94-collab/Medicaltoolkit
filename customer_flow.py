@@ -22,6 +22,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, LabeledPrice, Message, PreCheckoutQuery
 
 import admin_log
+import book_requests
 import language
 import subscriptions
 from config import (
@@ -131,6 +132,10 @@ async def handle_pre_checkout(pre_checkout_query: PreCheckoutQuery):
 @router.message(F.successful_payment)
 async def handle_successful_payment(message: Message):
     payment = message.successful_payment
+    if payment.invoice_payload.startswith("bookreq_"):
+        await _handle_book_payment(message, payment)
+        return
+
     user_id = message.from_user.id
     days = _PLAN_PAYLOAD_TO_DAYS.get(payment.invoice_payload)
     if days is None:
@@ -162,6 +167,101 @@ async def handle_successful_payment(message: Message):
     await message.answer(
         f"✅ Thanks! You're now Premium for {days} days.{referral_note}",
     )
+
+
+async def _handle_book_payment(message: Message, payment) -> None:
+    """
+    Second half of the 📚 Request a Book flow's Stars invoice (see
+    handle_book_accept below for the first half, and book_requests.py for
+    the full pending -> quoted -> paid -> delivered state machine). Doesn't
+    grant anything itself -- it just marks the request paid and tells the
+    admin to deliver it via /deliverbook.
+    """
+    request_id = payment.invoice_payload[len("bookreq_"):]
+    record = book_requests.get_request(request_id)
+    if record is None:
+        logger.warning("successful_payment for unknown book request %s", request_id)
+        await message.answer(
+            "Payment received, but I couldn't find that book request -- please contact the admin via "
+            "⭐ My Plan so this can be sorted out manually."
+        )
+        return
+
+    book_requests.set_paid(request_id)
+    subscriptions.record_payment(message.from_user.id, stars=payment.total_amount, days=0, source=f"bookreq_{request_id}")
+
+    await message.answer("✅ Paid! The admin will deliver your book here shortly.")
+
+    from bot_instance import bot as tg_bot
+
+    for admin_id in ADMIN_USER_IDS:
+        try:
+            await tg_bot.send_message(
+                chat_id=admin_id,
+                text=(
+                    f"💰 Book request {request_id} was just paid ({payment.total_amount} Stars) by "
+                    f"{record['who']} (id {record['user_id']}).\n\n{record['url']}\n\n"
+                    f"Deliver it with: /deliverbook {request_id}"
+                ),
+            )
+        except TelegramAPIError:
+            logger.warning("Failed to notify admin %s of paid book request %s", admin_id, request_id)
+
+
+@router.callback_query(F.data.startswith("bookreq:accept:"))
+async def handle_book_accept(callback: CallbackQuery):
+    await callback.answer()
+    request_id = callback.data.split(":", 2)[2]
+    record = book_requests.get_request(request_id)
+    if record is None or record["user_id"] != callback.from_user.id:
+        await callback.message.answer("This request isn't available anymore.")
+        return
+    if record["status"] != "quoted":
+        await callback.message.answer(f"This request is '{record['status']}', not awaiting payment.")
+        return
+
+    from bot_instance import bot as tg_bot
+
+    try:
+        await tg_bot.send_invoice(
+            chat_id=callback.from_user.id,
+            title="Requested book",
+            description=record["url"][:255],
+            payload=f"bookreq_{request_id}",
+            currency="XTR",
+            prices=[LabeledPrice(label="Requested book", amount=record["stars"])],
+            provider_token="",
+        )
+    except TelegramAPIError:
+        logger.exception("Failed to send book-request Stars invoice for %s", request_id)
+        await callback.message.answer("Couldn't start the payment right now. Please try again in a moment.")
+
+
+@router.callback_query(F.data.startswith("bookreq:decline:"))
+async def handle_book_decline(callback: CallbackQuery):
+    await callback.answer()
+    request_id = callback.data.split(":", 2)[2]
+    record = book_requests.get_request(request_id)
+    if record is None or record["user_id"] != callback.from_user.id:
+        await callback.message.answer("This request isn't available anymore.")
+        return
+    if record["status"] != "quoted":
+        await callback.message.answer(f"This request is '{record['status']}' -- nothing to decline.")
+        return
+
+    book_requests.set_declined(request_id)
+    await callback.message.answer("Declined -- no charge.")
+
+    from bot_instance import bot as tg_bot
+
+    for admin_id in ADMIN_USER_IDS:
+        try:
+            await tg_bot.send_message(
+                chat_id=admin_id,
+                text=f"❌ {record['who']} declined the ${record['price_usd']:.2f} quote for book request {request_id}.",
+            )
+        except TelegramAPIError:
+            logger.warning("Failed to notify admin %s of declined book request %s", admin_id, request_id)
 
 
 @router.callback_query(F.data == "plan:contact_admin")
@@ -361,7 +461,11 @@ async def handle_history(callback: CallbackQuery):
     lines = ["🧾 *Payment history*", ""]
     for p in sorted(payments, key=lambda p: p["ts"], reverse=True)[:20]:
         when = time.strftime("%Y-%m-%d", time.gmtime(p["ts"]))
-        lines.append(f"{when} -- {p['stars']} Stars ({p['days']} days, {p.get('source', 'stars')})")
+        source = p.get("source", "stars")
+        if source.startswith("bookreq_"):
+            lines.append(f"{when} -- {p['stars']} Stars (requested book)")
+        else:
+            lines.append(f"{when} -- {p['stars']} Stars ({p['days']} days, {source})")
     await callback.message.answer("\n".join(lines), parse_mode="Markdown")
 
 

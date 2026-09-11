@@ -6,7 +6,9 @@ message can never be replayed by a non-admin to reach an admin action.
 
 Covers: bot-wide stats, subscription lookup/grant/revoke, a running API cost
 dashboard, broadcast, block/unblock, a "test functionality" smoke-test menu,
-recent server-side errors, and user-submitted 🐞 problem reports -- see
+recent server-side errors, user-submitted 🐞 problem reports, and the admin
+side of 📚 Request a Book (/pricebook, /deliverbook -- see book_requests.py
+for the full pending -> quoted -> paid -> delivered flow) -- see
 keyboards.py's admin_menu_kb() for the top-level menu these all hang off of.
 """
 
@@ -23,11 +25,12 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
 import admin_log
+import book_requests
 import chapter_ai
 import cost_ledger
 import ecg_lab_ai
 import subscriptions
-from keyboards import admin_menu_kb, admin_lookup_result_kb, admin_test_menu_kb
+from keyboards import admin_menu_kb, admin_lookup_result_kb, admin_test_menu_kb, book_request_offer_kb
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +55,7 @@ class AdminStates(StatesGroup):
     awaiting_lookup = State()
     awaiting_broadcast = State()
     awaiting_custom_days = State()
+    awaiting_book_delivery = State()
 
 
 async def _require_admin_message(message: Message) -> bool:
@@ -161,6 +165,26 @@ async def handle_referral_leaderboard(callback: CallbackQuery):
             f"{i}. {who} -- {row['converted_count']} converted, {row['bonus_days_earned']} bonus day(s) earned"
         )
     await callback.message.answer("\n".join(lines), parse_mode="Markdown")
+
+
+@router.callback_query(F.data == "admin:bookrequests")
+async def handle_book_requests(callback: CallbackQuery):
+    if not await _require_admin_callback(callback):
+        return
+    await callback.answer()
+    pending = book_requests.list_pending()
+    if not pending:
+        await callback.message.answer("📚 No pending book requests right now.")
+        return
+    lines = ["📚 *Pending book requests* (oldest first)", ""]
+    for r in pending:
+        when = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(r["created_at"]))
+        note_line = f"\n  Note: {r['note']}" if r.get("note") else ""
+        lines.append(
+            f"`{when}` {r['who']}\n  {r['url']}{note_line}\n"
+            f"  Quote: /pricebook {r['request_id']} <price in USD>"
+        )
+    await callback.message.answer("\n\n".join(lines)[:4000], parse_mode="Markdown")
 
 
 @router.callback_query(F.data == "admin:subs")
@@ -411,6 +435,100 @@ async def cmd_reply_user(message: Message):
     except TelegramAPIError:
         logger.exception("Failed to send admin reply to user %s", target_id)
         await message.answer(f"Couldn't reach user {target_id} (they may have blocked the bot).")
+
+
+@router.message(Command("pricebook"))
+async def cmd_price_book(message: Message):
+    """
+    /pricebook <request_id> <price_usd> -- quotes a customer's 📚 Request a
+    Book (book_requests.py) submission. Sends the customer an "✅ Accept &
+    Pay" button that starts a Telegram Stars invoice for the USD amount
+    given here, converted via config.USD_TO_STARS_RATE.
+    """
+    if not await _require_admin_message(message):
+        return
+
+    parts = (message.text or "").split(maxsplit=2)
+    if len(parts) < 3:
+        await message.answer("Usage: /pricebook <request_id> <price in USD, e.g. 12.50>")
+        return
+
+    request_id = parts[1]
+    try:
+        price_usd = float(parts[2])
+        if price_usd <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("The price must be a positive number, e.g. 12.50.")
+        return
+
+    record = book_requests.get_request(request_id)
+    if record is None:
+        await message.answer(f"No book request found with id {request_id}.")
+        return
+    if record["status"] != "pending":
+        await message.answer(f"This request is already '{record['status']}', not pending a quote.")
+        return
+
+    updated = book_requests.set_quote(request_id, price_usd)
+    stars = updated["stars"]
+
+    from bot_instance import bot as tg_bot
+
+    try:
+        await tg_bot.send_message(
+            chat_id=record["user_id"],
+            text=(
+                f"📚 Your requested book is available!\n\n{record['url']}\n\n"
+                f"Price: ${price_usd:.2f} ({stars} Telegram Stars)\n\n"
+                "Tap below to accept and pay, or decline."
+            ),
+            reply_markup=book_request_offer_kb(request_id, price_usd, stars),
+        )
+        await message.answer(f"Quote sent to user {record['user_id']}: ${price_usd:.2f} ({stars} Stars).")
+    except TelegramAPIError:
+        logger.exception("Failed to send book quote to user %s", record["user_id"])
+        await message.answer(f"Couldn't reach user {record['user_id']} (they may have blocked the bot).")
+
+
+@router.message(Command("deliverbook"))
+async def cmd_deliver_book(message: Message, state: FSMContext):
+    """
+    /deliverbook <request_id> -- starts delivery of a PAID book request.
+    The admin's very next message must be the PDF document itself; see
+    bot.py's handle_book_delivery_document for what happens once it
+    arrives -- that handler lives on the Dispatcher directly (not this
+    module's router) so it's checked BEFORE bot.py's own unconditional
+    @dp.message(F.document) upload handler, which would otherwise swallow
+    the admin's delivery PDF into the ADMIN's own library instead of the
+    customer's (see that handler's docstring for the full reasoning).
+    """
+    if not await _require_admin_message(message):
+        return
+
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await message.answer("Usage: /deliverbook <request_id> (then send the PDF as your next message)")
+        return
+
+    request_id = parts[1].strip()
+    record = book_requests.get_request(request_id)
+    if record is None:
+        await message.answer(f"No book request found with id {request_id}.")
+        return
+    if record["status"] != "paid":
+        await message.answer(f"This request is '{record['status']}', not paid yet -- nothing to deliver.")
+        return
+
+    await state.set_state(AdminStates.awaiting_book_delivery)
+    await state.update_data(book_request_id=request_id)
+    await message.answer(f"Send the PDF for request {request_id} now (user {record['user_id']}). /cancel to abort.")
+
+
+@router.message(Command("cancel"), AdminStates.awaiting_book_delivery)
+async def cmd_cancel_book_delivery(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Delivery cancelled.")
 
 
 def register_admin_handlers(dp) -> None:

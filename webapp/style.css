@@ -78,6 +78,8 @@ body {
 #view-shelf .book-title-label { color: #f1e3cf; }
 #view-shelf .empty-state { color: #e7d3ba; }
 
+.shelf-request-btn { display: block; margin: 4px 16px 4px; }
+
 .empty-state { text-align: center; padding: 60px 20px; }
 
 .shelf-grid {

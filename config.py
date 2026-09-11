@@ -169,6 +169,12 @@ PREMIUM_YEARLY_STARS = 2500
 PREMIUM_MONTH_DAYS = 30
 PREMIUM_YEAR_DAYS = 365
 
+# Same $0.016/Star rate as above (1 / 0.016 = 62.5), used by book_requests.py
+# to convert an admin's USD quote for a 📚 Requested Book into a Stars
+# invoice amount -- the one other place in the bot where a price is set ad
+# hoc in dollars rather than being one of the two fixed Premium prices.
+USD_TO_STARS_RATE = 62.5
+
 # Both sides of a referral get this many bonus days of Premium once the
 # REFERRED user completes their first successful Stars payment.
 REFERRAL_BONUS_DAYS = 30

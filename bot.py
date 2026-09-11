@@ -79,6 +79,7 @@ from chapter_flow import register_chapter_handlers, build_chapter_ai_kb
 from book_qa_flow import register_book_qa_handlers, show_book_picker
 import admin_flow
 import admin_log
+import book_requests
 import customer_flow
 import drug_qa_flow
 import ecg_lab_flow
@@ -745,6 +746,92 @@ async def handle_section_tap(callback: CallbackQuery):
     if table_entries:
         drug_name = sections.get("_name", "Drug")
         await send_table_entries(callback.message, drug_name, table_entries)
+
+
+@dp.message(F.document, admin_flow.AdminStates.awaiting_book_delivery)
+async def handle_book_delivery_document(message: Message, state: FSMContext):
+    """
+    The 📚 Request a Book flow's delivery step -- an admin ran
+    /deliverbook <request_id> (admin_flow.py, sets this exact state) and
+    this is their next message. Deliberately registered directly on `dp`
+    (not admin_flow.py's own router) and BEFORE the unconditional
+    @dp.message(F.document) handler below: aiogram checks a Router's own
+    handlers before descending into any included sub-router (confirmed
+    against aiogram's Router._propagate_event source), so a handler on
+    admin_flow.router would never even be reached here -- the plain
+    @dp.message(F.document) upload handler below has no state filter at
+    all, so it would swallow the admin's delivery PDF first and add it to
+    the ADMIN's own library instead of the customer's. See handle_pdf_upload
+    below for the general-purpose version of this same download+register
+    step; this one is deliberately a simpler, stripped-down copy (no chapter
+    detection, no "make searchable" offer) since delivering an already-
+    known PDF to someone else's shelf doesn't need either.
+    """
+    data = await state.get_data()
+    request_id = data.get("book_request_id")
+    await state.clear()
+    if not request_id:
+        await message.answer("This session expired. Run /deliverbook <request_id> again.")
+        return
+
+    record = book_requests.get_request(request_id)
+    if record is None or record["status"] != "paid":
+        await message.answer("This request is no longer awaiting delivery.")
+        return
+
+    doc = message.document
+    file_name = doc.file_name or f"{request_id}.pdf"
+    if doc.mime_type != "application/pdf" and not file_name.lower().endswith(".pdf"):
+        await message.answer("That doesn't look like a PDF. Please send a .pdf file, or /deliverbook again to retry.")
+        return
+    if doc.file_size and doc.file_size > MAX_UPLOAD_BYTES:
+        await message.answer(
+            f"That file is {doc.file_size / 1024 / 1024:.1f}MB, over Telegram's "
+            f"{MAX_UPLOAD_BYTES // 1024 // 1024}MB bot-download limit. Please send a smaller file."
+        )
+        return
+
+    customer_id = record["user_id"]
+    library_dir = os.path.join(user_dir(customer_id), "library")
+    os.makedirs(library_dir, exist_ok=True)
+    dest_path = unique_path(os.path.join(library_dir, safe_pdf_filename(file_name)))
+
+    status = await message.answer("Downloading and delivering...")
+    try:
+        file = await bot.get_file(doc.file_id)
+        await bot.download_file(file.file_path, destination=dest_path)
+    except TelegramAPIError as e:
+        logger.exception("Failed to download book-delivery PDF for request %s", request_id)
+        await status.edit_text(f"Couldn't download that file from Telegram: {e}")
+        return
+
+    try:
+        page_count = count_pages(dest_path)
+    except Exception:
+        logger.exception("count_pages failed for delivered book, request %s", request_id)
+        page_count = 0
+
+    book_title = os.path.splitext(file_name)[0].strip() or "Requested book"
+    library.add_book(customer_id, book_title, dest_path, page_count, source="request")
+    book_requests.set_delivered(request_id)
+
+    try:
+        with open(dest_path, "rb") as f:
+            pdf_bytes = f.read()
+        await bot.send_document(
+            chat_id=customer_id,
+            document=BufferedInputFile(pdf_bytes, filename=safe_pdf_filename(file_name)),
+            caption=f"📚 Your requested book is here! It's also on your 📚 Book Shelf now.\n\n{book_title}",
+        )
+    except TelegramAPIError:
+        logger.exception("Failed to send delivered book to customer %s", customer_id)
+        await status.edit_text(
+            f"Added to user {customer_id}'s Book Shelf, but couldn't send them the file directly "
+            "(they may have blocked the bot)."
+        )
+        return
+
+    await status.edit_text(f"✅ Delivered to user {customer_id} -- added to their Book Shelf and sent as a file.")
 
 
 @dp.message(F.document, SplitStates.awaiting_pdf)

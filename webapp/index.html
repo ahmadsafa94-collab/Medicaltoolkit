@@ -15,7 +15,7 @@
     changes style.css or app.js, or the fix for THIS bug silently stops
     covering your NEXT change.
   -->
-  <link rel="stylesheet" href="style.css?v=5" />
+  <link rel="stylesheet" href="style.css?v=6" />
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 </head>
@@ -27,6 +27,7 @@
       <h1>📚 Book Shelf</h1>
       <button id="btn-bookmarks" class="link-btn">🔖 Bookmarks</button>
     </header>
+    <button id="btn-request-book" class="link-btn shelf-request-btn">📚 Request a Book</button>
     <div id="shelf-empty" class="empty-state" hidden>
       <p>No books yet.</p>
       <p class="muted">Tap + to upload your first PDF.</p>
@@ -44,6 +45,25 @@
       <p class="muted">Open a book's reader and tap 🔖 Bookmark this page.</p>
     </div>
     <div id="bookmarks-list" class="bookmarks-list"></div>
+  </section>
+
+  <!-- ============ REQUEST A BOOK ============ -->
+  <section id="view-request-book" class="view" hidden>
+    <header class="topbar"><h1>📚 Request a Book</h1></header>
+    <div class="panel">
+      <p class="muted">
+        Don't have a book yet? Send its URL and the admin will check it, quote a price, and once you
+        accept and pay you'll get it right here on your shelf -- and as a file in this chat too.
+      </p>
+      <p style="margin-top:14px;"><strong>Book URL</strong></p>
+      <input id="request-book-url" type="url" placeholder="https://…" style="width:100%;padding:8px 10px;border-radius:8px;box-sizing:border-box;" />
+      <p style="margin-top:14px;"><strong>Note (optional)</strong></p>
+      <textarea id="request-book-note" placeholder="Anything the admin should know -- edition, chapters you need, etc." rows="3" style="width:100%;box-sizing:border-box;"></textarea>
+      <div style="margin-top:14px;">
+        <button class="btn" id="request-book-send">Send request</button>
+      </div>
+      <div id="request-book-result"></div>
+    </div>
   </section>
 
   <!-- ============ UPLOAD PROGRESS ============ -->
@@ -126,6 +146,6 @@
     <div id="action-sheet" class="action-sheet"></div>
   </div>
 
-  <script src="app.js?v=5"></script>
+  <script src="app.js?v=6"></script>
 </body>
 </html>

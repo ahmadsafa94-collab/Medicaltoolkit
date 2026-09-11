@@ -368,6 +368,17 @@ def admin_menu_kb() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="🪵 Recent errors", callback_data="admin:errors")],
             [InlineKeyboardButton(text="🐞 Reported problems", callback_data="admin:reports")],
             [InlineKeyboardButton(text="🤝 Top Referrers", callback_data="admin:referrals")],
+            [InlineKeyboardButton(text="📚 Book Requests", callback_data="admin:bookrequests")],
+        ]
+    )
+
+
+def book_request_offer_kb(request_id: str, price_usd: float, stars: int) -> InlineKeyboardMarkup:
+    """Sent to the CUSTOMER once an admin quotes a price via /pricebook -- see book_requests.py's pending -> quoted -> paid -> delivered flow."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=f"✅ Accept & Pay {stars} Stars (${price_usd:.2f})", callback_data=f"bookreq:accept:{request_id}")],
+            [InlineKeyboardButton(text="❌ Decline", callback_data=f"bookreq:decline:{request_id}")],
         ]
     )
 
