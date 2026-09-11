@@ -50,6 +50,7 @@ import anki_export
 import chapter_ai
 import flashcards
 import library
+import notes
 import pdf_export
 import pdf_qa
 import quiz_ai
@@ -1142,6 +1143,53 @@ async def delete_flashcards_endpoint(request: Request):
 
 
 # ---------------------------------------------------------------------------
+# 7. Notes -- the reader's own "📝 Notes" button per page, sharing the exact
+# same notes.py-backed store as the chat-side 🧠 Study Tools -> 📓 My Notes,
+# so a note added while reading shows up there too (and vice versa).
+# ---------------------------------------------------------------------------
+
+async def list_notes_endpoint(request: Request):
+    user = require_user(request)
+    book_id = request.path_params["book_id"]
+    _book_or_404(user["id"], book_id)
+    return JSONResponse({"notes": notes.list_notes(user["id"], book_id)})
+
+
+async def add_note_endpoint(request: Request):
+    user = require_user(request)
+    book_id = request.path_params["book_id"]
+    book = _book_or_404(user["id"], book_id)
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise ApiError(status_code=400, detail="Invalid JSON body.")
+
+    text = (body.get("text") or "").strip()
+    if not text:
+        raise ApiError(status_code=400, detail="Note text is required.")
+
+    page = body.get("page")
+    if page is not None:
+        if not isinstance(page, int) or isinstance(page, bool) or not (1 <= page <= book["page_count"]):
+            raise ApiError(status_code=400, detail="Invalid page number.")
+
+    note = notes.add_note(user["id"], book_id, page, text)
+    return JSONResponse(note)
+
+
+async def delete_note_endpoint(request: Request):
+    user = require_user(request)
+    book_id = request.path_params["book_id"]
+    _book_or_404(user["id"], book_id)
+    note_id = request.path_params["note_id"]
+    deleted = notes.delete_note(user["id"], book_id, note_id)
+    if not deleted:
+        raise ApiError(status_code=404, detail="Note not found.")
+    return JSONResponse({"deleted": True})
+
+
+# ---------------------------------------------------------------------------
 # App wiring
 # ---------------------------------------------------------------------------
 
@@ -1175,6 +1223,9 @@ routes = [
     Route("/api/books/{book_id}/flashcards/generate", generate_flashcards_endpoint, methods=["POST"]),
     Route("/api/books/{book_id}/flashcards/review", review_flashcard_endpoint, methods=["POST"]),
     Route("/api/books/{book_id}/flashcards/export", export_flashcards_endpoint, methods=["POST"]),
+    Route("/api/books/{book_id}/notes", list_notes_endpoint, methods=["GET"]),
+    Route("/api/books/{book_id}/notes", add_note_endpoint, methods=["POST"]),
+    Route("/api/books/{book_id}/notes/{note_id}", delete_note_endpoint, methods=["DELETE"]),
     Mount("/webapp", app=StaticFiles(directory=_WEBAPP_DIR, html=True), name="webapp"),
 ]
 

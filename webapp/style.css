@@ -329,6 +329,22 @@ body {
 .flash-rate-btn.good { background: var(--link); }
 .flash-rate-btn.easy { background: var(--ok); }
 
+/* ---------- Reader notes panel (📝 Notes button) ---------- */
+
+.reader-notes-panel {
+  margin: 8px 16px; padding: 12px; border-radius: 12px; background: var(--secondary-bg);
+}
+.reader-note-row {
+  display: flex; align-items: flex-start; gap: 8px; padding: 8px 0; border-bottom: 1px solid rgba(0,0,0,0.06);
+}
+.reader-note-row:last-child { border-bottom: none; }
+.reader-note-text { flex: 1; font-size: 14px; line-height: 1.5; white-space: pre-wrap; }
+#reader-note-input {
+  width: 100%; margin-top: 8px; padding: 8px 10px; border-radius: 8px; box-sizing: border-box;
+  border: 1px solid rgba(0,0,0,0.15); font-size: 14px; color: var(--text); background: var(--bg);
+  font-family: inherit; resize: vertical;
+}
+
 .error-text { color: var(--danger); font-size: 13px; margin: 8px 0; }
 
 /* ---------- Reader ---------- */

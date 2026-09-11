@@ -15,7 +15,7 @@
     changes style.css or app.js, or the fix for THIS bug silently stops
     covering your NEXT change.
   -->
-  <link rel="stylesheet" href="style.css?v=3" />
+  <link rel="stylesheet" href="style.css?v=4" />
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 </head>
@@ -98,11 +98,20 @@
       <button id="reader-zoom-in" class="tool-btn" title="Zoom in">+</button>
       <button id="reader-goto" class="tool-btn" title="Jump to page">🔢 Go to page</button>
       <button id="reader-bookmark" class="tool-btn" title="Bookmark this page">🔖 Bookmark</button>
+      <button id="reader-notes" class="tool-btn" title="Notes on this page">📝 Notes</button>
     </div>
     <div id="reader-goto-row" class="name-editor" hidden>
       <input id="reader-goto-input" type="number" min="1" placeholder="Page number" />
       <button id="reader-goto-go" class="btn">Go</button>
       <button id="reader-goto-cancel" class="btn secondary">Cancel</button>
+    </div>
+    <div id="reader-notes-panel" class="reader-notes-panel" hidden>
+      <div id="reader-notes-list"></div>
+      <textarea id="reader-note-input" placeholder="Add a note on this page…" rows="3"></textarea>
+      <div class="flash-review-row">
+        <button id="reader-note-save" class="btn">Save note</button>
+        <button id="reader-notes-close" class="btn secondary">Close</button>
+      </div>
     </div>
     <div id="reader-canvas-wrap">
       <div id="reader-page-container">
@@ -117,6 +126,6 @@
     <div id="action-sheet" class="action-sheet"></div>
   </div>
 
-  <script src="app.js?v=3"></script>
+  <script src="app.js?v=4"></script>
 </body>
 </html>

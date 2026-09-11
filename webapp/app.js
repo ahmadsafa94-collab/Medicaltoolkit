@@ -583,7 +583,7 @@ async function sendChapterFilesToChat() {
 // zoomFactor is a multiplier applied on top of the auto-fit-to-width scale
 // (1 = fit width, 1.4 = 40% zoomed in past fit-width, etc.) so zoom keeps
 // working sensibly across pages/devices with different fit-width scales.
-let readerState = { pdf: null, pageNum: 1, rendering: false, zoomFactor: 1 };
+let readerState = { pdf: null, pageNum: 1, rendering: false, zoomFactor: 1, notes: [] };
 const ZOOM_STEP = 0.2;
 const ZOOM_MIN = 0.5;
 const ZOOM_MAX = 3;
@@ -605,6 +605,13 @@ async function openReader(targetPage) {
     readerState.pageNum = targetPage || currentBook.bookmark_page || 1;
     readerState.zoomFactor = 1;
     updateZoomLabel();
+    document.getElementById("reader-notes-panel").hidden = true;
+    try {
+      const result = await api(`/api/books/${currentBook.book_id}/notes`);
+      readerState.notes = result.notes;
+    } catch (_) {
+      readerState.notes = [];  // non-fatal -- the reader still works without notes loaded
+    }
     renderReaderPage();
   } catch (e) {
     alertMsg("Couldn't open the reader: " + e.message);
@@ -666,6 +673,8 @@ async function renderReaderPage() {
   document.getElementById("reader-page-label").textContent =
     `Page ${readerState.pageNum} / ${readerState.pdf.numPages}`;
   updateBookmarkButton();
+  updateNotesButton();
+  if (!document.getElementById("reader-notes-panel").hidden) renderNotesPanel();
   readerState.rendering = false;
 }
 
@@ -677,6 +686,91 @@ function updateBookmarkButton() {
   const btn = document.getElementById("reader-bookmark");
   const isBookmarked = currentBook.bookmark_page === readerState.pageNum;
   btn.textContent = isBookmarked ? "🔖 Bookmarked (tap to remove)" : "🔖 Bookmark this page";
+}
+
+// ---------------------------------------------------------------------
+// Reader notes -- 📝 Notes button, tied to the page currently on screen.
+// Shares the exact same notes.py-backed store as the chat-side
+// 🧠 Study Tools -> 📓 My Notes, so a note added here shows up there too.
+// ---------------------------------------------------------------------
+
+function notesForCurrentPage() {
+  return readerState.notes.filter((n) => n.page === readerState.pageNum);
+}
+
+function updateNotesButton() {
+  const btn = document.getElementById("reader-notes");
+  const count = notesForCurrentPage().length;
+  btn.textContent = count ? `📝 Notes (${count})` : "📝 Notes";
+}
+
+function renderNotesPanel() {
+  const list = document.getElementById("reader-notes-list");
+  const pageNotes = notesForCurrentPage();
+  if (!pageNotes.length) {
+    list.innerHTML = `<p class="muted">No notes on this page yet.</p>`;
+  } else {
+    list.innerHTML = "";
+    pageNotes.forEach((n) => {
+      const row = document.createElement("div");
+      row.className = "reader-note-row";
+      const text = document.createElement("div");
+      text.className = "reader-note-text";
+      text.textContent = n.text;
+      const del = document.createElement("button");
+      del.className = "link-btn";
+      del.textContent = "🗑";
+      del.addEventListener("click", () => deleteReaderNote(n.id));
+      row.appendChild(text);
+      row.appendChild(del);
+      list.appendChild(row);
+    });
+  }
+  document.getElementById("reader-note-input").value = "";
+}
+
+document.getElementById("reader-notes").addEventListener("click", () => {
+  const panel = document.getElementById("reader-notes-panel");
+  panel.hidden = !panel.hidden;
+  if (!panel.hidden) renderNotesPanel();
+});
+
+document.getElementById("reader-notes-close").addEventListener("click", () => {
+  document.getElementById("reader-notes-panel").hidden = true;
+});
+
+document.getElementById("reader-note-save").addEventListener("click", async () => {
+  const input = document.getElementById("reader-note-input");
+  const text = input.value.trim();
+  if (!text) return;
+  const saveBtn = document.getElementById("reader-note-save");
+  saveBtn.disabled = true;
+  try {
+    const note = await api(`/api/books/${currentBook.book_id}/notes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ page: readerState.pageNum, text }),
+    });
+    readerState.notes.push(note);
+    updateNotesButton();
+    renderNotesPanel();
+  } catch (e) {
+    alertMsg("Couldn't save that note: " + e.message);
+  } finally {
+    saveBtn.disabled = false;
+  }
+});
+
+async function deleteReaderNote(noteId) {
+  try {
+    await api(`/api/books/${currentBook.book_id}/notes/${noteId}`, { method: "DELETE" });
+  } catch (e) {
+    alertMsg("Couldn't delete that note: " + e.message);
+    return;
+  }
+  readerState.notes = readerState.notes.filter((n) => n.id !== noteId);
+  updateNotesButton();
+  renderNotesPanel();
 }
 
 document.getElementById("reader-prev").addEventListener("click", () => {

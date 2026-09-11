@@ -16,7 +16,7 @@ BTN_CLINICAL_TOOLS = "🩺 Clinical Tools"
 BTN_STUDY_TOOLS = "🧠 Study Tools"
 BTN_MY_PLAN = "⭐ My Plan"
 BTN_ADMIN = "🛠 Admin Panel"
-BTN_FEEDBACK = "🐞 Report a problem"
+BTN_FEEDBACK = "🐞 Report a problem / Give Feedback"
 BTN_SUPPORT = "🆘 Support"
 
 
