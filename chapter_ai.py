@@ -257,7 +257,17 @@ MAX_CARDS_PER_GENERATION = 50
 MAX_TOTAL_FLASHCARD_CONTEXT_CHARS = 100_000
 
 
-def generate_flashcards(title: str, text: str, num_cards: int = 12, language: str = "English") -> list[dict]:
+# Cap on how many already-existing fronts get listed in the "don't repeat
+# these" block of the prompt -- a deck can grow past this over many
+# generation rounds, and the point is steering Claude away from obvious
+# repeats, not giving it a perfectly exhaustive list (a few hundred short
+# questions is already a large prompt addition).
+MAX_EXISTING_FRONTS_IN_PROMPT = 200
+
+
+def generate_flashcards(
+    title: str, text: str, num_cards: int = 12, language: str = "English", existing_fronts: list[str] | None = None
+) -> list[dict]:
     """
     Ask Claude for a set of front/back spaced-repetition flashcards covering
     a chapter's key facts -- returns STRUCTURED JSON (same
@@ -269,7 +279,24 @@ def generate_flashcards(title: str, text: str, num_cards: int = 12, language: st
     generate_flashcards_multi below), in which case `title` is a combined
     label -- this function itself doesn't care, it just needs one block of
     source text and a display label for the prompt.
+
+    existing_fronts: front-text of cards the student already has from this
+    same chapter/selection (see flashcards.cards_for_chapters) -- when
+    given, Claude is told to write NEW cards covering different facts
+    rather than ones that just reword what's already there, so generating
+    "more cards from chapter 3" a second time doesn't hand back the same
+    handful of facts reshuffled.
     """
+    existing_block = ""
+    if existing_fronts:
+        trimmed = existing_fronts[:MAX_EXISTING_FRONTS_IN_PROMPT]
+        existing_list = "\n".join(f"- {f}" for f in trimmed)
+        existing_block = (
+            "\n\nThe student ALREADY HAS flashcards covering the following questions/facts from this same "
+            "material -- do NOT write cards that just reword or duplicate any of these; cover different "
+            f"facts instead:\n{existing_list}"
+        )
+
     system_prompt = (
         f"You are writing {num_cards} spaced-repetition flashcards for a medical student reviewing a "
         "textbook chapter. Each card should test ONE specific, well-defined fact -- prefer many focused "
@@ -278,6 +305,7 @@ def generate_flashcards(title: str, text: str, num_cards: int = 12, language: st
         "cards across all of them rather than clustering on just one. Respond with ONLY a JSON array, no "
         'markdown fences, no preamble. Format: [{"front": "question or prompt", "back": "concise answer"}, ...] '
         f"Write the front/back text in {language}."
+        f"{existing_block}"
     )
     try:
         response = client.messages.create(
@@ -321,7 +349,12 @@ def generate_flashcards(title: str, text: str, num_cards: int = 12, language: st
 
 
 def generate_flashcards_multi(
-    book_title: str, pdf_path: str, chapters: list[dict], num_cards: int, language: str = "English"
+    book_title: str,
+    pdf_path: str,
+    chapters: list[dict],
+    num_cards: int,
+    language: str = "English",
+    existing_fronts: list[str] | None = None,
 ) -> list[dict]:
     """
     Like generate_flashcards() above, but draws from potentially MULTIPLE
@@ -332,6 +365,11 @@ def generate_flashcards_multi(
     coverage instead of clustering all cards in whichever chapter happens to
     come first). `chapters` is the SELECTED subset of the book's own
     {"title","start_page","end_page"} entries (see library.set_chapters).
+
+    existing_fronts is passed straight through to generate_flashcards() --
+    see its docstring; the caller is expected to have already looked up
+    which existing cards cover these same chapters (flashcards.py's
+    cards_for_chapters) and pass their front text here.
     """
     if not isinstance(num_cards, int) or isinstance(num_cards, bool) or not (1 <= num_cards <= MAX_CARDS_PER_GENERATION):
         raise ChapterAIError(f"Number of flashcards must be a whole number between 1 and {MAX_CARDS_PER_GENERATION}.")
@@ -360,7 +398,7 @@ def generate_flashcards_multi(
 
     context = "\n\n".join(parts)
     chapter_label = ", ".join(c["title"] for c in chapters)[:200] or book_title
-    return generate_flashcards(chapter_label, context, num_cards, language)
+    return generate_flashcards(chapter_label, context, num_cards, language, existing_fronts=existing_fronts)
 
 
 # Sanity cap on how many chapters a whole-book summary will walk -- a

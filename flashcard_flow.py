@@ -37,6 +37,8 @@ from keyboards import (
     flashcard_book_picker_kb,
     flashcard_book_menu_kb,
     flashcard_chapter_multiselect_kb,
+    flashcard_chapter_filter_kb,
+    flashcard_review_mode_kb,
     flashcard_count_kb,
     flashcard_reveal_kb,
     flashcard_rate_kb,
@@ -66,6 +68,7 @@ async def handle_study_flashcards(callback: CallbackQuery):
 
 async def _send_book_menu(answer_fn, user_id: int, book_id: str, book_title: str):
     deck = flashcards.get_deck(user_id, book_id)
+    chapter_breakdown = flashcards.chapter_breakdown(user_id, book_id)
     await answer_fn(
         f"📖 *{book_title}*\n\nCards in deck: {len(deck)}",
         parse_mode="Markdown",
@@ -75,6 +78,7 @@ async def _send_book_menu(answer_fn, user_id: int, book_id: str, book_title: str
             flashcards.count_all(user_id, book_id),
             flashcards.count_hard(user_id, book_id),
             bool(deck),
+            len(chapter_breakdown) > 1,
         ),
     )
 
@@ -230,12 +234,24 @@ async def _generate(answer_fn, user_id: int, book_id: str, chapter_indices: list
         await answer_fn(str(e))
         return
 
+    # Look up cards already generated from any of these same chapters so the
+    # prompt can steer away from repeating them (see chapter_ai.generate_flashcards's
+    # existing_fronts docstring).
+    existing = flashcards.cards_for_chapters(user_id, book_id, chapter_indices)
+    existing_fronts = [c["front"] for c in existing]
+
     status = await answer_fn(f"Generating {num_cards} flashcard(s) from {len(selected_chapters)} chapter(s)...")
     language = subscriptions.get_language(user_id)
     try:
         raw_cards = await asyncio.wait_for(
             asyncio.to_thread(
-                chapter_ai.generate_flashcards_multi, book["title"], book["pdf_path"], selected_chapters, num_cards, language
+                chapter_ai.generate_flashcards_multi,
+                book["title"],
+                book["pdf_path"],
+                selected_chapters,
+                num_cards,
+                language,
+                existing_fronts,
             ),
             timeout=FLASHCARD_GENERATION_TIMEOUT_SECONDS,
         )
@@ -248,37 +264,85 @@ async def _generate(answer_fn, user_id: int, book_id: str, chapter_indices: list
         return
 
     chapter_label = ", ".join(c["title"] for c in selected_chapters)[:200]
-    added = flashcards.add_cards(user_id, book_id, book["title"], chapter_label, raw_cards)
+    added = flashcards.add_cards(user_id, book_id, book["title"], chapter_label, chapter_indices, raw_cards)
     try:
-        await status.edit_text(f"✅ Added {len(added)} card(s) from {len(selected_chapters)} chapter(s).")
+        await status.edit_text(f"✅ Added {len(added)} new card(s) from {len(selected_chapters)} chapter(s).")
     except TelegramAPIError:
-        await answer_fn(f"✅ Added {len(added)} card(s) from {len(selected_chapters)} chapter(s).")
+        await answer_fn(f"✅ Added {len(added)} new card(s) from {len(selected_chapters)} chapter(s).")
 
 
 _REVIEW_QUEUE_FN = {
-    "due": lambda user_id, book_id: flashcards.due_cards(user_id, book_id, limit=50),
-    "all": lambda user_id, book_id: flashcards.all_cards(user_id, book_id, limit=100),
-    "hard": lambda user_id, book_id: flashcards.hard_cards(user_id, book_id, limit=100),
+    "due": lambda user_id, book_id, chap: flashcards.due_cards(user_id, book_id, limit=50, chapter_index=chap),
+    "all": lambda user_id, book_id, chap: flashcards.all_cards(user_id, book_id, limit=100, chapter_index=chap),
+    "hard": lambda user_id, book_id, chap: flashcards.hard_cards(user_id, book_id, limit=100, chapter_index=chap),
 }
 _REVIEW_EMPTY_MESSAGE = {
     "due": "Nothing due right now -- nice work staying on top of it.",
-    "all": "No cards in this deck yet -- generate some first.",
+    "all": "No cards in this deck (or this chapter) yet -- generate some first.",
     "hard": "No hard cards right now -- nice work.",
 }
+
+
+def _parse_chapter_token(token: str) -> int | None:
+    return None if token == "all" else int(token)
 
 
 @router.callback_query(F.data.startswith("flash:review:"))
 async def handle_start_review(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
-    _, _, book_id, mode = callback.data.split(":", 3)
+    _, _, book_id, mode, chap_token = callback.data.split(":", 4)
+    chapter_index = _parse_chapter_token(chap_token)
     user_id = callback.from_user.id
-    queue = _REVIEW_QUEUE_FN.get(mode, _REVIEW_QUEUE_FN["due"])(user_id, book_id)
+    queue = _REVIEW_QUEUE_FN.get(mode, _REVIEW_QUEUE_FN["due"])(user_id, book_id, chapter_index)
     if not queue:
         await callback.message.answer(_REVIEW_EMPTY_MESSAGE.get(mode, _REVIEW_EMPTY_MESSAGE["due"]))
         return
     await state.set_state(FlashcardStates.reviewing)
     await state.update_data(book_id=book_id, queue=[c["id"] for c in queue], index=0)
     await _show_current_card(callback.message.answer, user_id, book_id, queue[0])
+
+
+@router.callback_query(F.data.startswith("flash:chapfilter:"))
+async def handle_chapter_filter_menu(callback: CallbackQuery):
+    await callback.answer()
+    book_id = callback.data.split(":", 2)[2]
+    user_id = callback.from_user.id
+    book = library.get_book(user_id, book_id)
+    if book is None:
+        await callback.message.answer("That book isn't available anymore.")
+        return
+
+    breakdown = flashcards.chapter_breakdown(user_id, book_id)
+    if not breakdown:
+        await callback.message.answer("No cards in this deck yet -- generate some first.")
+        return
+
+    chapters = book.get("chapters") or []
+    chapter_counts = {}
+    for idx, count in breakdown.items():
+        title = chapters[idx]["title"] if 0 <= idx < len(chapters) else f"Chapter {idx + 1}"
+        chapter_counts[idx] = (title, count)
+
+    await callback.message.answer("📂 Pick a chapter to review:", reply_markup=flashcard_chapter_filter_kb(book_id, chapter_counts))
+
+
+@router.callback_query(F.data.startswith("flash:chapfilterpick:"))
+async def handle_chapter_filter_pick(callback: CallbackQuery):
+    await callback.answer()
+    _, _, book_id, chapter_index_str = callback.data.split(":", 3)
+    chapter_index = int(chapter_index_str)
+    user_id = callback.from_user.id
+
+    await callback.message.answer(
+        "Review mode:",
+        reply_markup=flashcard_review_mode_kb(
+            book_id,
+            chapter_index,
+            flashcards.count_due(user_id, book_id, chapter_index=chapter_index),
+            flashcards.count_all(user_id, book_id, chapter_index=chapter_index),
+            flashcards.count_hard(user_id, book_id, chapter_index=chapter_index),
+        ),
+    )
 
 
 async def _show_current_card(answer_fn, user_id: int, book_id: str, card: dict):

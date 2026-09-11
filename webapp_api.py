@@ -1050,18 +1050,29 @@ async def generate_flashcards_endpoint(request: Request):
     except subscriptions.QuotaExceeded as e:
         raise ApiError(status_code=402, detail=str(e))
 
+    # Cards already generated from any of these same chapters -- told to
+    # Claude below as "already covered" so a second generation round for
+    # the same chapter(s) writes genuinely new cards instead of repeats
+    # (see chapter_ai.generate_flashcards's existing_fronts docstring).
+    existing_fronts = [c["front"] for c in flashcards.cards_for_chapters(user["id"], book_id, chapter_indices)]
+
     async def job():
         try:
             raw_cards = await asyncio.wait_for(
                 asyncio.to_thread(
-                    chapter_ai.generate_flashcards_multi, book["title"], book["pdf_path"], selected, num_cards
+                    chapter_ai.generate_flashcards_multi,
+                    book["title"],
+                    book["pdf_path"],
+                    selected,
+                    num_cards,
+                    existing_fronts=existing_fronts,
                 ),
                 timeout=FLASHCARD_GENERATION_TIMEOUT_SECONDS,
             )
         except chapter_ai.ChapterAIError as e:
             raise RuntimeError(str(e))
         chapter_label = ", ".join(c["title"] for c in selected)[:200]
-        added = flashcards.add_cards(user["id"], book_id, book["title"], chapter_label, raw_cards)
+        added = flashcards.add_cards(user["id"], book_id, book["title"], chapter_label, chapter_indices, raw_cards)
         return _flashcard_deck_summary(user["id"], book_id) | {"added_count": len(added)}
 
     started = start_job(book_id, "flashcards", job())

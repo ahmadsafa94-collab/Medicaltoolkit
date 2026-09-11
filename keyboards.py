@@ -402,18 +402,49 @@ def flashcard_book_picker_kb(books: dict) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def flashcard_book_menu_kb(book_id: str, due_count: int, all_count: int, hard_count: int, has_deck: bool) -> InlineKeyboardMarkup:
+def flashcard_book_menu_kb(
+    book_id: str, due_count: int, all_count: int, hard_count: int, has_deck: bool, has_multiple_chapters: bool
+) -> InlineKeyboardMarkup:
     rows = []
     if due_count:
-        rows.append([InlineKeyboardButton(text=f"🔁 Review due ({due_count})", callback_data=f"flash:review:{book_id}:due")])
+        rows.append([InlineKeyboardButton(text=f"🔁 Review due ({due_count})", callback_data=f"flash:review:{book_id}:due:all")])
     if all_count:
-        rows.append([InlineKeyboardButton(text=f"📚 Review all ({all_count})", callback_data=f"flash:review:{book_id}:all")])
+        rows.append([InlineKeyboardButton(text=f"📚 Review all ({all_count})", callback_data=f"flash:review:{book_id}:all:all")])
     if hard_count:
-        rows.append([InlineKeyboardButton(text=f"❗ Review hard ({hard_count})", callback_data=f"flash:review:{book_id}:hard")])
+        rows.append([InlineKeyboardButton(text=f"❗ Review hard ({hard_count})", callback_data=f"flash:review:{book_id}:hard:all")])
+    if has_multiple_chapters:
+        rows.append([InlineKeyboardButton(text="📂 Filter by chapter", callback_data=f"flash:chapfilter:{book_id}")])
     rows.append([InlineKeyboardButton(text="➕ Generate cards from chapters", callback_data=f"flash:genpick:{book_id}")])
     if has_deck:
         rows.append([InlineKeyboardButton(text="📤 Export to Anki (.apkg)", callback_data=f"flash:export:{book_id}")])
         rows.append([InlineKeyboardButton(text="🗑 Delete this deck", callback_data=f"flash:delete:{book_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def flashcard_chapter_filter_kb(book_id: str, chapter_counts: dict) -> InlineKeyboardMarkup:
+    """
+    chapter_counts: {chapter_index: (title, card_count)} for every chapter
+    that has at least one card -- picking one scopes the next due/all/hard
+    review-mode choice (flashcard_review_mode_kb) to just that chapter.
+    """
+    rows = [
+        [InlineKeyboardButton(text=f"{title[:45]} ({count})", callback_data=f"flash:chapfilterpick:{book_id}:{idx}")]
+        for idx, (title, count) in sorted(chapter_counts.items())
+    ]
+    rows.append([InlineKeyboardButton(text="⬅️ Back", callback_data=f"flash:book:{book_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def flashcard_review_mode_kb(book_id: str, chapter_index, due_count: int, all_count: int, hard_count: int) -> InlineKeyboardMarkup:
+    """Same due/all/hard choice as flashcard_book_menu_kb's top rows, scoped to one chapter (chapter_index) instead of the whole deck."""
+    rows = []
+    if due_count:
+        rows.append([InlineKeyboardButton(text=f"🔁 Due ({due_count})", callback_data=f"flash:review:{book_id}:due:{chapter_index}")])
+    if all_count:
+        rows.append([InlineKeyboardButton(text=f"📚 All ({all_count})", callback_data=f"flash:review:{book_id}:all:{chapter_index}")])
+    if hard_count:
+        rows.append([InlineKeyboardButton(text=f"❗ Hard ({hard_count})", callback_data=f"flash:review:{book_id}:hard:{chapter_index}")])
+    rows.append([InlineKeyboardButton(text="⬅️ Back", callback_data=f"flash:chapfilter:{book_id}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

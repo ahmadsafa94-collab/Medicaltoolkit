@@ -424,6 +424,7 @@ async function openBook(bookId) {
     alertMsg("Couldn't open that book: " + e.message);
     return;
   }
+  flashcardChapterFilter = null;  // a chapter index from a previously-open book wouldn't mean anything here
   renderBookHeader();
   document.getElementById("book-panel").hidden = true;
   document.getElementById("book-panel").innerHTML = "";
@@ -1580,6 +1581,30 @@ let flashcardDeck = null;   // last-fetched {cards, due_count, all_count, hard_c
 let flashcardQueue = [];    // current review session's card queue
 let flashcardIndex = 0;
 let flashcardRevealed = false;
+let flashcardChapterFilter = null;  // null = every chapter; otherwise a chapter index -- scopes the due/all/hard counts and review queue below
+
+// {chapter_index: {title, count}} across the current deck, built from
+// currentBook.chapters + each card's own chapter_indices (a card generated
+// from several chapters at once counts toward each of them) -- the exact
+// same "which chapters actually have cards" data flashcard_flow.py's
+// flashcards.chapter_breakdown() computes server-side for the chat flow.
+function flashcardChapterBreakdown() {
+  const chapters = currentBook.chapters || [];
+  const breakdown = {};
+  (flashcardDeck.cards || []).forEach((c) => {
+    (c.chapter_indices || []).forEach((idx) => {
+      if (!breakdown[idx]) breakdown[idx] = { title: (chapters[idx] && chapters[idx].title) || `Chapter ${idx + 1}`, count: 0 };
+      breakdown[idx].count += 1;
+    });
+  });
+  return breakdown;
+}
+
+function cardsForFilter() {
+  const cards = flashcardDeck.cards || [];
+  if (flashcardChapterFilter === null) return cards;
+  return cards.filter((c) => (c.chapter_indices || []).includes(flashcardChapterFilter));
+}
 
 async function handleFlashcardsMenu() {
   panel(`<p class="spinner-line">⏳ Loading…</p>`);
@@ -1595,11 +1620,34 @@ async function handleFlashcardsMenu() {
 function renderFlashcardsMenu() {
   const deck = flashcardDeck;
   const chapters = currentBook.chapters || [];
+  const breakdown = flashcardChapterBreakdown();
+  const breakdownEntries = Object.entries(breakdown).sort((a, b) => a[0] - b[0]);
+
+  // Scoped to flashcardChapterFilter -- computed client-side from the
+  // already-fetched cards array rather than re-hitting the server, same
+  // pattern the due/all/hard split itself already uses.
+  const scoped = cardsForFilter();
+  const now = Date.now() / 1000;
+  const dueCount = scoped.filter((c) => c.due_ts <= now).length;
+  const hardCount = scoped.filter((c) => (c.ease_factor || 2.5) < 2.5).length;
+  const allCount = scoped.length;
+
+  const chapterFilterSection = breakdownEntries.length > 1
+    ? `
+      <p style="margin-top:12px;"><strong>Filter by chapter:</strong></p>
+      <select id="flash-chapter-filter" style="width:100%;padding:8px;border-radius:8px;">
+        <option value="all"${flashcardChapterFilter === null ? " selected" : ""}>📚 All chapters (${deck.cards.length})</option>
+        ${breakdownEntries
+          .map(([idx, info]) => `<option value="${idx}"${flashcardChapterFilter === Number(idx) ? " selected" : ""}>${escapeHtml(info.title)} (${info.count})</option>`)
+          .join("")}
+      </select>
+    `
+    : "";
 
   const reviewButtons = [];
-  if (deck.due_count) reviewButtons.push(`<button class="btn flash-mode-btn" data-mode="due">🔁 Review due (${deck.due_count})</button>`);
-  if (deck.all_count) reviewButtons.push(`<button class="btn secondary flash-mode-btn" data-mode="all">📚 Review all (${deck.all_count})</button>`);
-  if (deck.hard_count) reviewButtons.push(`<button class="btn secondary flash-mode-btn" data-mode="hard">❗ Review hard (${deck.hard_count})</button>`);
+  if (dueCount) reviewButtons.push(`<button class="btn flash-mode-btn" data-mode="due">🔁 Review due (${dueCount})</button>`);
+  if (allCount) reviewButtons.push(`<button class="btn secondary flash-mode-btn" data-mode="all">📚 Review all (${allCount})</button>`);
+  if (hardCount) reviewButtons.push(`<button class="btn secondary flash-mode-btn" data-mode="hard">❗ Review hard (${hardCount})</button>`);
 
   const genSection = !chapters.length
     ? `<p class="muted">Divide this book into chapters first, then come back to generate flashcards.</p>`
@@ -1624,7 +1672,10 @@ function renderFlashcardsMenu() {
 
   panel(`
     <p>Cards in deck: ${deck.cards.length}</p>
-    ${reviewButtons.length ? `<div class="flash-review-row">${reviewButtons.join("")}</div>` : `<p class="muted">No cards yet -- generate some below.</p>`}
+    ${chapterFilterSection}
+    ${reviewButtons.length
+      ? `<div class="flash-review-row">${reviewButtons.join("")}</div>`
+      : `<p class="muted">${deck.cards.length ? "Nothing to review in this chapter right now." : "No cards yet -- generate some below."}</p>`}
     ${deck.cards.length ? `
       <div class="flash-review-row">
         <button class="btn secondary" id="flash-export">📤 Export to Anki</button>
@@ -1632,6 +1683,15 @@ function renderFlashcardsMenu() {
       </div>` : ""}
     ${genSection}
   `);
+
+  const chapterFilterSelect = document.getElementById("flash-chapter-filter");
+  if (chapterFilterSelect) {
+    chapterFilterSelect.addEventListener("change", () => {
+      const val = chapterFilterSelect.value;
+      flashcardChapterFilter = val === "all" ? null : Number(val);
+      renderFlashcardsMenu();
+    });
+  }
 
   document.querySelectorAll(".flash-mode-btn").forEach((btn) => {
     btn.addEventListener("click", () => startFlashcardReview(btn.dataset.mode));
@@ -1718,11 +1778,11 @@ async function exportFlashcards(btn) {
 }
 
 function startFlashcardReview(mode) {
-  const deck = flashcardDeck;
+  const scoped = cardsForFilter();  // respects flashcardChapterFilter
   let queue;
-  if (mode === "due") queue = deck.cards.filter((c) => c.due_ts <= Date.now() / 1000);
-  else if (mode === "hard") queue = deck.cards.filter((c) => (c.ease_factor || 2.5) < 2.5).sort((a, b) => (a.ease_factor || 2.5) - (b.ease_factor || 2.5));
-  else queue = deck.cards.slice();
+  if (mode === "due") queue = scoped.filter((c) => c.due_ts <= Date.now() / 1000);
+  else if (mode === "hard") queue = scoped.filter((c) => (c.ease_factor || 2.5) < 2.5).sort((a, b) => (a.ease_factor || 2.5) - (b.ease_factor || 2.5));
+  else queue = scoped.slice();
 
   if (!queue.length) {
     alertMsg("Nothing to review in that mode right now.");
