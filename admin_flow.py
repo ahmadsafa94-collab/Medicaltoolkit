@@ -106,14 +106,26 @@ async def handle_cost(callback: CallbackQuery):
         return
     await callback.answer()
     summary = cost_ledger.summarize_costs(days=30)
-    lines = [f"💰 *API cost dashboard (last 30 days)*", "", f"Total: ${summary['total_usd']:.2f} across {summary['calls']} call(s)", ""]
+    # Deliberately PLAIN text, no parse_mode -- feature names below are
+    # internal code identifiers (e.g. "interaction_name_resolve",
+    # "ecg_interpretation_verify") containing underscores, which Telegram's
+    # legacy Markdown parser treats as italic markers. Concatenated into one
+    # message, the total underscore count across every feature line can
+    # land on odd (Telegram pairs them up sequentially across the WHOLE
+    # text, not per line), which makes Telegram reject the message outright
+    # with "can't parse entities" -- silently, since that error is caught
+    # by bot.py's global_error_handler rather than shown here. This was
+    # confirmed as the actual cause of "Cost dashboard doesn't work": it
+    # only broke once enough multi-underscore feature names existed to tip
+    # the parity, so it looked fine for a long time before it didn't.
+    lines = ["💰 API cost dashboard (last 30 days)", "", f"Total: ${summary['total_usd']:.2f} across {summary['calls']} call(s)", ""]
     if summary["by_feature"]:
         lines.append("By feature:")
         for feature, usd in sorted(summary["by_feature"].items(), key=lambda kv: -kv[1]):
             lines.append(f"  {feature}: ${usd:.2f}")
     else:
-        lines.append("_No cost data logged yet._")
-    await callback.message.answer("\n".join(lines), parse_mode="Markdown")
+        lines.append("No cost data logged yet.")
+    await callback.message.answer("\n".join(lines))
 
 
 @router.callback_query(F.data == "admin:errors")
@@ -125,11 +137,14 @@ async def handle_errors(callback: CallbackQuery):
     if not errors:
         await callback.message.answer("🪵 No errors recorded recently.")
         return
-    lines = ["🪵 *Recent errors* (most recent first)", ""]
+    # Plain text -- e['error'] is raw exception text (often containing
+    # underscores from Python identifiers), which breaks Telegram's legacy
+    # Markdown parser the same way the cost dashboard broke; see handle_cost.
+    lines = ["🪵 Recent errors (most recent first)", ""]
     for e in errors:
         when = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(e["ts"]))
-        lines.append(f"`{when}` [{e.get('context', '?')}] {e['error']}")
-    await callback.message.answer("\n".join(lines)[:4000], parse_mode="Markdown")
+        lines.append(f"{when} [{e.get('context', '?')}] {e['error']}")
+    await callback.message.answer("\n".join(lines)[:4000])
 
 
 @router.callback_query(F.data == "admin:reports")
@@ -141,11 +156,12 @@ async def handle_reports(callback: CallbackQuery):
     if not reports:
         await callback.message.answer("🐞 No problems reported recently.")
         return
-    lines = ["🐞 *Reported problems* (most recent first)", ""]
+    # Plain text -- r['text'] is arbitrary user-typed free text; see handle_cost.
+    lines = ["🐞 Reported problems (most recent first)", ""]
     for r in reports:
         when = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(r["ts"]))
-        lines.append(f"`{when}` {r['who']} (id {r['user_id']}):\n{r['text']}\n")
-    await callback.message.answer("\n".join(lines)[:4000], parse_mode="Markdown")
+        lines.append(f"{when} {r['who']} (id {r['user_id']}):\n{r['text']}\n")
+    await callback.message.answer("\n".join(lines)[:4000])
 
 
 @router.callback_query(F.data == "admin:referrals")
@@ -157,14 +173,16 @@ async def handle_referral_leaderboard(callback: CallbackQuery):
     if not leaderboard:
         await callback.message.answer("🤝 No affiliate conversions yet -- nobody's referral link has led to a paid signup.")
         return
-    lines = ["🤝 *Top Referrers* (by converted/paying signups)", ""]
+    # Plain text -- who is a Telegram @username, which can legally contain
+    # underscores and break Telegram's legacy Markdown parser; see handle_cost.
+    lines = ["🤝 Top Referrers (by converted/paying signups)", ""]
     for i, row in enumerate(leaderboard, start=1):
         username = subscriptions.get_username(row["user_id"])
         who = f"@{username}" if username else f"id {row['user_id']}"
         lines.append(
             f"{i}. {who} -- {row['converted_count']} converted, {row['bonus_days_earned']} bonus day(s) earned"
         )
-    await callback.message.answer("\n".join(lines), parse_mode="Markdown")
+    await callback.message.answer("\n".join(lines))
 
 
 @router.callback_query(F.data == "admin:bookrequests")
@@ -176,15 +194,17 @@ async def handle_book_requests(callback: CallbackQuery):
     if not pending:
         await callback.message.answer("📚 No pending book requests right now.")
         return
-    lines = ["📚 *Pending book requests* (oldest first)", ""]
+    # Plain text -- r['url']/r['note'] are arbitrary free text, and URLs
+    # very commonly contain underscores; see handle_cost.
+    lines = ["📚 Pending book requests (oldest first)", ""]
     for r in pending:
         when = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(r["created_at"]))
         note_line = f"\n  Note: {r['note']}" if r.get("note") else ""
         lines.append(
-            f"`{when}` {r['who']}\n  {r['url']}{note_line}\n"
+            f"{when} {r['who']}\n  {r['url']}{note_line}\n"
             f"  Quote: /pricebook {r['request_id']} <price in USD>"
         )
-    await callback.message.answer("\n\n".join(lines)[:4000], parse_mode="Markdown")
+    await callback.message.answer("\n\n".join(lines)[:4000])
 
 
 @router.callback_query(F.data == "admin:subs")
@@ -221,9 +241,11 @@ async def handle_lookup_input(message: Message, state: FSMContext):
 
 
 async def _send_lookup_result(answer_fn, target_id: int):
+    # Plain text -- premium_source can be a free-form string like
+    # "bookreq_<id>" containing underscores; see handle_cost.
     sub = subscriptions.get_status(target_id)
     premium = subscriptions.is_premium(target_id)
-    lines = [f"👤 *User {target_id}*", "", f"Plan: {'Premium ⭐' if premium else 'Free'}"]
+    lines = [f"👤 User {target_id}", "", f"Plan: {'Premium ⭐' if premium else 'Free'}"]
     if premium and sub.get("premium_until"):
         until = time.strftime("%Y-%m-%d", time.gmtime(sub["premium_until"]))
         lines.append(f"Premium until: {until} (source: {sub.get('premium_source')})")
@@ -231,7 +253,7 @@ async def _send_lookup_result(answer_fn, target_id: int):
     lines.append(f"ECG/Lab trials used: {sub['trial_used']}")
     lines.append(f"Blocked: {'yes' if sub.get('blocked') else 'no'}")
     lines.append(f"Payments on file: {len(sub.get('payments', []))}")
-    await answer_fn("\n".join(lines), parse_mode="Markdown", reply_markup=admin_lookup_result_kb(target_id, sub.get("blocked", False)))
+    await answer_fn("\n".join(lines), reply_markup=admin_lookup_result_kb(target_id, sub.get("blocked", False)))
 
 
 @router.callback_query(F.data.startswith("admin:grant:"))
