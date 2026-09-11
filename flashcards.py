@@ -106,6 +106,31 @@ def count_due_all_books(user_id: int, book_ids: list[str]) -> int:
     return sum(count_due(user_id, book_id) for book_id in book_ids)
 
 
+def all_cards(user_id: int, book_id: str, limit: int = 200) -> list[dict]:
+    """Every card in the deck, most-recently-created last -- for the "📚 All cards" review mode."""
+    return _load(user_id, book_id)[:limit]
+
+
+def hard_cards(user_id: int, book_id: str, limit: int = 100) -> list[dict]:
+    """
+    Cards with a below-default ease factor -- SM-2's own signal that a card
+    has been rated Again/Hard at least once net of any later Good/Easy
+    ratings (see review_card()'s ease-factor formula), used for the
+    "❗ Hard cards" review mode. Sorted hardest (lowest ease) first.
+    """
+    cards = [c for c in _load(user_id, book_id) if c.get("ease_factor", _DEFAULT_EASE) < _DEFAULT_EASE]
+    cards.sort(key=lambda c: c.get("ease_factor", _DEFAULT_EASE))
+    return cards[:limit]
+
+
+def count_all(user_id: int, book_id: str) -> int:
+    return len(_load(user_id, book_id))
+
+
+def count_hard(user_id: int, book_id: str) -> int:
+    return sum(1 for c in _load(user_id, book_id) if c.get("ease_factor", _DEFAULT_EASE) < _DEFAULT_EASE)
+
+
 def review_card(user_id: int, book_id: str, card_id: str, quality: int) -> dict | None:
     """
     Apply one SM-2 review step. quality is 0-5 (see the QUALITY_* constants

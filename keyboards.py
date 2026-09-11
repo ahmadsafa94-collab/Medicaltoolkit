@@ -402,23 +402,56 @@ def flashcard_book_picker_kb(books: dict) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def flashcard_book_menu_kb(book_id: str, due_count: int, has_deck: bool) -> InlineKeyboardMarkup:
+def flashcard_book_menu_kb(book_id: str, due_count: int, all_count: int, hard_count: int, has_deck: bool) -> InlineKeyboardMarkup:
     rows = []
     if due_count:
-        rows.append([InlineKeyboardButton(text=f"▶️ Review due cards ({due_count})", callback_data=f"flash:review:{book_id}")])
-    rows.append([InlineKeyboardButton(text="➕ Generate cards from a chapter", callback_data=f"flash:genpick:{book_id}")])
+        rows.append([InlineKeyboardButton(text=f"🔁 Review due ({due_count})", callback_data=f"flash:review:{book_id}:due")])
+    if all_count:
+        rows.append([InlineKeyboardButton(text=f"📚 Review all ({all_count})", callback_data=f"flash:review:{book_id}:all")])
+    if hard_count:
+        rows.append([InlineKeyboardButton(text=f"❗ Review hard ({hard_count})", callback_data=f"flash:review:{book_id}:hard")])
+    rows.append([InlineKeyboardButton(text="➕ Generate cards from chapters", callback_data=f"flash:genpick:{book_id}")])
     if has_deck:
         rows.append([InlineKeyboardButton(text="📤 Export to Anki (.apkg)", callback_data=f"flash:export:{book_id}")])
         rows.append([InlineKeyboardButton(text="🗑 Delete this deck", callback_data=f"flash:delete:{book_id}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def flashcard_chapter_picker_kb(book_id: str, chapters: list[dict]) -> InlineKeyboardMarkup:
+def flashcard_chapter_multiselect_kb(book_id: str, chapters: list[dict], selected: set) -> InlineKeyboardMarkup:
+    """
+    Toggle-checkbox chapter picker for flashcard generation -- unlike the
+    old single-chapter flash:gen: picker this replaced, any number of
+    chapters can be selected before continuing. Re-sent via
+    edit_reply_markup on every toggle so the ✅/⬜ marks update in place
+    instead of spamming a new message per tap.
+    """
     rows = [
-        [InlineKeyboardButton(text=ch["title"][:60], callback_data=f"flash:gen:{book_id}:{i}")]
+        [
+            InlineKeyboardButton(
+                text=f"{'✅' if i in selected else '⬜'} {ch['title'][:55]}",
+                callback_data=f"flash:chtoggle:{book_id}:{i}",
+            )
+        ]
         for i, ch in enumerate(chapters)
     ]
+    if selected:
+        rows.append([InlineKeyboardButton(text=f"▶️ Continue ({len(selected)} selected)", callback_data=f"flash:chdone:{book_id}")])
+    rows.append([InlineKeyboardButton(text="❌ Cancel", callback_data=f"flash:chcancel:{book_id}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def flashcard_count_kb(book_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="10", callback_data=f"flash:count:{book_id}:10"),
+                InlineKeyboardButton(text="20", callback_data=f"flash:count:{book_id}:20"),
+                InlineKeyboardButton(text="30", callback_data=f"flash:count:{book_id}:30"),
+                InlineKeyboardButton(text="50", callback_data=f"flash:count:{book_id}:50"),
+            ],
+            [InlineKeyboardButton(text="✏️ Custom amount", callback_data=f"flash:countcustom:{book_id}")],
+        ]
+    )
 
 
 def flashcard_reveal_kb() -> InlineKeyboardMarkup:

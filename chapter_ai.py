@@ -251,6 +251,12 @@ def generate_mnemonics(title: str, text: str, language: str = "English") -> str:
         raise ChapterAIError(f"Claude request failed: {e}")
 
 
+MAX_CARDS_PER_GENERATION = 50
+# Same shape as quiz_ai.MAX_TOTAL_QUIZ_CONTEXT_CHARS -- the total chapter-text
+# budget split across every chapter selected for one flashcard-generation run.
+MAX_TOTAL_FLASHCARD_CONTEXT_CHARS = 100_000
+
+
 def generate_flashcards(title: str, text: str, num_cards: int = 12, language: str = "English") -> list[dict]:
     """
     Ask Claude for a set of front/back spaced-repetition flashcards covering
@@ -258,19 +264,29 @@ def generate_flashcards(title: str, text: str, num_cards: int = 12, language: st
     validate-then-use pattern as quiz_ai.generate_quiz) so flashcards.py can
     store each card individually for SM-2 scheduling, rather than one big
     text blob. Synchronous -- run via asyncio.to_thread from an async handler.
+
+    `text` may already be the concatenation of several chapters (see
+    generate_flashcards_multi below), in which case `title` is a combined
+    label -- this function itself doesn't care, it just needs one block of
+    source text and a display label for the prompt.
     """
     system_prompt = (
         f"You are writing {num_cards} spaced-repetition flashcards for a medical student reviewing a "
         "textbook chapter. Each card should test ONE specific, well-defined fact -- prefer many focused "
         "cards over few broad ones. Base every card ONLY on the chapter text provided -- do not add outside "
-        "facts. Respond with ONLY a JSON array, no markdown fences, no preamble. Format: "
-        '[{"front": "question or prompt", "back": "concise answer"}, ...] '
+        "facts. If the text covers multiple chapters (marked with '[Chapter: ...]' headers), spread the "
+        "cards across all of them rather than clustering on just one. Respond with ONLY a JSON array, no "
+        'markdown fences, no preamble. Format: [{"front": "question or prompt", "back": "concise answer"}, ...] '
         f"Write the front/back text in {language}."
     )
     try:
         response = client.messages.create(
             model=CLAUDE_MODEL,
-            max_tokens=min(150 * num_cards + 400, 4000),
+            # Raised from a 4000 ceiling (which silently truncated/broke JSON
+            # past ~24 cards) to 8000 -- comfortably covers
+            # MAX_CARDS_PER_GENERATION, same headroom quiz_ai.generate_quiz
+            # uses for its own MAX_QUESTIONS.
+            max_tokens=min(150 * num_cards + 400, 8000),
             system=system_prompt,
             messages=[{"role": "user", "content": f"Chapter title: {title}\n\n{text}"}],
         )
@@ -302,6 +318,49 @@ def generate_flashcards(title: str, text: str, num_cards: int = 12, language: st
     if not validated:
         raise ChapterAIError("Claude's flashcard response had no usable cards.")
     return validated
+
+
+def generate_flashcards_multi(
+    book_title: str, pdf_path: str, chapters: list[dict], num_cards: int, language: str = "English"
+) -> list[dict]:
+    """
+    Like generate_flashcards() above, but draws from potentially MULTIPLE
+    selected chapters in one generation run -- same per-chapter text-budget
+    split as quiz_ai.generate_quiz() uses for its own multi-chapter context
+    (MAX_TOTAL_FLASHCARD_CONTEXT_CHARS divided across the selected chapters,
+    each excerpt tagged with a "[Chapter: ...]" header so Claude can spread
+    coverage instead of clustering all cards in whichever chapter happens to
+    come first). `chapters` is the SELECTED subset of the book's own
+    {"title","start_page","end_page"} entries (see library.set_chapters).
+    """
+    if not isinstance(num_cards, int) or isinstance(num_cards, bool) or not (1 <= num_cards <= MAX_CARDS_PER_GENERATION):
+        raise ChapterAIError(f"Number of flashcards must be a whole number between 1 and {MAX_CARDS_PER_GENERATION}.")
+    if not chapters:
+        raise ChapterAIError("Select at least one chapter to generate flashcards from.")
+
+    parts = []
+    remaining = MAX_TOTAL_FLASHCARD_CONTEXT_CHARS
+    per_chapter_budget = max(2000, MAX_TOTAL_FLASHCARD_CONTEXT_CHARS // len(chapters))
+    for chapter in chapters:
+        if remaining <= 0:
+            break
+        budget = min(per_chapter_budget, remaining, MAX_CHARS_PER_CHAPTER)
+        try:
+            text, _truncated = extract_text_for_page_range(
+                pdf_path, chapter["start_page"], chapter["end_page"], max_chars=budget
+            )
+        except ChapterAIError as e:
+            logger.warning("Skipping chapter '%s' in flashcard generation: %s", chapter["title"], e)
+            continue
+        parts.append(f"[Chapter: {chapter['title']}]\n{text}")
+        remaining -= len(text)
+
+    if not parts:
+        raise ChapterAIError("Couldn't extract readable text from the selected chapters.")
+
+    context = "\n\n".join(parts)
+    chapter_label = ", ".join(c["title"] for c in chapters)[:200] or book_title
+    return generate_flashcards(chapter_label, context, num_cards, language)
 
 
 # Sanity cap on how many chapters a whole-book summary will walk -- a

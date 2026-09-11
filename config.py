@@ -121,6 +121,7 @@ BOOK_SUMMARY_TIMEOUT_SECONDS = 1500
 # call, since it covers the WHOLE chapter rather than truncating it.
 CHAPTER_SUMMARY_TIMEOUT_SECONDS = 300
 QUIZ_GENERATION_TIMEOUT_SECONDS = 180
+FLASHCARD_GENERATION_TIMEOUT_SECONDS = 120
 ASK_TIMEOUT_SECONDS = 30
 # "Send chapter files to my chat" from the Book Shelf mini app: splits the
 # book into one PDF per chapter and sends each as a Telegram document, same

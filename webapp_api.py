@@ -46,7 +46,9 @@ from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
+import anki_export
 import chapter_ai
+import flashcards
 import library
 import pdf_export
 import pdf_qa
@@ -60,6 +62,7 @@ from config import (
     BOOK_SUMMARY_TIMEOUT_SECONDS,
     CHAPTER_DIVISION_TIMEOUT_SECONDS,
     CHAPTER_SUMMARY_TIMEOUT_SECONDS,
+    FLASHCARD_GENERATION_TIMEOUT_SECONDS,
     MAX_PAGES_PER_PASS,
     MAX_SHELF_UPLOAD_BYTES,
     MAX_SHELF_UPLOAD_PAGES,
@@ -990,6 +993,155 @@ async def get_quiz_attempt_endpoint(request: Request):
 
 
 # ---------------------------------------------------------------------------
+# 6. Flashcards -- the mini app's own Flashcards section per book, sharing
+# the exact same flashcards.py-backed deck flashcard_flow.py's chat-side
+# 🧠 Study Tools -> 🗂 Flashcards uses, so cards generated/reviewed in
+# either place show up in both.
+# ---------------------------------------------------------------------------
+
+def _flashcard_deck_summary(user_id: int, book_id: str) -> dict:
+    return {
+        "cards": flashcards.get_deck(user_id, book_id),
+        "due_count": flashcards.count_due(user_id, book_id),
+        "all_count": flashcards.count_all(user_id, book_id),
+        "hard_count": flashcards.count_hard(user_id, book_id),
+    }
+
+
+async def list_flashcards_endpoint(request: Request):
+    user = require_user(request)
+    book_id = request.path_params["book_id"]
+    _book_or_404(user["id"], book_id)
+    return JSONResponse(_flashcard_deck_summary(user["id"], book_id))
+
+
+async def generate_flashcards_endpoint(request: Request):
+    user = require_user(request)
+    book_id = request.path_params["book_id"]
+    book = _book_or_404(user["id"], book_id)
+    chapters = book.get("chapters") or []
+    if not chapters:
+        raise ApiError(status_code=409, detail="Divide this book into chapters first.")
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise ApiError(status_code=400, detail="Invalid JSON body.")
+
+    chapter_indices = body.get("chapter_indices")
+    num_cards = body.get("num_cards")
+
+    if not isinstance(chapter_indices, list) or not chapter_indices:
+        raise ApiError(status_code=400, detail="Select at least one chapter.")
+    try:
+        selected = [chapters[i] for i in chapter_indices]
+    except (IndexError, TypeError):
+        raise ApiError(status_code=400, detail="Invalid chapter_indices.")
+    if (
+        not isinstance(num_cards, int)
+        or isinstance(num_cards, bool)
+        or not (1 <= num_cards <= chapter_ai.MAX_CARDS_PER_GENERATION)
+    ):
+        raise ApiError(status_code=400, detail=f"num_cards must be a whole number between 1 and {chapter_ai.MAX_CARDS_PER_GENERATION}.")
+
+    try:
+        subscriptions.check_and_consume(user["id"], "summaries")
+    except subscriptions.QuotaExceeded as e:
+        raise ApiError(status_code=402, detail=str(e))
+
+    async def job():
+        try:
+            raw_cards = await asyncio.wait_for(
+                asyncio.to_thread(
+                    chapter_ai.generate_flashcards_multi, book["title"], book["pdf_path"], selected, num_cards
+                ),
+                timeout=FLASHCARD_GENERATION_TIMEOUT_SECONDS,
+            )
+        except chapter_ai.ChapterAIError as e:
+            raise RuntimeError(str(e))
+        chapter_label = ", ".join(c["title"] for c in selected)[:200]
+        added = flashcards.add_cards(user["id"], book_id, book["title"], chapter_label, raw_cards)
+        return _flashcard_deck_summary(user["id"], book_id) | {"added_count": len(added)}
+
+    started = start_job(book_id, "flashcards", job())
+    return JSONResponse({"started": started})
+
+
+async def review_flashcard_endpoint(request: Request):
+    user = require_user(request)
+    book_id = request.path_params["book_id"]
+    _book_or_404(user["id"], book_id)
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise ApiError(status_code=400, detail="Invalid JSON body.")
+
+    card_id = body.get("card_id")
+    quality = body.get("quality")
+    if not isinstance(card_id, str) or not card_id:
+        raise ApiError(status_code=400, detail="card_id is required.")
+    if not isinstance(quality, int) or isinstance(quality, bool) or not (0 <= quality <= 5):
+        raise ApiError(status_code=400, detail="quality must be a whole number between 0 and 5.")
+
+    card = flashcards.review_card(user["id"], book_id, card_id, quality)
+    if card is None:
+        raise ApiError(status_code=404, detail="Card not found.")
+    return JSONResponse(card)
+
+
+async def export_flashcards_endpoint(request: Request):
+    """
+    Builds the deck's .apkg and sends it as a Telegram document to the
+    user's own chat with the bot -- same reasoning as export_summary_pdf
+    above: Telegram's in-app WebView has no reliable way to save a
+    browser-triggered download, so the bot delivers it instead.
+    """
+    user = require_user(request)
+    book_id = request.path_params["book_id"]
+    book = _book_or_404(user["id"], book_id)
+
+    cards = flashcards.get_deck(user["id"], book_id)
+    if not cards:
+        raise ApiError(status_code=409, detail="No cards to export yet -- generate some first.")
+
+    workdir = user_dir(user["id"])
+    output_path = os.path.join(workdir, f"_tmp_anki_webapp_{book_id}.apkg")
+    try:
+        await asyncio.to_thread(anki_export.export_deck_to_apkg, book["title"], book_id, cards, output_path)
+        with open(output_path, "rb") as f:
+            apkg_bytes = f.read()
+    except anki_export.AnkiExportError as e:
+        raise ApiError(status_code=500, detail=f"Couldn't export: {e}")
+    finally:
+        _safe_remove(output_path)
+
+    filename = f"{book['title'][:50].strip() or 'deck'}.apkg"
+    try:
+        await tg_bot.send_document(
+            chat_id=user["id"],
+            document=BufferedInputFile(apkg_bytes, filename=filename),
+            caption=f"🗂 Anki deck -- {book['title']}",
+        )
+    except TelegramAPIError:
+        logger.exception("Failed to send .apkg export to chat_id=%s", user["id"])
+        raise ApiError(
+            status_code=502,
+            detail="Couldn't send that to your Telegram chat. Make sure you've started a chat with the bot, then try again.",
+        )
+
+    return JSONResponse({"sent": True})
+
+
+async def delete_flashcards_endpoint(request: Request):
+    user = require_user(request)
+    book_id = request.path_params["book_id"]
+    _book_or_404(user["id"], book_id)
+    flashcards.delete_deck(user["id"], book_id)
+    return JSONResponse({"deleted": True})
+
+
+# ---------------------------------------------------------------------------
 # App wiring
 # ---------------------------------------------------------------------------
 
@@ -1018,6 +1170,11 @@ routes = [
     Route("/api/books/{book_id}/quiz/attempts", save_quiz_attempt_endpoint, methods=["POST"]),
     Route("/api/books/{book_id}/quiz/attempts", list_quiz_attempts_endpoint, methods=["GET"]),
     Route("/api/books/{book_id}/quiz/attempts/{attempt_id}", get_quiz_attempt_endpoint, methods=["GET"]),
+    Route("/api/books/{book_id}/flashcards", list_flashcards_endpoint, methods=["GET"]),
+    Route("/api/books/{book_id}/flashcards", delete_flashcards_endpoint, methods=["DELETE"]),
+    Route("/api/books/{book_id}/flashcards/generate", generate_flashcards_endpoint, methods=["POST"]),
+    Route("/api/books/{book_id}/flashcards/review", review_flashcard_endpoint, methods=["POST"]),
+    Route("/api/books/{book_id}/flashcards/export", export_flashcards_endpoint, methods=["POST"]),
     Mount("/webapp", app=StaticFiles(directory=_WEBAPP_DIR, html=True), name="webapp"),
 ]
 

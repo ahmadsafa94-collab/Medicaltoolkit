@@ -40,6 +40,7 @@ function waitForInitData() {
 }
 
 const MAX_QUIZ_QUESTIONS = 30;
+const MAX_FLASHCARD_CARDS = 50;
 
 // ---------------------------------------------------------------------
 // API helper
@@ -458,6 +459,7 @@ document.querySelectorAll(".action-btn").forEach((btn) => {
     else if (action === "summarize") handleSummarizeMenu();
     else if (action === "ask") handleAskMenu();
     else if (action === "quiz") handleQuizMenu();
+    else if (action === "flashcards") handleFlashcardsMenu();
   });
 });
 
@@ -1472,6 +1474,228 @@ function renderQuizReview(attempt) {
     }
     list.appendChild(block);
   });
+}
+
+// ---------------------------------------------------------------------
+// 6. Flashcards -- shares the exact same per-book deck (flashcards.py on
+// the server) as the chat-side 🧠 Study Tools -> 🗂 Flashcards flow, so
+// cards generated or reviewed in either place show up in both.
+// ---------------------------------------------------------------------
+
+let flashcardDeck = null;   // last-fetched {cards, due_count, all_count, hard_count}
+let flashcardQueue = [];    // current review session's card queue
+let flashcardIndex = 0;
+let flashcardRevealed = false;
+
+async function handleFlashcardsMenu() {
+  panel(`<p class="spinner-line">⏳ Loading…</p>`);
+  try {
+    flashcardDeck = await api(`/api/books/${currentBook.book_id}/flashcards`);
+  } catch (e) {
+    panel(`<p class="error-text">${escapeHtml(e.message)}</p>`);
+    return;
+  }
+  renderFlashcardsMenu();
+}
+
+function renderFlashcardsMenu() {
+  const deck = flashcardDeck;
+  const chapters = currentBook.chapters || [];
+
+  const reviewButtons = [];
+  if (deck.due_count) reviewButtons.push(`<button class="btn flash-mode-btn" data-mode="due">🔁 Review due (${deck.due_count})</button>`);
+  if (deck.all_count) reviewButtons.push(`<button class="btn secondary flash-mode-btn" data-mode="all">📚 Review all (${deck.all_count})</button>`);
+  if (deck.hard_count) reviewButtons.push(`<button class="btn secondary flash-mode-btn" data-mode="hard">❗ Review hard (${deck.hard_count})</button>`);
+
+  const genSection = !chapters.length
+    ? `<p class="muted">Divide this book into chapters first, then come back to generate flashcards.</p>`
+    : `
+      <p style="margin-top:16px;"><strong>Generate cards from chapters:</strong></p>
+      <div class="quiz-select-row">
+        <button class="link-btn" id="flash-select-all">☑️ Select all</button>
+        <button class="link-btn" id="flash-select-none">⬜ Unselect all</button>
+      </div>
+      <ul class="chapter-list">
+        ${chapters
+          .map((c, i) => `<li><label><input type="checkbox" class="flash-chapter-cb" value="${i}" /> ${escapeHtml(c.title)}</label></li>`)
+          .join("")}
+      </ul>
+      <p><strong>Number of cards (max ${MAX_FLASHCARD_CARDS}):</strong></p>
+      <input id="flash-count" type="number" min="1" max="${MAX_FLASHCARD_CARDS}" value="20" style="width:80px;padding:8px;" />
+      <div style="margin-top:12px;">
+        <button class="btn" id="flash-generate">Generate flashcards</button>
+      </div>
+      <div id="flash-gen-result"></div>
+    `;
+
+  panel(`
+    <p>Cards in deck: ${deck.cards.length}</p>
+    ${reviewButtons.length ? `<div class="flash-review-row">${reviewButtons.join("")}</div>` : `<p class="muted">No cards yet -- generate some below.</p>`}
+    ${deck.cards.length ? `
+      <div class="flash-review-row">
+        <button class="btn secondary" id="flash-export">📤 Export to Anki</button>
+        <button class="btn secondary" id="flash-delete">🗑 Delete deck</button>
+      </div>` : ""}
+    ${genSection}
+  `);
+
+  document.querySelectorAll(".flash-mode-btn").forEach((btn) => {
+    btn.addEventListener("click", () => startFlashcardReview(btn.dataset.mode));
+  });
+
+  const exportBtn = document.getElementById("flash-export");
+  if (exportBtn) exportBtn.addEventListener("click", () => exportFlashcards(exportBtn));
+
+  const deleteBtn = document.getElementById("flash-delete");
+  if (deleteBtn) {
+    deleteBtn.addEventListener("click", async () => {
+      if (tg && tg.showConfirm) {
+        tg.showConfirm("Delete this whole flashcard deck?", (ok) => { if (ok) deleteFlashcardDeck(); });
+      } else if (window.confirm("Delete this whole flashcard deck?")) {
+        deleteFlashcardDeck();
+      }
+    });
+  }
+
+  if (chapters.length) {
+    document.getElementById("flash-generate").addEventListener("click", runFlashcardGeneration);
+    document.getElementById("flash-select-all").addEventListener("click", () => {
+      document.querySelectorAll(".flash-chapter-cb").forEach((cb) => { cb.checked = true; });
+    });
+    document.getElementById("flash-select-none").addEventListener("click", () => {
+      document.querySelectorAll(".flash-chapter-cb").forEach((cb) => { cb.checked = false; });
+    });
+  }
+}
+
+async function runFlashcardGeneration() {
+  const checkedBoxes = Array.from(document.querySelectorAll(".flash-chapter-cb:checked"));
+  const chapterIndices = checkedBoxes.map((cb) => parseInt(cb.value, 10));
+  if (!chapterIndices.length) {
+    alertMsg("Select at least one chapter.");
+    return;
+  }
+  let numCards = parseInt(document.getElementById("flash-count").value, 10) || 20;
+  numCards = Math.max(1, Math.min(MAX_FLASHCARD_CARDS, numCards));
+
+  const result = document.getElementById("flash-gen-result");
+  result.innerHTML = `<p class="spinner-line">⏳ Generating ${numCards} flashcard(s)…</p>`;
+  try {
+    await api(`/api/books/${currentBook.book_id}/flashcards/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chapter_indices: chapterIndices, num_cards: numCards }),
+    });
+  } catch (e) {
+    result.innerHTML = `<p class="error-text">${escapeHtml(e.message)}</p>`;
+    return;
+  }
+  pollJob(currentBook.book_id, "flashcards", {
+    onDone: (summary) => {
+      flashcardDeck = summary;
+      renderFlashcardsMenu();
+    },
+    onError: (msg) => { result.innerHTML = `<p class="error-text">${escapeHtml(msg)}</p>`; },
+  });
+}
+
+async function deleteFlashcardDeck() {
+  try {
+    await api(`/api/books/${currentBook.book_id}/flashcards`, { method: "DELETE" });
+  } catch (e) {
+    alertMsg("Couldn't delete: " + e.message);
+    return;
+  }
+  handleFlashcardsMenu();
+}
+
+// Same "send to Telegram chat" pattern as exportSummaryAsPdf/exportAnswerAsPdf
+// above -- Telegram's in-app WebView has no reliable browser-download path.
+async function exportFlashcards(btn) {
+  btn.disabled = true;
+  try {
+    await api(`/api/books/${currentBook.book_id}/flashcards/export`, { method: "POST" });
+    alertMsg("Sent! Check your Telegram chat with this bot to download the .apkg file.");
+  } catch (e) {
+    alertMsg("Couldn't export: " + e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function startFlashcardReview(mode) {
+  const deck = flashcardDeck;
+  let queue;
+  if (mode === "due") queue = deck.cards.filter((c) => c.due_ts <= Date.now() / 1000);
+  else if (mode === "hard") queue = deck.cards.filter((c) => (c.ease_factor || 2.5) < 2.5).sort((a, b) => (a.ease_factor || 2.5) - (b.ease_factor || 2.5));
+  else queue = deck.cards.slice();
+
+  if (!queue.length) {
+    alertMsg("Nothing to review in that mode right now.");
+    return;
+  }
+  flashcardQueue = queue;
+  flashcardIndex = 0;
+  flashcardRevealed = false;
+  renderFlashcardReview();
+}
+
+function renderFlashcardReview() {
+  if (flashcardIndex >= flashcardQueue.length) {
+    panel(`
+      <p class="quiz-summary-pct">🎉</p>
+      <p class="quiz-summary-row">All done for now!</p>
+      <button class="btn secondary" id="flash-review-back">Back to Flashcards</button>
+    `);
+    document.getElementById("flash-review-back").addEventListener("click", handleFlashcardsMenu);
+    return;
+  }
+
+  const card = flashcardQueue[flashcardIndex];
+  const progress = `${flashcardIndex + 1} / ${flashcardQueue.length}`;
+
+  if (!flashcardRevealed) {
+    panel(`
+      <p class="muted">${progress}</p>
+      <div class="flash-card">${escapeHtml(card.front)}</div>
+      <button class="btn" id="flash-reveal">🔎 Show answer</button>
+    `);
+    document.getElementById("flash-reveal").addEventListener("click", () => {
+      flashcardRevealed = true;
+      renderFlashcardReview();
+    });
+  } else {
+    panel(`
+      <p class="muted">${progress}</p>
+      <div class="flash-card">${escapeHtml(card.front)}</div>
+      <div class="flash-card flash-card-back">${escapeHtml(card.back)}</div>
+      <div class="flash-rate-row">
+        <button class="flash-rate-btn again" data-q="0">❌ Again</button>
+        <button class="flash-rate-btn hard" data-q="3">😕 Hard</button>
+        <button class="flash-rate-btn good" data-q="4">🙂 Good</button>
+        <button class="flash-rate-btn easy" data-q="5">😎 Easy</button>
+      </div>
+    `);
+    document.querySelectorAll(".flash-rate-btn").forEach((btn) => {
+      btn.addEventListener("click", () => rateFlashcard(card, parseInt(btn.dataset.q, 10)));
+    });
+  }
+}
+
+async function rateFlashcard(card, quality) {
+  try {
+    await api(`/api/books/${currentBook.book_id}/flashcards/review`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ card_id: card.id, quality }),
+    });
+  } catch (e) {
+    alertMsg("Couldn't record that rating: " + e.message);
+    return;
+  }
+  flashcardIndex += 1;
+  flashcardRevealed = false;
+  renderFlashcardReview();
 }
 
 // ---------------------------------------------------------------------

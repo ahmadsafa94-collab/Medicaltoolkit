@@ -314,6 +314,21 @@ body {
 .quiz-summary-pct { font-size: 36px; font-weight: 700; margin: 0 0 8px; color: var(--link); }
 .quiz-summary-row { margin: 4px 0; font-size: 14px; }
 
+.flash-review-row { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
+.flash-card {
+  padding: 24px 16px; margin-bottom: 12px; border-radius: 12px; background: var(--secondary-bg);
+  font-size: 17px; line-height: 1.5; text-align: center; min-height: 60px;
+}
+.flash-card-back { background: rgba(0,0,0,0.04); font-size: 15px; }
+.flash-rate-row { display: flex; gap: 6px; margin-top: 8px; }
+.flash-rate-btn {
+  flex: 1; padding: 10px 4px; border-radius: 10px; border: none; font-size: 13px; color: #fff;
+}
+.flash-rate-btn.again { background: var(--danger); }
+.flash-rate-btn.hard { background: #d68910; }
+.flash-rate-btn.good { background: var(--link); }
+.flash-rate-btn.easy { background: var(--ok); }
+
 .error-text { color: var(--danger); font-size: 13px; margin: 8px 0; }
 
 /* ---------- Reader ---------- */

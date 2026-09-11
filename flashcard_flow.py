@@ -1,7 +1,15 @@
 """
-Chat flow for Study Tools -> 🗂 Flashcards: pick a book, generate cards from
-one of its chapters, review due cards (SM-2 via flashcards.py), or export
-the deck to Anki (.apkg, via anki_export.py).
+Chat flow for Study Tools -> 🗂 Flashcards, and the same entry point the
+📚 Book Shelf mini app's own Flashcards section drives through (this module
+covers the chat side; webapp_api.py's /api/books/{book_id}/flashcards/*
+endpoints cover the mini app side -- both read/write the exact same
+flashcards.py-backed deck per book, so cards generated or reviewed in one
+place show up in the other).
+
+Pick a book, select any number of its chapters and how many cards to
+generate (AI, via chapter_ai.generate_flashcards_multi), review them (SM-2
+via flashcards.py -- due/all/hard modes), or export the deck to Anki
+(.apkg, via anki_export.py).
 
 Card GENERATION is quota-gated the same way chapter summaries are (it's a
 comparable single Claude call) -- reviewing already-generated cards costs
@@ -14,6 +22,7 @@ import os
 
 from aiogram import Router, F
 from aiogram.exceptions import TelegramAPIError
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
@@ -23,10 +32,12 @@ import chapter_ai
 import flashcards
 import library
 import subscriptions
+from config import FLASHCARD_GENERATION_TIMEOUT_SECONDS
 from keyboards import (
     flashcard_book_picker_kb,
     flashcard_book_menu_kb,
-    flashcard_chapter_picker_kb,
+    flashcard_chapter_multiselect_kb,
+    flashcard_count_kb,
     flashcard_reveal_kb,
     flashcard_rate_kb,
 )
@@ -36,10 +47,10 @@ logger = logging.getLogger(__name__)
 
 router = Router(name="flashcard_flow")
 
-_GENERATION_TIMEOUT_SECONDS = 90
-
 
 class FlashcardStates(StatesGroup):
+    selecting_chapters = State()
+    awaiting_custom_count = State()
     reviewing = State()
 
 
@@ -48,9 +59,24 @@ async def handle_study_flashcards(callback: CallbackQuery):
     await callback.answer()
     books = library.list_books(callback.from_user.id)
     if not books:
-        await callback.message.answer("Upload a book first (📄 Upload PDF or 📚 Book Shelf), then come back here.")
+        await callback.message.answer("Upload a book first (✂️ PDF Splitter or 📚 Book Shelf), then come back here.")
         return
     await callback.message.answer("🗂 Pick a book:", reply_markup=flashcard_book_picker_kb(books))
+
+
+async def _send_book_menu(answer_fn, user_id: int, book_id: str, book_title: str):
+    deck = flashcards.get_deck(user_id, book_id)
+    await answer_fn(
+        f"📖 *{book_title}*\n\nCards in deck: {len(deck)}",
+        parse_mode="Markdown",
+        reply_markup=flashcard_book_menu_kb(
+            book_id,
+            flashcards.count_due(user_id, book_id),
+            flashcards.count_all(user_id, book_id),
+            flashcards.count_hard(user_id, book_id),
+            bool(deck),
+        ),
+    )
 
 
 @router.callback_query(F.data.startswith("flash:book:"))
@@ -62,18 +88,11 @@ async def handle_pick_book(callback: CallbackQuery):
     if book is None:
         await callback.message.answer("That book isn't available anymore.")
         return
-
-    due = flashcards.count_due(user_id, book_id)
-    has_deck = bool(flashcards.get_deck(user_id, book_id))
-    await callback.message.answer(
-        f"📖 *{book['title']}*\n\nCards in deck: {len(flashcards.get_deck(user_id, book_id))}",
-        parse_mode="Markdown",
-        reply_markup=flashcard_book_menu_kb(book_id, due, has_deck),
-    )
+    await _send_book_menu(callback.message.answer, user_id, book_id, book["title"])
 
 
 @router.callback_query(F.data.startswith("flash:genpick:"))
-async def handle_gen_pick(callback: CallbackQuery):
+async def handle_gen_pick(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     book_id = callback.data.split(":", 2)[2]
     book = library.get_book(callback.from_user.id, book_id)
@@ -84,59 +103,178 @@ async def handle_gen_pick(callback: CallbackQuery):
     if not chapters:
         await callback.message.answer("Divide this book into chapters first (📚 Book Shelf -> Divide into chapters).")
         return
-    await callback.message.answer("Pick a chapter to generate cards from:", reply_markup=flashcard_chapter_picker_kb(book_id, chapters))
+    await state.set_state(FlashcardStates.selecting_chapters)
+    await state.update_data(book_id=book_id, selected=[])
+    await callback.message.answer(
+        "Pick the chapter(s) to generate cards from (tap to toggle):",
+        reply_markup=flashcard_chapter_multiselect_kb(book_id, chapters, set()),
+    )
 
 
-@router.callback_query(F.data.startswith("flash:gen:"))
-async def handle_generate(callback: CallbackQuery):
+@router.callback_query(F.data.startswith("flash:chtoggle:"), FlashcardStates.selecting_chapters)
+async def handle_chapter_toggle(callback: CallbackQuery, state: FSMContext):
+    _, _, book_id, index_str = callback.data.split(":", 3)
+    index = int(index_str)
+    data = await state.get_data()
+    if data.get("book_id") != book_id:
+        await callback.answer()
+        return
+
+    book = library.get_book(callback.from_user.id, book_id)
+    chapters = (book or {}).get("chapters") or []
+    if book is None or not (0 <= index < len(chapters)):
+        await callback.answer("That chapter isn't available anymore.", show_alert=True)
+        return
+
+    selected = set(data.get("selected") or [])
+    if index in selected:
+        selected.discard(index)
+    else:
+        selected.add(index)
+    await state.update_data(selected=list(selected))
+    await callback.answer()
+    try:
+        await callback.message.edit_reply_markup(reply_markup=flashcard_chapter_multiselect_kb(book_id, chapters, selected))
+    except TelegramAPIError:
+        pass  # unchanged markup (re-tapping the same toggle twice fast) -- harmless
+
+
+@router.callback_query(F.data.startswith("flash:chcancel:"), FlashcardStates.selecting_chapters)
+async def handle_chapter_cancel(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.clear()
+    await callback.message.answer("Cancelled.")
+
+
+@router.callback_query(F.data.startswith("flash:chdone:"), FlashcardStates.selecting_chapters)
+async def handle_chapter_done(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    data = await state.get_data()
+    book_id = data.get("book_id")
+    selected = data.get("selected") or []
+    if not book_id or not selected:
+        await callback.message.answer("Select at least one chapter first.")
+        return
+    await callback.message.answer(
+        f"How many flashcards? (max {chapter_ai.MAX_CARDS_PER_GENERATION})", reply_markup=flashcard_count_kb(book_id)
+    )
+
+
+@router.message(Command("cancel"), FlashcardStates.selecting_chapters)
+@router.message(Command("cancel"), FlashcardStates.awaiting_custom_count)
+async def handle_generation_cancel_cmd(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Cancelled.")
+
+
+@router.callback_query(F.data.startswith("flash:countcustom:"), FlashcardStates.selecting_chapters)
+async def handle_count_custom_prompt(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.set_state(FlashcardStates.awaiting_custom_count)
+    await callback.message.answer(
+        f"Send the number of flashcards to generate (1-{chapter_ai.MAX_CARDS_PER_GENERATION}). /cancel to abort."
+    )
+
+
+@router.message(FlashcardStates.awaiting_custom_count, F.text & ~F.text.startswith("/"))
+async def handle_count_custom_input(message: Message, state: FSMContext):
+    try:
+        num_cards = int(message.text.strip())
+        if not (1 <= num_cards <= chapter_ai.MAX_CARDS_PER_GENERATION):
+            raise ValueError
+    except ValueError:
+        await message.answer(
+            f"Please send a whole number between 1 and {chapter_ai.MAX_CARDS_PER_GENERATION}, or /cancel to abort."
+        )
+        return
+
+    data = await state.get_data()
+    book_id = data.get("book_id")
+    selected = data.get("selected") or []
+    await state.clear()
+    if not book_id or not selected:
+        await message.answer("This session expired. Open 🗂 Flashcards and try again.")
+        return
+    await _generate(message.answer, message.from_user.id, book_id, selected, num_cards)
+
+
+@router.callback_query(F.data.startswith("flash:count:"))
+async def handle_count_preset(callback: CallbackQuery, state: FSMContext):
     await callback.answer("Generating...")
-    _, _, book_id, chapter_index_str = callback.data.split(":", 3)
-    chapter_index = int(chapter_index_str)
-    user_id = callback.from_user.id
+    _, _, book_id, num_cards_str = callback.data.split(":", 3)
+    num_cards = int(num_cards_str)
+    data = await state.get_data()
+    selected = data.get("selected") or []
+    await state.clear()
+    if data.get("book_id") != book_id or not selected:
+        await callback.message.answer("This session expired. Open 🗂 Flashcards and try again.")
+        return
+    await _generate(callback.message.answer, callback.from_user.id, book_id, selected, num_cards)
 
+
+async def _generate(answer_fn, user_id: int, book_id: str, chapter_indices: list[int], num_cards: int):
     book = library.get_book(user_id, book_id)
     if book is None:
-        await callback.message.answer("That book isn't available anymore.")
+        await answer_fn("That book isn't available anymore.")
         return
-    chapters = book.get("chapters") or []
-    if not (0 <= chapter_index < len(chapters)):
-        await callback.message.answer("That chapter isn't available anymore.")
+    all_chapters = book.get("chapters") or []
+    try:
+        selected_chapters = [all_chapters[i] for i in chapter_indices]
+    except IndexError:
+        await answer_fn("One of those chapters isn't available anymore. Please try again.")
         return
-    chapter = chapters[chapter_index]
 
     try:
         subscriptions.check_and_consume(user_id, "summaries")
     except subscriptions.QuotaExceeded as e:
-        await callback.message.answer(str(e))
+        await answer_fn(str(e))
         return
 
+    status = await answer_fn(f"Generating {num_cards} flashcard(s) from {len(selected_chapters)} chapter(s)...")
     language = subscriptions.get_language(user_id)
     try:
-        text, _truncated = await asyncio.to_thread(
-            chapter_ai.extract_text_for_page_range,
-            book["pdf_path"], chapter["start_page"], chapter["end_page"], chapter_ai.MAX_CHARS_PER_CHAPTER,
-        )
         raw_cards = await asyncio.wait_for(
-            asyncio.to_thread(chapter_ai.generate_flashcards, chapter["title"], text, 12, language),
-            timeout=_GENERATION_TIMEOUT_SECONDS,
+            asyncio.to_thread(
+                chapter_ai.generate_flashcards_multi, book["title"], book["pdf_path"], selected_chapters, num_cards, language
+            ),
+            timeout=FLASHCARD_GENERATION_TIMEOUT_SECONDS,
         )
     except Exception as e:
-        logger.exception("Flashcard generation failed for book=%s chapter=%s", book_id, chapter_index)
-        await callback.message.answer(f"Couldn't generate flashcards: {e}")
+        logger.exception("Flashcard generation failed for book=%s chapters=%s", book_id, chapter_indices)
+        try:
+            await status.edit_text(f"Couldn't generate flashcards: {e}")
+        except TelegramAPIError:
+            await answer_fn(f"Couldn't generate flashcards: {e}")
         return
 
-    added = flashcards.add_cards(user_id, book_id, book["title"], chapter["title"], raw_cards)
-    await callback.message.answer(f"✅ Added {len(added)} card(s) from '{chapter['title']}'.")
+    chapter_label = ", ".join(c["title"] for c in selected_chapters)[:200]
+    added = flashcards.add_cards(user_id, book_id, book["title"], chapter_label, raw_cards)
+    try:
+        await status.edit_text(f"✅ Added {len(added)} card(s) from {len(selected_chapters)} chapter(s).")
+    except TelegramAPIError:
+        await answer_fn(f"✅ Added {len(added)} card(s) from {len(selected_chapters)} chapter(s).")
+
+
+_REVIEW_QUEUE_FN = {
+    "due": lambda user_id, book_id: flashcards.due_cards(user_id, book_id, limit=50),
+    "all": lambda user_id, book_id: flashcards.all_cards(user_id, book_id, limit=100),
+    "hard": lambda user_id, book_id: flashcards.hard_cards(user_id, book_id, limit=100),
+}
+_REVIEW_EMPTY_MESSAGE = {
+    "due": "Nothing due right now -- nice work staying on top of it.",
+    "all": "No cards in this deck yet -- generate some first.",
+    "hard": "No hard cards right now -- nice work.",
+}
 
 
 @router.callback_query(F.data.startswith("flash:review:"))
 async def handle_start_review(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
-    book_id = callback.data.split(":", 2)[2]
+    _, _, book_id, mode = callback.data.split(":", 3)
     user_id = callback.from_user.id
-    queue = flashcards.due_cards(user_id, book_id, limit=50)
+    queue = _REVIEW_QUEUE_FN.get(mode, _REVIEW_QUEUE_FN["due"])(user_id, book_id)
     if not queue:
-        await callback.message.answer("Nothing due right now -- nice work staying on top of it.")
+        await callback.message.answer(_REVIEW_EMPTY_MESSAGE.get(mode, _REVIEW_EMPTY_MESSAGE["due"]))
         return
     await state.set_state(FlashcardStates.reviewing)
     await state.update_data(book_id=book_id, queue=[c["id"] for c in queue], index=0)
@@ -156,7 +294,7 @@ async def handle_reveal(callback: CallbackQuery, state: FSMContext):
     index = data.get("index", 0)
     if book_id is None or index >= len(queue):
         await state.clear()
-        await callback.message.answer("This review session expired. Tap ▶️ Review due cards again.")
+        await callback.message.answer("This review session expired. Open 🗂 Flashcards and start a new review.")
         return
 
     deck = flashcards.get_deck(callback.from_user.id, book_id)
