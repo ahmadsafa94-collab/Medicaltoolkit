@@ -238,6 +238,9 @@ def _search_query_text(question: str, history: list[dict]) -> str:
     return f"{prior_questions} {question}"
 
 
+QA_CONTEXTUAL_TOP_K = 4  # extra history-aware matches folded in on top of the plain-question search
+
+
 _PAGE_REF_RE = re.compile(r"\b(?:page|pages|pg\.?|p\.)\s*#?\s*(\d{1,4})\b", re.IGNORECASE)
 MAX_EXPLICIT_PAGES = 3            # cap how many distinct named pages get force-included
 MAX_CHUNKS_PER_EXPLICIT_PAGE = 3  # a long page can be split into several chunks; cap per page
@@ -309,7 +312,24 @@ async def answer_question(
 
     history = (history or [])[-MAX_HISTORY_TURNS:]
 
-    matches = await search_index(meta, vectors, _search_query_text(question, history))
+    # Always search on the plain question first -- this is the primary
+    # signal and must never be diluted, since a self-contained follow-up
+    # ("explain the techniques from the text") needs to match on its own
+    # words exactly as well as it would as a fresh, first question.
+    matches = await search_index(meta, vectors, question)
+    if history:
+        # Additionally search with recent questions folded in, purely to
+        # ADD candidates that help a pronoun-heavy follow-up ("what about
+        # its treatment?") which doesn't carry enough meaning alone --
+        # merged in rather than replacing the plain-question search above,
+        # which previously caused history text to dilute self-contained
+        # follow-ups enough to miss the exact chunk a plain search finds.
+        contextual = await search_index(
+            meta, vectors, _search_query_text(question, history), top_k=QA_CONTEXTUAL_TOP_K
+        )
+        seen = {m["text"] for m in matches}
+        matches += [m for m in contextual if m["text"] not in seen]
+
     forced = _force_include_pages(meta, _explicit_page_numbers(question))
     # Named pages go first, then the semantic matches; de-dupe identical
     # chunk text so a page that was ALSO found semantically isn't repeated.
