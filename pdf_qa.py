@@ -213,6 +213,29 @@ async def search_index(meta: dict, vectors: np.ndarray, question: str, top_k: in
 
 
 MAX_HISTORY_TURNS = 6  # older turns are dropped rather than growing the prompt without bound
+SEARCH_CONTEXT_TURNS = 2  # how many prior questions get folded into the search query, see _search_query_text()
+
+
+def _search_query_text(question: str, history: list[dict]) -> str:
+    """
+    Build the text that gets embedded for retrieval. A bare follow-up
+    question on its own ("what about its treatment?", "and the side
+    effects?") often doesn't carry enough content for the embedding to
+    land anywhere useful, so with no history-awareness the search keeps
+    surfacing whatever chunks matched the FIRST question in the thread --
+    which looks like later answers are "stuck" on the first question's
+    sources instead of being able to reach anywhere else in the book.
+    Folding the last couple of prior questions into the query resolves
+    those references so the search can find the actually-relevant part of
+    the book for the current turn, wherever that is. The current question
+    is kept last (closest to how Voyage weights recency-ish content) and
+    is still the dominant signal, so an unrelated new question still
+    searches the whole book fresh rather than being anchored to old topics.
+    """
+    if not history:
+        return question
+    prior_questions = " ".join(turn["question"] for turn in history[-SEARCH_CONTEXT_TURNS:])
+    return f"{prior_questions} {question}"
 
 
 async def answer_question(
@@ -244,14 +267,14 @@ async def answer_question(
     if not question.strip():
         raise IndexingError("Please send your question as text.")
 
-    matches = await search_index(meta, vectors, question)
+    history = (history or [])[-MAX_HISTORY_TURNS:]
+
+    matches = await search_index(meta, vectors, _search_query_text(question, history))
     if not matches:
         raise IndexingError("This book's index is empty -- try re-indexing it.")
 
     numbered = list(enumerate(matches, start=1))
     context = "\n\n".join(f"[{n}] (Page {m['page']})\n{m['text']}" for n, m in numbered)
-
-    history = (history or [])[-MAX_HISTORY_TURNS:]
 
     system_prompt = (
         f"You are answering questions about the book '{meta['title']}' using ONLY the numbered "
