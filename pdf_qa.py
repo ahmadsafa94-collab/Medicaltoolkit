@@ -238,6 +238,46 @@ def _search_query_text(question: str, history: list[dict]) -> str:
     return f"{prior_questions} {question}"
 
 
+_PAGE_REF_RE = re.compile(r"\b(?:page|pages|pg\.?|p\.)\s*#?\s*(\d{1,4})\b", re.IGNORECASE)
+MAX_EXPLICIT_PAGES = 3            # cap how many distinct named pages get force-included
+MAX_CHUNKS_PER_EXPLICIT_PAGE = 3  # a long page can be split into several chunks; cap per page
+
+
+def _explicit_page_numbers(question: str) -> list[int]:
+    """Pull out page numbers the user names directly ('page 110', 'p.110', 'pg 110', ...)."""
+    seen: list[int] = []
+    for m in _PAGE_REF_RE.finditer(question):
+        n = int(m.group(1))
+        if n not in seen:
+            seen.append(n)
+        if len(seen) >= MAX_EXPLICIT_PAGES:
+            break
+    return seen
+
+
+def _force_include_pages(meta: dict, page_numbers: list[int]) -> list[dict]:
+    """
+    Return chunks for explicitly-named pages straight from the index,
+    bypassing semantic ranking. Vector search can easily miss a page a user
+    asks about by number, especially when the question itself isn't really
+    about the book's subject matter ("why don't you have page 110?") -- so
+    if the user names a page, that page's real text is included outright
+    instead of leaving it to chance whether it happens to score high enough.
+    """
+    if not page_numbers:
+        return []
+    wanted = set(page_numbers)
+    counts: dict[int, int] = {}
+    forced = []
+    for chunk in meta["chunks"]:
+        if chunk["page"] not in wanted:
+            continue
+        counts[chunk["page"]] = counts.get(chunk["page"], 0) + 1
+        if counts[chunk["page"]] <= MAX_CHUNKS_PER_EXPLICIT_PAGE:
+            forced.append({"text": chunk["text"], "page": chunk["page"], "score": None})
+    return forced
+
+
 async def answer_question(
     book_id: str, question: str, history: list[dict] | None = None, language: str = "English"
 ) -> dict:
@@ -270,6 +310,17 @@ async def answer_question(
     history = (history or [])[-MAX_HISTORY_TURNS:]
 
     matches = await search_index(meta, vectors, _search_query_text(question, history))
+    forced = _force_include_pages(meta, _explicit_page_numbers(question))
+    # Named pages go first, then the semantic matches; de-dupe identical
+    # chunk text so a page that was ALSO found semantically isn't repeated.
+    seen_texts = set()
+    combined = []
+    for m in forced + matches:
+        if m["text"] in seen_texts:
+            continue
+        seen_texts.add(m["text"])
+        combined.append(m)
+    matches = combined
     if not matches:
         raise IndexingError("This book's index is empty -- try re-indexing it.")
 
