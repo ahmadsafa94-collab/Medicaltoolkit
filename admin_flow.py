@@ -29,8 +29,15 @@ import book_requests
 import chapter_ai
 import cost_ledger
 import ecg_lab_ai
+import ecg_reference
 import subscriptions
-from keyboards import admin_menu_kb, admin_lookup_result_kb, admin_test_menu_kb, book_request_offer_kb
+from keyboards import (
+    admin_ecg_reference_kb,
+    admin_menu_kb,
+    admin_lookup_result_kb,
+    admin_test_menu_kb,
+    book_request_offer_kb,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +63,7 @@ class AdminStates(StatesGroup):
     awaiting_broadcast = State()
     awaiting_custom_days = State()
     awaiting_book_delivery = State()
+    awaiting_ecg_reference = State()
 
 
 async def _require_admin_message(message: Message) -> bool:
@@ -205,6 +213,69 @@ async def handle_book_requests(callback: CallbackQuery):
             f"  Quote: /pricebook {r['request_id']} <price in USD>"
         )
     await callback.message.answer("\n\n".join(lines)[:4000])
+
+
+@router.callback_query(F.data == "admin:ecgref")
+async def handle_ecg_reference(callback: CallbackQuery):
+    """
+    🫀 ECG Teaching Books -- the ECG textbooks every user's ECG
+    interpretation is checked against (see ecg_reference.py).
+    """
+    if not await _require_admin_callback(callback):
+        return
+    await callback.answer()
+    books = ecg_reference.list_books()
+    lines = ["🫀 ECG teaching books", ""]
+    if books:
+        lines.append("Every ECG a user sends is now read, then checked against the passages of these books")
+        lines.append("that match that tracing:")
+        lines.append("")
+        for book in books:
+            when = time.strftime("%Y-%m-%d", time.gmtime(book["added_at"]))
+            lines.append(f"  • {book['title']} -- {book['num_chunks']} passages, added {when}")
+    else:
+        lines.append("No teaching books yet. ECG reads currently rely on the model's own knowledge alone.")
+        lines.append("")
+        lines.append("Add an ECG textbook and every future ECG interpretation gets checked against it.")
+    await callback.message.answer("\n".join(lines), reply_markup=admin_ecg_reference_kb(books))
+
+
+@router.callback_query(F.data == "admin:ecgrefadd")
+async def handle_ecg_reference_add(callback: CallbackQuery, state: FSMContext):
+    if not await _require_admin_callback(callback):
+        return
+    await callback.answer()
+    await state.set_state(AdminStates.awaiting_ecg_reference)
+    await callback.message.answer(
+        "Send the ECG textbook as a PDF now.\n\n"
+        "It gets indexed once (this can take a few minutes for a long book), then every ECG a user sends is "
+        "checked against the parts of it that match that tracing.\n\n"
+        "/cancel to abort."
+    )
+
+
+@router.callback_query(F.data.startswith("admin:ecgrefdel:"))
+async def handle_ecg_reference_remove(callback: CallbackQuery):
+    if not await _require_admin_callback(callback):
+        return
+    ref_id = callback.data.split(":", 2)[2]
+    record = ecg_reference.remove_book(ref_id)
+    if record is None:
+        await callback.answer("That book is already gone.", show_alert=True)
+        return
+    await callback.answer(f"Removed {record['title']}.")
+    books = ecg_reference.list_books()
+    await callback.message.answer(
+        f"🗑 Removed '{record['title']}' -- it no longer informs ECG reads.\n\n"
+        f"{len(books)} teaching book(s) remaining.",
+        reply_markup=admin_ecg_reference_kb(books),
+    )
+
+
+@router.message(Command("cancel"), AdminStates.awaiting_ecg_reference)
+async def cmd_cancel_ecg_reference(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Cancelled -- no teaching book added.")
 
 
 @router.callback_query(F.data == "admin:subs")

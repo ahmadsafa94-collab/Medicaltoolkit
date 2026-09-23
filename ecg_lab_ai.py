@@ -18,6 +18,12 @@ Safety framing, enforced structurally rather than just requested nicely:
     use ONLY those, not its own memorized ranges) so normal/abnormal
     framing is consistent with the rest of the bot, not a second,
     potentially-divergent source of "normal" numbers.
+  - ECG interpretation is anchored the same way where the admin has
+    uploaded ECG textbooks: the verify pass below is given the passages
+    from those books that match this specific tracing, and told to prefer
+    their criteria and terminology over its own recollection. See
+    ecg_reference.py. With no books loaded, the read falls back to exactly
+    the unreferenced behavior it had before.
 
 Two-pass "draft then verify" pipeline: every interpretation below is
 actually TWO Claude calls, not one. The first produces a draft; the second
@@ -39,6 +45,7 @@ import base64
 import logging
 
 import cost_ledger
+import ecg_reference
 import glossary
 from config import CLAUDE_MODEL
 from pdf_processor import client  # reuse the one Anthropic client instance
@@ -134,20 +141,46 @@ def interpret_ecg(image_bytes: bytes, media_type: str, language: str = "English"
         ],
     )
 
+    # The draft's TEXT is the retrieval query for the admin's ECG textbooks:
+    # the image itself can't be embedded against text chunks, but the draft's
+    # structured read (rate/rhythm/axis/intervals/morphology) describes the
+    # tracing precisely enough to pull the passages that actually teach this
+    # pattern. Empty when no reference books are loaded, in which case the
+    # verify prompt below is exactly what it was before -- see ecg_reference.py.
+    reference_block = ecg_reference.reference_context(draft)
+
+    instructions = [
+        "Re-examine the image yourself and check the draft's Rate/Rhythm/Axis/Intervals/Notable morphology/"
+        "Overall impression against what the image actually shows. Correct anything wrong; keep anything "
+        "already correct.",
+    ]
+    if reference_block:
+        instructions.append(
+            "Check the draft against the TEACHING REFERENCES below -- excerpts from the ECG textbooks this "
+            "bot is taught from, retrieved for this specific tracing. Where a reference gives a concrete "
+            "criterion (a measurement cutoff, the defining features of a named pattern, a lead-by-lead "
+            "rule), apply it exactly as written in preference to your own recollection, and prefer the "
+            "book's own terminology and level of detail so the read sounds like the textbook a student is "
+            "learning from. If the references don't cover part of the draft, fall back to standard ECG "
+            "knowledge rather than forcing an irrelevant reference in. Never mention the references, cite "
+            "them, or name a book in your output -- they shape the read, they aren't part of it."
+        )
+    instructions += [
+        _IMAGE_CLARITY_REVIEW_INSTRUCTION,
+        "Output ONLY the corrected final interpretation, in the exact same six-line structure as the draft "
+        "(Rate/Rhythm/Axis/Intervals/Notable morphology/Overall impression) -- do not mention that you are "
+        "reviewing or show your reasoning, just the corrected final text a student should read.",
+        "Same safety rules as the draft: never state or imply a specific diagnosis for this image, only "
+        f"describe the pattern. Respond in {language}.",
+    ]
+
     verify_system_prompt = (
         "You are the SECOND, independent reviewer checking a draft ECG interpretation against the actual "
         "image, as a quality check before it's shown to a medical student. You will see the same ECG image "
         "plus the draft interpretation below. Your job:\n"
-        "1. Re-examine the image yourself and check the draft's Rate/Rhythm/Axis/Intervals/Notable morphology/"
-        "Overall impression against what the image actually shows. Correct anything wrong; keep anything "
-        "already correct.\n"
-        f"2. {_IMAGE_CLARITY_REVIEW_INSTRUCTION}\n"
-        "3. Output ONLY the corrected final interpretation, in the exact same six-line structure as the draft "
-        "(Rate/Rhythm/Axis/Intervals/Notable morphology/Overall impression) -- do not mention that you are "
-        "reviewing or show your reasoning, just the corrected final text a student should read.\n"
-        "4. Same safety rules as the draft: never state or imply a specific diagnosis for this image, only "
-        f"describe the pattern. Respond in {language}.\n\n"
-        f"DRAFT INTERPRETATION TO CHECK:\n{draft}"
+        + "\n".join(f"{i}. {text}" for i, text in enumerate(instructions, start=1))
+        + (f"\n\nTEACHING REFERENCES:\n{reference_block}" if reference_block else "")
+        + f"\n\nDRAFT INTERPRETATION TO CHECK:\n{draft}"
     )
     verified = _call_claude(
         "ecg_interpretation_verify",

@@ -369,8 +369,22 @@ def admin_menu_kb() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="🐞 Reported problems", callback_data="admin:reports")],
             [InlineKeyboardButton(text="🤝 Top Referrers", callback_data="admin:referrals")],
             [InlineKeyboardButton(text="📚 Book Requests", callback_data="admin:bookrequests")],
+            [InlineKeyboardButton(text="🫀 ECG Teaching Books", callback_data="admin:ecgref")],
         ]
     )
+
+
+def admin_ecg_reference_kb(books: list[dict]) -> InlineKeyboardMarkup:
+    """
+    The 🫀 ECG Teaching Books view: add a book, or remove one of the books
+    currently grounding every ECG interpretation (see ecg_reference.py).
+    """
+    rows = [[InlineKeyboardButton(text="➕ Add a teaching book", callback_data="admin:ecgrefadd")]]
+    for book in books:
+        rows.append(
+            [InlineKeyboardButton(text=f"🗑 Remove: {book['title'][:40]}", callback_data=f"admin:ecgrefdel:{book['ref_id']}")]
+        )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def book_request_offer_kb(request_id: str, price_usd: float, stars: int) -> InlineKeyboardMarkup:

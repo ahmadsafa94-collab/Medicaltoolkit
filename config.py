@@ -129,6 +129,18 @@ ASK_TIMEOUT_SECONDS = 30
 # scales with chapter count and each document send has its own network cost.
 SEND_CHAPTER_FILES_TIMEOUT_SECONDS = 300
 
+# --- ECG teaching references (see ecg_reference.py) ---
+
+# Admin-uploaded ECG textbooks, indexed with the same Voyage embeddings as
+# "Ask my book" and retrieved at ECG-interpretation time so the read is
+# anchored to real teaching material instead of the model's own recall --
+# the ECG equivalent of what glossary.py's reference ranges already do for
+# lab interpretation. Shared across ALL users (one admin-curated set), which
+# is why this lives under _admin/ rather than any one user's directory.
+ECG_REFERENCE_DIR = os.path.join(STORAGE_DIR, "_admin", "ecg_reference")
+ECG_REFERENCE_TOP_K = 6           # passages pulled per ECG read, across all reference books
+ECG_REFERENCE_MAX_CHARS = 7000    # ceiling on retrieved text injected into the verify prompt
+
 # --- Admin / premium subscription system ---
 
 # Telegram numeric user IDs (not usernames -- Telegram doesn't hand a bot a

@@ -39,6 +39,7 @@ from config import (
     STORAGE_DIR,
     MAX_UPLOAD_BYTES,
     PDF_PROCESSING_TIMEOUT_SECONDS,
+    QA_INDEXING_TIMEOUT_SECONDS,
     WEBAPP_URL,
     PORT,
     SUPPORT_ADMIN_USERNAME,
@@ -83,6 +84,7 @@ import book_requests
 import customer_flow
 import drug_qa_flow
 import ecg_lab_flow
+import ecg_reference
 import flashcard_flow
 import flashcards
 import glossary
@@ -832,6 +834,88 @@ async def handle_book_delivery_document(message: Message, state: FSMContext):
         return
 
     await status.edit_text(f"✅ Delivered to user {customer_id} -- added to their Book Shelf and sent as a file.")
+
+
+@dp.message(F.document, admin_flow.AdminStates.awaiting_ecg_reference)
+async def handle_ecg_reference_document(message: Message, state: FSMContext):
+    """
+    An admin is adding an ECG teaching book (admin panel -> 🫀 ECG Teaching
+    Books -> ➕ Add, which sets this state). The PDF is indexed once and from
+    then on every user's ECG interpretation is checked against the passages
+    of it that match their tracing -- see ecg_reference.py.
+
+    Registered directly on `dp` and BEFORE the unconditional
+    @dp.message(F.document) handler below, for the same reason
+    handle_book_delivery_document above is: aiogram tries a Router's own
+    handlers before descending into any sub-router, so this on
+    admin_flow.router would never be reached -- the generic upload handler
+    has no state filter and would swallow the textbook into the admin's own
+    Book Shelf instead.
+    """
+    await state.clear()
+    if not subscriptions.is_admin(message.from_user.id):
+        return
+
+    doc = message.document
+    file_name = doc.file_name or "ecg_reference.pdf"
+    if doc.mime_type != "application/pdf" and not file_name.lower().endswith(".pdf"):
+        await message.answer("That doesn't look like a PDF. Please send a .pdf file, or start over from the admin panel.")
+        return
+    if doc.file_size and doc.file_size > MAX_UPLOAD_BYTES:
+        await message.answer(
+            f"That file is {doc.file_size / 1024 / 1024:.1f}MB, over Telegram's "
+            f"{MAX_UPLOAD_BYTES // 1024 // 1024}MB bot-download limit. Please send a smaller PDF."
+        )
+        return
+
+    ref_id = ecg_reference.new_ref_id()
+    dest_path = ecg_reference.pdf_path_for(ref_id, safe_pdf_filename(file_name))
+    title = os.path.splitext(file_name)[0].strip() or "ECG reference"
+
+    status = await message.answer(f"Downloading '{title}'...")
+    try:
+        file = await bot.get_file(doc.file_id)
+        await bot.download_file(file.file_path, destination=dest_path)
+    except TelegramAPIError as e:
+        logger.exception("Failed to download ECG reference PDF")
+        await status.edit_text(f"Couldn't download that file from Telegram: {e}")
+        return
+
+    async def progress(text):
+        try:
+            await status.edit_text(f"Indexing '{title}'\n{text}")
+        except TelegramBadRequest:
+            pass  # same text twice, or the message is gone -- progress display is never worth failing the upload over
+
+    try:
+        num_chunks = await asyncio.wait_for(
+            ecg_reference.index_book(dest_path, ref_id, title, progress_cb=progress),
+            timeout=QA_INDEXING_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        _discard_failed_ecg_reference(dest_path)
+        await status.edit_text("Indexing took too long and was stopped. Try a shorter PDF, or split it first.")
+        return
+    except Exception as e:
+        logger.exception("Failed to index ECG reference book")
+        _discard_failed_ecg_reference(dest_path)
+        await status.edit_text(f"Couldn't index that book: {e}")
+        return
+
+    ecg_reference.register_book(ref_id, title, dest_path, num_chunks, added_by=message.from_user.id)
+    await status.edit_text(
+        f"✅ '{title}' is now teaching the ECG reader -- {num_chunks} passages indexed.\n\n"
+        "Every ECG a user sends from now on is read, then checked against the parts of this book that match "
+        "that tracing."
+    )
+
+
+def _discard_failed_ecg_reference(pdf_path: str) -> None:
+    """Drop a half-processed reference PDF so a failed add leaves nothing behind (it was never registered)."""
+    try:
+        os.remove(pdf_path)
+    except OSError:
+        pass
 
 
 @dp.message(F.document, SplitStates.awaiting_pdf)
