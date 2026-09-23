@@ -207,10 +207,16 @@ def search_sync(query: str, top_k: int = ECG_REFERENCE_TOP_K) -> list[dict]:
     return hits[:top_k]
 
 
-def reference_context(query: str, top_k: int = ECG_REFERENCE_TOP_K) -> str:
+def build_reference(query: str, top_k: int = ECG_REFERENCE_TOP_K) -> tuple[str, list[dict]]:
     """
-    Retrieved teaching passages formatted for a prompt, or "" when there's
-    nothing to add (no books uploaded, no index, or retrieval failed).
+    Returns (prompt_block, hits_actually_included) -- both empty when
+    there's nothing to add (no books uploaded, no index, retrieval failed).
+
+    The second element is what gets shown to the reader as the sources the
+    interpretation was checked against, so it is deliberately the passages
+    that genuinely made it INTO the prompt, not everything retrieved: the
+    char cap below can drop the tail, and naming a book the model never
+    actually saw would be a citation the read isn't backed by.
 
     Deliberately swallows its own errors: ECG interpretation worked before
     any reference book existed and must keep working if Voyage is down or
@@ -221,14 +227,60 @@ def reference_context(query: str, top_k: int = ECG_REFERENCE_TOP_K) -> str:
         hits = search_sync(query, top_k=top_k)
     except Exception:
         logger.exception("ECG reference retrieval failed (non-fatal, falling back to an unreferenced read)")
-        return ""
+        return "", []
 
-    blocks = []
-    used = 0
+    blocks, used_hits, used = [], [], 0
     for hit in hits:
         block = f"[{hit['title']}, p.{hit['page']}]\n{hit['text']}"
         if used + len(block) > ECG_REFERENCE_MAX_CHARS:
             break
         blocks.append(block)
+        used_hits.append(hit)
         used += len(block)
-    return "\n\n".join(blocks)
+    return "\n\n".join(blocks), used_hits
+
+
+def format_sources(hits: list[dict]) -> str:
+    """
+    The "what this read was checked against" footer shown under an ECG
+    interpretation: one line per book with the pages consulted.
+
+    Built from the retrieved passages rather than asked of the model, so it
+    can't drift from what was actually in front of it -- a model asked to
+    list its own sources can invent a plausible-looking page number, and on
+    a medical read a citation that looks checkable but isn't is worse than
+    no citation. Books stay in retrieval-score order, best match first.
+    """
+    if not hits:
+        return ""
+    by_book: dict[str, list[int]] = {}
+    for hit in hits:
+        pages = by_book.setdefault(hit["title"], [])
+        if hit["page"] not in pages:
+            pages.append(hit["page"])
+
+    lines = ["📖 Checked against:"]
+    for title, pages in by_book.items():
+        pages.sort()
+        label = "p." if len(pages) == 1 else "pp."
+        lines.append(f"  • {_markdown_safe(title)} -- {label} {', '.join(str(p) for p in pages)}")
+    return "\n".join(lines)
+
+
+def _markdown_safe(title: str) -> str:
+    """
+    Strip characters Telegram's legacy Markdown treats as formatting.
+
+    This footer is embedded in a message ecg_lab_flow.py sends with
+    parse_mode="Markdown", and book titles come from admin-supplied PDF
+    filenames -- so an odd number of underscores or asterisks across the
+    footer makes Telegram reject the whole message ("can't parse
+    entities"), exactly the failure that broke the admin cost dashboard.
+    send_long_text() would catch that and resend as plain text, so nothing
+    is lost, but every ECG read with such a title would silently lose its
+    formatting. Legacy Markdown has no dependable backslash escape (unlike
+    MarkdownV2), so the characters are replaced rather than escaped --
+    underscores become spaces (deleting them would run words together in a
+    filename-derived title), the rest are simply dropped.
+    """
+    return title.translate({ord("_"): " ", ord("*"): None, ord("`"): None, ord("["): None, ord("]"): None})

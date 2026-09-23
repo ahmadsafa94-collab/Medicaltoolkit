@@ -870,7 +870,11 @@ async def handle_ecg_reference_document(message: Message, state: FSMContext):
 
     ref_id = ecg_reference.new_ref_id()
     dest_path = ecg_reference.pdf_path_for(ref_id, safe_pdf_filename(file_name))
-    title = os.path.splitext(file_name)[0].strip() or "ECG reference"
+    # Underscores in a PDF filename are almost always stand-ins for spaces
+    # ("Marriott_Practical_ECG.pdf"), and this title is shown to users under
+    # every ECG read as a source -- so normalize it once here rather than
+    # surfacing the raw filename.
+    title = os.path.splitext(file_name)[0].replace("_", " ").strip() or "ECG reference"
 
     status = await message.answer(f"Downloading '{title}'...")
     try:

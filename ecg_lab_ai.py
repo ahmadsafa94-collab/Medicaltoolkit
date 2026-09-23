@@ -147,7 +147,7 @@ def interpret_ecg(image_bytes: bytes, media_type: str, language: str = "English"
     # tracing precisely enough to pull the passages that actually teach this
     # pattern. Empty when no reference books are loaded, in which case the
     # verify prompt below is exactly what it was before -- see ecg_reference.py.
-    reference_block = ecg_reference.reference_context(draft)
+    reference_block, reference_hits = ecg_reference.build_reference(draft)
 
     instructions = [
         "Re-examine the image yourself and check the draft's Rate/Rhythm/Axis/Intervals/Notable morphology/"
@@ -162,8 +162,10 @@ def interpret_ecg(image_bytes: bytes, media_type: str, language: str = "English"
             "rule), apply it exactly as written in preference to your own recollection, and prefer the "
             "book's own terminology and level of detail so the read sounds like the textbook a student is "
             "learning from. If the references don't cover part of the draft, fall back to standard ECG "
-            "knowledge rather than forcing an irrelevant reference in. Never mention the references, cite "
-            "them, or name a book in your output -- they shape the read, they aren't part of it."
+            "knowledge rather than forcing an irrelevant reference in. Do NOT add citations, page numbers "
+            "or book names inside the six lines themselves -- the student is shown the exact books and "
+            "pages separately, under your output, so an inline citation would only duplicate that and "
+            "break the structure."
         )
     instructions += [
         _IMAGE_CLARITY_REVIEW_INSTRUCTION,
@@ -191,7 +193,17 @@ def interpret_ecg(image_bytes: bytes, media_type: str, language: str = "English"
         ],
     )
 
-    return (verified or draft) + _DISCLAIMER
+    # Sources sit between the read and the disclaimer: the student can see
+    # which book and page backs what they were just told (and go look it
+    # up), while the safety note stays last where it's most visible. Absent
+    # entirely when no teaching book informed this read, rather than a
+    # "no sources" line -- there is nothing to cite, and saying so every
+    # time would just be noise on an otherwise unchanged read.
+    sources = ecg_reference.format_sources(reference_hits)
+    interpretation = verified or draft
+    if sources:
+        interpretation += f"\n\n{sources}"
+    return interpretation + _DISCLAIMER
 
 
 def _lab_reference_context() -> str:
