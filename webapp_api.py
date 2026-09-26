@@ -176,14 +176,18 @@ def _public_book(book_id: str, book: dict) -> dict:
 async def list_books(request: Request):
     user = require_user(request)
     books = library.list_books(user["id"])
-    # shelf_limit lets the mini app show the upgrade prompt on the "+" button
-    # instead of letting a free user pick a file, upload it, and only then
-    # be refused. null = unlimited (Premium). Enforcement still lives in
-    # upload_book() -- this is only what the UI needs to be polite about it.
+    # shelf_limit/shelf_used let the mini app show the upgrade prompt on the
+    # "+" button instead of letting a free user pick a file, upload it, and
+    # only then be refused. null limit = unlimited (Premium). shelf_used is
+    # sent rather than letting the client count books itself, since paid
+    # 📚 Requested Books don't count toward the cap and that rule belongs in
+    # one place (library.count_toward_shelf_limit). Enforcement still lives
+    # in upload_book() -- this is only what the UI needs to be polite.
     return JSONResponse(
         {
             "books": [_public_book(bid, b) for bid, b in books.items()],
             "shelf_limit": subscriptions.shelf_limit(user["id"]),
+            "shelf_used": library.count_toward_shelf_limit(user["id"]),
         }
     )
 
@@ -283,7 +287,7 @@ async def upload_book(request: Request):
     # not the enforcement -- the client can't be trusted, and anyone can
     # POST here directly.
     try:
-        subscriptions.check_shelf_capacity(user_id, len(library.list_books(user_id)))
+        subscriptions.check_shelf_capacity(user_id, library.count_toward_shelf_limit(user_id))
     except subscriptions.ShelfLimitReached as e:
         raise ApiError(status_code=402, detail=str(e))
 

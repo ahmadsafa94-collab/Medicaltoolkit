@@ -88,6 +88,24 @@ def list_books(user_id: int) -> dict:
     return _load(user_id)
 
 
+# Books delivered through the paid 📚 Request a Book flow are exempt from the
+# free-plan shelf cap: the user paid real money for that specific book, so it
+# must never be what pushes them over the limit or blocks their next upload.
+# They still sit on the shelf like any other book -- they just don't count.
+SHELF_LIMIT_EXEMPT_SOURCES = {"request"}
+
+
+def count_toward_shelf_limit(user_id: int) -> int:
+    """
+    How many of this user's books count against the free-plan shelf cap
+    (see subscriptions.check_shelf_capacity). Kept here rather than at the
+    call sites so the "which books count" rule has exactly one definition.
+    """
+    return sum(
+        1 for book in _load(user_id).values() if book.get("source") not in SHELF_LIMIT_EXEMPT_SOURCES
+    )
+
+
 def get_book(user_id: int, book_id: str) -> dict | None:
     return _load(user_id).get(book_id)
 

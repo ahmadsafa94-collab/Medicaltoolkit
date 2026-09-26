@@ -1068,7 +1068,9 @@ async def handle_pdf_upload(message: Message):
     # through the entire upload and processing run only to be told at the
     # very end that the book can't be kept.
     try:
-        subscriptions.check_shelf_capacity(message.from_user.id, len(library.list_books(message.from_user.id)))
+        subscriptions.check_shelf_capacity(
+            message.from_user.id, library.count_toward_shelf_limit(message.from_user.id)
+        )
     except subscriptions.ShelfLimitReached as e:
         await message.answer(str(e))
         return

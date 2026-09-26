@@ -115,9 +115,11 @@ async function loadShelf() {
   const empty = document.getElementById("shelf-empty");
   grid.innerHTML = "";
   try {
-    const { books, shelf_limit } = await api("/api/books");
+    const { books, shelf_limit, shelf_used } = await api("/api/books");
     shelfLimit = shelf_limit ?? null;
-    shelfCount = books.length;
+    // From the server, not books.length: paid 📚 Requested Books sit on the
+    // shelf but don't count toward the free cap.
+    shelfCount = shelf_used ?? books.length;
     empty.hidden = books.length > 0;
     renderShelf(grid, books);
   } catch (e) {

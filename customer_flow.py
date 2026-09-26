@@ -77,10 +77,16 @@ def _plan_summary_text(user_id: int) -> str:
         # Listed apart from the block above because it isn't a monthly
         # allowance: it's a standing cap on books currently on the shelf,
         # so deleting one frees a slot immediately (see subscriptions.py).
+        # Paid 📚 Requested Books are excluded from the count, so this can
+        # read "1/2" on a shelf that visibly holds more than two books --
+        # spelled out below rather than leaving that looking like a bug.
         shelf_cap = subscriptions.shelf_limit(user_id)
         if shelf_cap is not None:
+            counted = library.count_toward_shelf_limit(user_id)
             lines.append("")
-            lines.append(f"Book Shelf: {len(library.list_books(user_id))}/{shelf_cap} books")
+            lines.append(f"Book Shelf: {counted}/{shelf_cap} books")
+            if len(library.list_books(user_id)) > counted:
+                lines.append("  (books you purchased don't count toward this)")
     lines.append("")
     lines.append(f"Language: {sub.get('language', 'English')}")
     return "\n".join(lines)
