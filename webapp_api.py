@@ -176,7 +176,16 @@ def _public_book(book_id: str, book: dict) -> dict:
 async def list_books(request: Request):
     user = require_user(request)
     books = library.list_books(user["id"])
-    return JSONResponse({"books": [_public_book(bid, b) for bid, b in books.items()]})
+    # shelf_limit lets the mini app show the upgrade prompt on the "+" button
+    # instead of letting a free user pick a file, upload it, and only then
+    # be refused. null = unlimited (Premium). Enforcement still lives in
+    # upload_book() -- this is only what the UI needs to be polite about it.
+    return JSONResponse(
+        {
+            "books": [_public_book(bid, b) for bid, b in books.items()],
+            "shelf_limit": subscriptions.shelf_limit(user["id"]),
+        }
+    )
 
 
 async def get_book(request: Request):
@@ -268,6 +277,15 @@ def _safe_remove(path: str) -> None:
 async def upload_book(request: Request):
     user = require_user(request)
     user_id = user["id"]
+
+    # Free-plan shelf cap, before a byte of the body is read: app.js also
+    # checks this before opening the file picker, but that's a convenience,
+    # not the enforcement -- the client can't be trusted, and anyone can
+    # POST here directly.
+    try:
+        subscriptions.check_shelf_capacity(user_id, len(library.list_books(user_id)))
+    except subscriptions.ShelfLimitReached as e:
+        raise ApiError(status_code=402, detail=str(e))
 
     # Cheap early rejection when the client honestly reports Content-Length
     # (defense in depth only -- a missing/spoofed header falls through to

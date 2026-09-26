@@ -104,12 +104,20 @@ function updateBackButton() {
 
 const SHELF_COLS = 4;
 
+// Free-plan shelf cap, refreshed on every shelf load. Only so the "+" button
+// can explain itself before a file is picked -- the server enforces the real
+// limit in upload_book(). null = unlimited (Premium).
+let shelfLimit = null;
+let shelfCount = 0;
+
 async function loadShelf() {
   const grid = document.getElementById("shelf-grid");
   const empty = document.getElementById("shelf-empty");
   grid.innerHTML = "";
   try {
-    const { books } = await api("/api/books");
+    const { books, shelf_limit } = await api("/api/books");
+    shelfLimit = shelf_limit ?? null;
+    shelfCount = books.length;
     empty.hidden = books.length > 0;
     renderShelf(grid, books);
   } catch (e) {
@@ -395,6 +403,14 @@ document.getElementById("request-book-send").addEventListener("click", async () 
 });
 
 document.getElementById("btn-add-book").addEventListener("click", () => {
+  if (shelfLimit !== null && shelfCount >= shelfLimit) {
+    alertMsg(
+      `Your free plan holds ${shelfLimit} books on the shelf at a time, and you have ${shelfCount}. ` +
+        "Delete a book you're done with to free up a slot, or upgrade to Premium (⭐ My Plan in the bot chat) " +
+        "for an unlimited shelf."
+    );
+    return;
+  }
   document.getElementById("file-input").click();
 });
 

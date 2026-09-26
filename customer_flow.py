@@ -24,6 +24,7 @@ from aiogram.types import CallbackQuery, LabeledPrice, Message, PreCheckoutQuery
 import admin_log
 import book_requests
 import language
+import library
 import subscriptions
 from config import (
     ADMIN_USER_IDS,
@@ -59,7 +60,7 @@ def _plan_summary_text(user_id: int) -> str:
         until = time.strftime("%Y-%m-%d", time.gmtime(sub["premium_until"]))
         lines.append(f"Renews/expires: {until}")
         lines.append("")
-        lines.append("Unlimited summaries, quizzes, Ask-AI, and ECG/lab interpretation.")
+        lines.append("Unlimited summaries, quizzes, Ask-AI, ECG/lab interpretation, and Book Shelf.")
     else:
         lines.append("")
         lines.append("Usage this month:")
@@ -73,6 +74,13 @@ def _plan_summary_text(user_id: int) -> str:
         lines.append(
             f"  Lab interpretation trial: {'used' if trial_used.get('lab') else 'available'}"
         )
+        # Listed apart from the block above because it isn't a monthly
+        # allowance: it's a standing cap on books currently on the shelf,
+        # so deleting one frees a slot immediately (see subscriptions.py).
+        shelf_cap = subscriptions.shelf_limit(user_id)
+        if shelf_cap is not None:
+            lines.append("")
+            lines.append(f"Book Shelf: {len(library.list_books(user_id))}/{shelf_cap} books")
     lines.append("")
     lines.append(f"Language: {sub.get('language', 'English')}")
     return "\n".join(lines)

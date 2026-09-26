@@ -33,8 +33,8 @@ def main_menu_kb(webapp_url: str = "", is_admin: bool = False) -> ReplyKeyboardM
       - BTN_CLINICAL_TOOLS opens clinical_tools_kb() below: ECG/lab
         interpretation, calculators, Ask About Drugs, drug interactions, and
         drug lookup.
-      - BTN_STUDY_TOOLS opens study_tools_kb() below: flashcards, OSCE
-        practice, the PDF splitter, notes, Ask My Books, and bookmarks.
+      - BTN_STUDY_TOOLS opens study_tools_kb() below: flashcards, the PDF
+        splitter, notes, Ask My Books, and bookmarks.
 
     BTN_SHELF ("📚 BOOK SHELF") is deliberately first and alone on its own
     row -- the closest a plain-text ReplyKeyboardMarkup button (no bold/size
@@ -312,14 +312,13 @@ def clinical_tools_kb() -> InlineKeyboardMarkup:
 
 
 # ---------------------------------------------------------------------------
-# Study Tools (flashcards, OSCE, PDF splitter, notes, Ask My Books, bookmarks)
+# Study Tools (flashcards, PDF splitter, notes, Ask My Books, bookmarks)
 # ---------------------------------------------------------------------------
 
 def study_tools_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="🗂 Flashcards", callback_data="study:flashcards")],
-            [InlineKeyboardButton(text="🩺 OSCE Practice", callback_data="study:osce")],
             [InlineKeyboardButton(text="✂️ PDF Splitter", callback_data="study:pdfsplit")],
             [InlineKeyboardButton(text="📓 My Notes", callback_data="study:notes")],
             [InlineKeyboardButton(text="💬 Ask My Books", callback_data="study:askbooks")],

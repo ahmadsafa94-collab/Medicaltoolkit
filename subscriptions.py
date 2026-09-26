@@ -34,6 +34,7 @@ from config import (
     FREE_MONTHLY_SUMMARIES,
     FREE_MONTHLY_QUIZZES,
     FREE_MONTHLY_QUESTIONS,
+    FREE_SHELF_BOOKS,
     ECG_FREE_TRIALS,
     LAB_FREE_TRIALS,
     REFERRAL_BONUS_DAYS,
@@ -70,6 +71,19 @@ class QuotaExceeded(Exception):
         super().__init__(
             f"You've used all {FREE_LIMITS.get(feature, '?')} free {FEATURE_LABELS.get(feature, feature)} "
             "this month. Upgrade to Premium (⭐ My Plan) for unlimited access, or wait for next month's reset."
+        )
+
+
+class ShelfLimitReached(Exception):
+    """Raised when a FREE user's 📚 Book Shelf is already at FREE_SHELF_BOOKS and they try to add another."""
+
+    def __init__(self, current_count: int):
+        self.current_count = current_count
+        self.limit = FREE_SHELF_BOOKS
+        super().__init__(
+            f"Your free plan holds {FREE_SHELF_BOOKS} books on the shelf at a time, and you have "
+            f"{current_count}. Delete a book you're done with to free up a slot, or upgrade to Premium "
+            "(⭐ My Plan) for an unlimited shelf."
         )
 
 
@@ -325,6 +339,31 @@ def check_and_consume(user_id: int, feature: str) -> None:
 
     sub["usage"][feature] = used + 1
     _save(user_id, sub)
+
+
+def shelf_limit(user_id: int) -> int | None:
+    """How many books this user may keep on the shelf at once; None means unlimited (Premium/admin)."""
+    return None if is_premium(user_id) else FREE_SHELF_BOOKS
+
+
+def check_shelf_capacity(user_id: int, current_count: int) -> None:
+    """
+    Raise ShelfLimitReached if adding one more book would put a free user
+    over FREE_SHELF_BOOKS. Premium users always pass.
+
+    Takes the count rather than reading it so this module stays free of an
+    import of library.py (which would be a cycle risk, and would drag a
+    per-user registry read into a module that only deals in plans/usage).
+    Callers pass len(library.list_books(user_id)).
+
+    Nothing is consumed or written here -- unlike check_and_consume(), this
+    is a standing limit on what's currently stored, re-evaluated from the
+    live shelf each time, so deleting a book immediately frees the slot.
+    """
+    if is_premium(user_id):
+        return
+    if current_count >= FREE_SHELF_BOOKS:
+        raise ShelfLimitReached(current_count)
 
 
 def can_use_trial_or_premium(user_id: int, feature: str) -> bool:

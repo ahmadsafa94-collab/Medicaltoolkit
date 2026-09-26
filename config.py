@@ -167,6 +167,14 @@ FREE_MONTHLY_SUMMARIES = 3
 FREE_MONTHLY_QUIZZES = 3
 FREE_MONTHLY_QUESTIONS = 20
 
+# How many books a FREE user may keep on their 📚 Book Shelf at once. Unlike
+# the monthly caps above this is a standing limit on stored books, not a
+# per-month allowance: it counts what's on the shelf right now, so deleting
+# a book immediately frees the slot. Premium is unlimited. Existing shelves
+# already over the limit are never touched -- the check only blocks ADDING
+# a book, so nobody loses a book they already uploaded.
+FREE_SHELF_BOOKS = 2
+
 # ECG/lab interpretation (see ecg_lab_ai.py) are Premium-only, but every free
 # user gets exactly one free trial of EACH before being asked to upgrade.
 ECG_FREE_TRIALS = 1

@@ -1,6 +1,6 @@
 """
 Supported response languages for AI-generated content (chapter summaries,
-quizzes, Ask-AI answers, mnemonics, ECG/lab interpretation, OSCE cases).
+quizzes, Ask-AI answers, mnemonics, ECG/lab interpretation).
 
 This is deliberately the ONLY piece of multi-language support in this round:
 every AI generation call already threads a `language` parameter through to

@@ -90,7 +90,6 @@ import flashcards
 import glossary
 import library
 import notes_flow
-import osce_flow
 import pdf_export
 import session_cache
 import subscriptions
@@ -147,9 +146,6 @@ drug_qa_flow.register_drug_qa_handlers(dp)
 # Study Tools -> Flashcards (SM-2 spaced repetition + Anki .apkg export) --
 # see flashcard_flow.py.
 flashcard_flow.register_flashcard_handlers(dp)
-
-# Study Tools -> OSCE-style case practice -- see osce_flow.py.
-osce_flow.register_osce_handlers(dp)
 
 # Study Tools -> My Notes (personal note-taking synced to bookmarks) --
 # see notes_flow.py.
@@ -295,7 +291,7 @@ async def cmd_help(message: Message):
         "/support - get help directly from the admin (same as the 🆘 Support button in the menu below).\n\n"
         "🩺 Clinical Tools (menu button) - ECG/lab interpretation, calculators, Ask About Drugs, "
         "AI-checked drug interactions, and drug lookup.\n\n"
-        "🧠 Study Tools (menu button) - flashcards, OSCE practice, the PDF splitter (splits an "
+        "🧠 Study Tools (menu button) - flashcards, the PDF splitter (splits an "
         "uploaded PDF into one file per chapter without saving it or offering to index it -- sending "
         "a PDF directly to the chat still does the full save+index flow), notes, Ask My Books, and "
         "bookmarks."
@@ -1064,6 +1060,17 @@ async def handle_pdf_upload(message: Message):
             f"Telegram's {MAX_UPLOAD_BYTES // 1024 // 1024}MB limit for bot downloads. "
             "Please split it yourself first, or send a smaller file."
         )
+        return
+
+    # Free-plan shelf cap, checked BEFORE the download and the (expensive,
+    # AI-backed) chapter split rather than at the library.add_book() call
+    # further down -- otherwise a free user with a full shelf would sit
+    # through the entire upload and processing run only to be told at the
+    # very end that the book can't be kept.
+    try:
+        subscriptions.check_shelf_capacity(message.from_user.id, len(library.list_books(message.from_user.id)))
+    except subscriptions.ShelfLimitReached as e:
+        await message.answer(str(e))
         return
 
     status_msg = await message.answer("Got it. Downloading...")
