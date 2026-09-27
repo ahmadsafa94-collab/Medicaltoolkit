@@ -244,6 +244,20 @@ def interaction_menu_kb(drug_count: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def cancel_kb() -> InlineKeyboardMarkup:
+    """
+    The ❌ Cancel button attached to any prompt that waits for the user to
+    type something.
+
+    Replaces telling people to type "/cancel" in the message text: a
+    button is one tap, is discoverable without reading, and translates
+    with the rest of the UI. The /cancel COMMAND still works everywhere it
+    did -- it's just no longer the only way out, or something the user has
+    to be told about. bot.py's ui:cancel handler is what this taps into.
+    """
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Cancel", callback_data="ui:cancel")]])
+
+
 def drug_suggestion_kb(options: list[tuple[str, str]], prefix: str) -> InlineKeyboardMarkup:
     """
     "Did you mean...?" for any flow where a typed drug name didn't match the

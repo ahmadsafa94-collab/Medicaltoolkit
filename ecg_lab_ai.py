@@ -92,9 +92,14 @@ _MEASUREMENT_METHOD_INSTRUCTION = (
     "in the lead where the onset and offset are clearest, then confirm in a second lead.\n"
     "- PR: start of P to start of QRS. Normal 120-200 ms (3-5 small boxes).\n"
     "- QRS: onset to offset of QRS. Normal under 120 ms (under 3 small boxes).\n"
-    "- QT: start of QRS to the end of T, read where the T-wave end is clearest (often II or V5). "
-    "Correct for rate using Bazett: QTc = QT / sqrt(RR in seconds). Give QTc whenever a rate is "
-    "determinable, and say which you are quoting.\n\n"
+    "- QT and QTc: measure QT from the start of QRS to the end of T, in the lead where the T-wave end "
+    "is clearest (often II or V5). ALWAYS go on to correct it for rate with Bazett -- "
+    "QTc = QT / sqrt(RR in seconds), RR in seconds being 60 / rate -- and ALWAYS report BOTH the QT "
+    "and the QTc, labelled, plus what the QTc means: normal is up to about 440 ms in men and 460 ms "
+    "in women, borderline just above that, and over 500 ms is the threshold usually flagged as "
+    "clinically important. QTc is the single most commonly omitted value and the one a student most "
+    "needs, so it is never optional: if the rate or the T-wave end genuinely cannot be read, say so "
+    "explicitly on this line rather than leaving QTc out.\n\n"
     "AXIS: use the quadrant method on the NET deflection (positive minus negative "
     "area) of leads I and aVF, judging the whole complex rather than the tallest spike:\n"
     "- I positive, aVF positive -> normal axis\n"
@@ -155,6 +160,21 @@ def _image_block(image_bytes: bytes, media_type: str) -> dict:
     }
 
 
+def _output_budget(language: str) -> int:
+    """
+    Token budget for one interpretation pass.
+
+    Non-Latin scripts tokenize far less efficiently than English -- Persian
+    and Arabic run roughly two to three times the tokens for the same
+    content -- so a budget that comfortably fits a six-line English read
+    truncates the same read in Persian. That is not a theoretical concern:
+    it cut a Persian ECG off mid-sentence, losing the QTc, the morphology
+    line and the overall impression entirely, while looking like a
+    complete answer.
+    """
+    return 2000 if language.strip().lower() == "english" else 4000
+
+
 def _call_claude(feature: str, system_prompt: str, content, max_tokens: int = 1200) -> str:
     """Shared single-Claude-call plumbing (client call + cost logging + text extraction) for every pass below."""
     try:
@@ -173,6 +193,16 @@ def _call_claude(feature: str, system_prompt: str, content, max_tokens: int = 12
         logger.exception("Cost ledger logging failed (non-fatal)")
 
     text = "".join(block.text for block in response.content if block.type == "text").strip()
+    if getattr(response, "stop_reason", None) == "max_tokens":
+        # Truncation is silent from the reader's side: the answer just
+        # stops, mid-sentence, with the last lines missing but everything
+        # above them looking right. Log it loudly so a budget that has
+        # become too small shows up here instead of in a bug report.
+        logger.error(
+            "%s hit its token limit (%s tokens) and was TRUNCATED -- raise _output_budget",
+            feature,
+            getattr(getattr(response, "usage", None), "output_tokens", "?"),
+        )
     if not text:
         # A pass that comes back with no text at all used to vanish silently:
         # interpret_ecg fell through to `verified or draft`, and when BOTH
@@ -233,7 +263,11 @@ def interpret_ecg(image_bytes: bytes, media_type: str, language: str = "English"
         f"{_MEASUREMENT_METHOD_INSTRUCTION}\n\n"
         "Do the measuring silently. Output ONLY the six lines above -- no working, no box counts, no "
         "commentary before or after them. Never reply with nothing: if something genuinely cannot be "
-        "measured, still emit all six lines and say so on the line it belongs to.\n\n"
+        "measured, still emit all six lines and say so on the line it belongs to.\n"
+        "ALL SIX LINES ARE REQUIRED, including the last two -- Notable morphology and Overall "
+        "impression. Never stop after the intervals. If you are running long, shorten the earlier "
+        "lines rather than dropping the later ones: the overall impression is the part the student "
+        "reads first.\n\n"
         + (
             ""
             if language.strip().lower() == "english"
@@ -250,9 +284,9 @@ def interpret_ecg(image_bytes: bytes, media_type: str, language: str = "English"
         "still readable and does NOT warrant that caveat. If it's truly unreadable, say plainly which parts "
         f"are unreadable instead of guessing at values you can't see. Respond in {language}."
     )
-    # Roomier than the 1200 the other passes use: the measurement
-    # instructions ask for real work across six lines, and a read truncated
-    # mid-structure is worse than a slightly costlier one.
+    # Both passes get the same, language-aware budget (see _output_budget):
+    # a read truncated mid-structure is worse than a slightly costlier one,
+    # and the VERIFY pass is the one the user actually sees.
     draft = _call_claude(
         "ecg_interpretation",
         draft_system_prompt,
@@ -260,7 +294,7 @@ def interpret_ecg(image_bytes: bytes, media_type: str, language: str = "English"
             _image_block(image_bytes, media_type),
             {"type": "text", "text": "Interpret this ECG tracing for study purposes."},
         ],
-        max_tokens=2000,
+        max_tokens=_output_budget(language),
     )
 
     # The draft's TEXT is the retrieval query for the admin's ECG textbooks:
@@ -308,7 +342,9 @@ def interpret_ecg(image_bytes: bytes, media_type: str, language: str = "English"
         "(Rate/Rhythm/Axis/Intervals/Notable morphology/Overall impression) -- do not mention that you are "
         "reviewing or show your reasoning, just the corrected final text a student should read. Never "
         "reply with nothing: if the draft needed no changes at all, output it back unchanged rather "
-        "than returning an empty message.",
+        "than returning an empty message. ALL SIX LINES ARE REQUIRED: emit Notable morphology and "
+        "Overall impression even if the draft omitted them, and make sure the Intervals line carries "
+        "both QT and QTc with the QTc interpreted. If the draft stops part-way through, finish it.",
         "Same safety rules as the draft: never state or imply a specific diagnosis for this image, only "
         f"describe the pattern. Respond in {language}.",
     ]
@@ -328,6 +364,7 @@ def interpret_ecg(image_bytes: bytes, media_type: str, language: str = "English"
             _image_block(image_bytes, media_type),
             {"type": "text", "text": "Here is the same ECG image again. Verify/correct the draft per your instructions."},
         ],
+        max_tokens=_output_budget(language),
     )
 
     # Sources sit between the read and the disclaimer: the student can see

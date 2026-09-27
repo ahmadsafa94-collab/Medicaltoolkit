@@ -42,7 +42,7 @@ import pdf_qa
 import session_cache
 import subscriptions
 from config import QA_INDEXING_TIMEOUT_SECONDS
-from keyboards import book_picker_kb
+from keyboards import cancel_kb, book_picker_kb
 from telegram_helpers import send_long_text
 
 logger = logging.getLogger(__name__)
@@ -107,7 +107,7 @@ async def handle_book_pick(callback: CallbackQuery, state: FSMContext):
     await state.update_data(book_id=book_id, title=book["title"])
     await callback.answer()
     await callback.message.answer(
-        f"📖 Ask a question about *{book['title']}* (or /cancel to stop):", parse_mode="Markdown"
+        f"📖 Ask a question about *{book['title']}*:", parse_mode="Markdown", reply_markup=cancel_kb()
     )
 
 

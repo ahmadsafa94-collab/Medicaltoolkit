@@ -31,7 +31,7 @@ import name_resolver
 import session_cache
 import subscriptions
 from drug_lookup import lookup_drug, DrugNotFoundError, DrugLookupRateLimitedError
-from keyboards import drug_suggestion_kb
+from keyboards import cancel_kb, drug_suggestion_kb
 from telegram_helpers import send_long_text
 
 logger = logging.getLogger(__name__)
@@ -54,8 +54,8 @@ async def handle_study_drugqa(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     await state.set_state(DrugQAStates.awaiting_drug_name)
     await callback.message.answer(
-        "💊 Which drug would you like to ask about? Type the generic name (e.g. 'metformin'). /cancel to abort."
-    )
+        "💊 Which drug would you like to ask about? Type the generic name (e.g. 'metformin')."
+    , reply_markup=cancel_kb())
 
 
 @router.message(Command("cancel"), DrugQAStates.awaiting_drug_name)
@@ -86,7 +86,7 @@ async def handle_drug_name(message: Message, state: FSMContext):
         return
     except Exception as e:
         logger.exception("Drug lookup failed (Ask AI about drugs flow)")
-        await status.edit_text(f"Lookup failed: {e}\n\nTry another name, or /cancel to stop.")
+        await status.edit_text(f"Lookup failed: {e}\n\nTry another name.", reply_markup=cancel_kb())
         return
 
     await _begin_questions(status.edit_text, state, sections, drug_name)
@@ -99,7 +99,7 @@ async def _begin_questions(answer_fn, state: FSMContext, sections: dict, fallbac
     await state.update_data(drug_name=name, sections=sections, history=[])
     await answer_fn(
         f"Found {name}. Ask your question -- dose, side effects, interactions, anything the label "
-        "covers (or /cancel to stop):"
+        "covers:"
     )
 
 
@@ -143,7 +143,7 @@ async def _offer_name_suggestions(status: Message, state: FSMContext, raw_name: 
     if not options:
         await status.edit_text(
             f"No FDA label found for '{raw_name}', and I couldn't work out what you meant.\n\n"
-            "Try the plain generic name (e.g. 'amoxicillin' rather than 'Amoxil 500mg'), or /cancel to stop."
+            "Try the plain generic name (e.g. 'amoxicillin' rather than 'Amoxil 500mg')."
         )
         return
 
@@ -162,7 +162,7 @@ async def _offer_name_suggestions(status: Message, state: FSMContext, raw_name: 
 async def handle_suggestion_rejected(callback: CallbackQuery):
     await callback.answer()
     await callback.message.answer(
-        "Okay -- type the name again, spelled differently, or try the generic name. /cancel to stop."
+        "Okay -- type the name again, spelled differently, or try the generic name."
     )
 
 
@@ -189,7 +189,9 @@ async def handle_ask_from_dose_lookup(callback: CallbackQuery, state: FSMContext
     await callback.answer()
     await state.set_state(DrugQAStates.awaiting_question)
     await state.update_data(drug_name=name, sections=sections, history=[])
-    await callback.message.answer(f"💊 Ask a question about *{name}* (or /cancel to stop):", parse_mode="Markdown")
+    await callback.message.answer(
+        f"💊 Ask a question about *{name}*:", parse_mode="Markdown", reply_markup=cancel_kb()
+    )
 
 
 @router.message(DrugQAStates.awaiting_question, _NOT_A_COMMAND)

@@ -34,7 +34,7 @@ from config import (
     PREMIUM_PLANS,
     REFERRAL_BONUS_DAYS,
 )
-from keyboards import main_menu_kb, my_plan_kb
+from keyboards import cancel_kb, main_menu_kb, my_plan_kb
 
 logger = logging.getLogger(__name__)
 
@@ -291,7 +291,8 @@ async def handle_contact_admin_prompt(callback: CallbackQuery, state: FSMContext
     await state.set_state(CustomerStates.awaiting_contact_admin_message)
     await callback.message.answer(
         "Type a message describing how you'd like to pay (e.g. bank transfer, another app) and the admin "
-        "will get back to you here. /cancel to abort."
+        "will get back to you here.",
+        reply_markup=cancel_kb(),
     )
 
 
@@ -340,7 +341,8 @@ async def _prompt_feedback(answer_fn, state: FSMContext):
     await state.set_state(CustomerStates.awaiting_feedback_message)
     await answer_fn(
         "🐞 Describe the problem you ran into, or the feature you'd like to see, in one message -- "
-        "the admin will get it and can message you back here. /cancel to abort."
+        "the admin will get it and can message you back here.",
+        reply_markup=cancel_kb(),
     )
 
 
@@ -396,7 +398,8 @@ async def _prompt_support(answer_fn, state: FSMContext):
         return
     await state.set_state(CustomerStates.awaiting_support_message)
     await answer_fn(
-        "🆘 Send your message and the admin will read it and reply to you here directly. /cancel to abort."
+        "🆘 Send your message and the admin will read it and reply to you here directly.",
+        reply_markup=cancel_kb(),
     )
 
 

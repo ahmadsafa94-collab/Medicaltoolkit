@@ -5,6 +5,8 @@ call involved anywhere in this module.
 """
 
 import logging
+
+from keyboards import cancel_kb
 import re
 
 from aiogram import Router, F
@@ -93,7 +95,8 @@ async def handle_add_prompt(callback: CallbackQuery, state: FSMContext):
     hint = f" (defaults to your bookmarked page {book['bookmark_page']} if you don't include one)" if book.get("bookmark_page") else ""
     await callback.message.answer(
         f"Type your note{hint}. Start with a page number and a colon/dash to set the page explicitly, "
-        "e.g. '42: remember this mechanism'. /cancel to abort."
+        "e.g. '42: remember this mechanism'.",
+        reply_markup=cancel_kb(),
     )
 
 

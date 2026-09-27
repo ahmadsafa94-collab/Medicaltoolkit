@@ -22,7 +22,7 @@ from aiogram.types import Message, CallbackQuery
 
 import ecg_lab_ai
 import subscriptions
-from keyboards import lab_input_mode_kb
+from keyboards import cancel_kb, lab_input_mode_kb
 from paths import user_dir
 from telegram_helpers import send_long_text
 
@@ -58,8 +58,8 @@ async def handle_study_ecg(callback: CallbackQuery, state: FSMContext):
     await state.set_state(EcgLabStates.awaiting_ecg_image)
     await callback.message.answer(
         "🫀 Send a photo of the ECG (as a photo or an image file). This is for study/pattern-recognition "
-        "practice only, not a diagnosis -- please use a de-identified or practice/textbook tracing. /cancel to abort."
-    )
+        "practice only, not a diagnosis -- please use a de-identified or practice/textbook tracing."
+    , reply_markup=cancel_kb())
 
 
 @router.callback_query(F.data == "study:lab")
@@ -80,7 +80,7 @@ async def handle_lab_mode_text(callback: CallbackQuery, state: FSMContext):
         await callback.message.answer(_upgrade_message("lab interpretation"))
         return
     await state.set_state(EcgLabStates.awaiting_lab_text)
-    await callback.message.answer("Type the lab values, e.g. 'Na 148, K 2.9, Cr 1.8'. /cancel to abort.")
+    await callback.message.answer("Type the lab values, e.g. 'Na 148, K 2.9, Cr 1.8'.", reply_markup=cancel_kb())
 
 
 @router.callback_query(F.data == "lab:mode:photo")
@@ -91,8 +91,8 @@ async def handle_lab_mode_photo(callback: CallbackQuery, state: FSMContext):
         return
     await state.set_state(EcgLabStates.awaiting_lab_image)
     await callback.message.answer(
-        "📷 Send a photo of the lab report. Please use de-identified or practice material. /cancel to abort."
-    )
+        "📷 Send a photo of the lab report. Please use de-identified or practice material."
+    , reply_markup=cancel_kb())
 
 
 @router.message(Command("cancel"), EcgLabStates.awaiting_ecg_image)
@@ -171,7 +171,7 @@ async def handle_ecg_image(message: Message, state: FSMContext):
 
 @router.message(EcgLabStates.awaiting_ecg_image)
 async def handle_ecg_image_wrong_type(message: Message):
-    await message.answer("Please send an image (as a photo or an image file), or /cancel.")
+    await message.answer("Please send an image (as a photo or an image file).", reply_markup=cancel_kb())
 
 
 @router.message(EcgLabStates.awaiting_lab_text, F.text & ~F.text.startswith("/"))
@@ -241,7 +241,7 @@ async def handle_lab_image(message: Message, state: FSMContext):
 
 @router.message(EcgLabStates.awaiting_lab_image)
 async def handle_lab_image_wrong_type(message: Message):
-    await message.answer("Please send an image (as a photo or an image file), or /cancel.")
+    await message.answer("Please send an image (as a photo or an image file).", reply_markup=cancel_kb())
 
 
 def register_ecg_lab_handlers(dp) -> None:

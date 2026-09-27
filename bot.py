@@ -57,6 +57,7 @@ from drug_lookup import (
     DrugLookupRateLimitedError,
 )
 from keyboards import (
+    cancel_kb,
     ButtonText,
     main_menu_kb,
     drug_search_inline_kb,
@@ -420,8 +421,8 @@ async def handle_study_pdfsplit(callback: CallbackQuery, state: FSMContext):
     await state.set_state(SplitStates.awaiting_pdf)
     await callback.message.answer(
         "✂️ Send the PDF you want split into chapters. I'll send the chapters straight back as "
-        "separate files -- nothing is saved to your library or offered for 💬 Ask My Books/📚 Book Shelf. "
-        "/cancel to abort."
+        "separate files -- nothing is saved to your library or offered for 💬 Ask My Books/📚 Book Shelf.",
+        reply_markup=cancel_kb(),
     )
 
 
@@ -579,6 +580,21 @@ async def _offer_drug_suggestions(status_msg, raw_name: str) -> None:
         else f"I couldn't find '{raw_name}'. Did you mean one of these?"
     )
     await status_msg.edit_text(prompt, reply_markup=drug_suggestion_kb(options, "dose:pick"))
+
+
+@dp.callback_query(F.data == "ui:cancel")
+async def handle_ui_cancel(callback: CallbackQuery, state: FSMContext):
+    """
+    The ❌ Cancel button on any "send me something" prompt.
+
+    Registered on `dp` rather than in any one flow so it works whichever
+    flow's state is active -- aiogram checks the dispatcher's own handlers
+    before descending into sub-routers, so a single handler here clears
+    the state no matter which module set it.
+    """
+    await callback.answer()
+    await state.clear()
+    await callback.message.answer("Cancelled.")
 
 
 @dp.callback_query(F.data == "dose:pick:none")

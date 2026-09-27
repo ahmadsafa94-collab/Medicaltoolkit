@@ -34,6 +34,7 @@ import library
 import subscriptions
 from config import FLASHCARD_GENERATION_TIMEOUT_SECONDS
 from keyboards import (
+    cancel_kb,
     flashcard_book_picker_kb,
     flashcard_book_menu_kb,
     flashcard_chapter_multiselect_kb,
@@ -176,7 +177,8 @@ async def handle_count_custom_prompt(callback: CallbackQuery, state: FSMContext)
     await callback.answer()
     await state.set_state(FlashcardStates.awaiting_custom_count)
     await callback.message.answer(
-        f"Send the number of flashcards to generate (1-{chapter_ai.MAX_CARDS_PER_GENERATION}). /cancel to abort."
+        f"Send the number of flashcards to generate (1-{chapter_ai.MAX_CARDS_PER_GENERATION}).",
+        reply_markup=cancel_kb(),
     )
 
 
@@ -188,7 +190,8 @@ async def handle_count_custom_input(message: Message, state: FSMContext):
             raise ValueError
     except ValueError:
         await message.answer(
-            f"Please send a whole number between 1 and {chapter_ai.MAX_CARDS_PER_GENERATION}, or /cancel to abort."
+            f"Please send a whole number between 1 and {chapter_ai.MAX_CARDS_PER_GENERATION}.",
+            reply_markup=cancel_kb(),
         )
         return
 
