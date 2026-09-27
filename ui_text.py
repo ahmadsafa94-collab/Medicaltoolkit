@@ -168,6 +168,25 @@ def untranslated():
 def should_skip() -> bool:
     return _skip_translation.get()
 
+
+# Whose update is being handled. Set once per update by
+# message_translation.CurrentUserLanguageMiddleware, and read when an
+# outgoing request names no chat of its own -- a callback-query toast
+# carries only the query id, so there is nothing else to key off.
+_current_language: contextvars.ContextVar[str | None] = contextvars.ContextVar("current_language", default=None)
+
+
+def set_current_language(language: str | None):
+    return _current_language.set(language)
+
+
+def reset_current_language(token) -> None:
+    _current_language.reset(token)
+
+
+def current_language() -> str | None:
+    return _current_language.get()
+
 _msg_cache: dict[str, dict[str, str]] = {}
 
 
@@ -254,6 +273,42 @@ def translate_message(language: str | None, text: str) -> str | None:
 
     _remember_message(language, text, translated)
     return translated
+
+
+def translate_batch(language: str | None, texts: list[str]) -> dict[str, str]:
+    """
+    Translate several strings at once: {original: translated} for whatever
+    could be translated, omitting the rest.
+
+    One Claude call for everything not already cached. This exists for
+    keyboards -- a menu with a dozen buttons would otherwise be a dozen
+    sequential calls the first time anyone in a language opened it, which
+    is slow enough to feel broken.
+    """
+    if is_english(language):
+        return {}
+
+    out: dict[str, str] = {}
+    missing: list[str] = []
+    for text in dict.fromkeys(texts):
+        if not text or not text.strip() or len(text) > MAX_TRANSLATABLE_CHARS:
+            continue
+        cached = cached_message(language, text)
+        if cached:
+            out[text] = cached
+        else:
+            missing.append(text)
+
+    if missing:
+        try:
+            fresh = _translate(language, missing)
+        except Exception:
+            logger.exception("Batch translation failed for %s -- those strings stay English", language)
+            fresh = {}
+        for english, value in fresh.items():
+            _remember_message(language, english, value)
+            out[english] = value
+    return out
 
 
 def _translate_one(language: str, text: str) -> str:

@@ -102,16 +102,21 @@ import subscriptions
 import user_history
 from bot_instance import bot
 
-# Every outgoing message leaves in the user's chosen language -- one
-# interception point rather than a translate() call at hundreds of
-# send sites. See message_translation.py.
-message_translation.install(bot)
 from webapp_api import app as webapp_app
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 dp = Dispatcher()
+
+# Everything the user sees leaves in their chosen language -- one
+# interception point rather than a translate() call at hundreds of send
+# sites. install() rewrites outgoing requests; install_dispatcher() records
+# whose update is being handled, which is the only way a callback-query
+# toast (it names no chat) can know which language to use. See
+# message_translation.py.
+message_translation.install(bot)
+message_translation.install_dispatcher(dp)
 
 
 class SplitStates(StatesGroup):

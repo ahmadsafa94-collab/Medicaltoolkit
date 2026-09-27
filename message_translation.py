@@ -1,47 +1,71 @@
 """
-Sends every outgoing bot message in the recipient's chosen language.
+Sends everything the user sees in their chosen language.
 
 Attached to the Bot's outgoing-request chain rather than wired into each
-handler: the bot sends messages from dozens of modules and hundreds of
-call sites -- errors, prompts, status lines, confirmations -- and touching
-them all would be a large, error-prone diff that the next new message
-would immediately fall out of date with. One middleware over sendMessage
-and editMessageText covers every message that exists today and every one
-added later, with no handler needing to know about it.
+handler: the bot sends from dozens of modules and hundreds of call sites --
+errors, prompts, status lines, toasts, captions, button captions -- and
+touching them all would be a large, error-prone diff that the next new
+message would immediately fall out of date with. One middleware covers
+every surface that exists today and every one added later.
 
-What it deliberately does NOT translate:
+Covered: message text, edited message text, callback-query toasts and
+alerts, media captions, invoice title/description, and the captions of
+INLINE keyboard buttons.
 
-  - English users. The middleware returns untouched before doing anything.
-  - Anything longer than ui_text.MAX_TRANSLATABLE_CHARS. That length means
-    AI-generated content (a chapter summary, an ECG interpretation, a Q&A
-    answer) or verbatim FDA label text. The AI content is ALREADY written
-    in the user's language by the call that produced it -- passing it
-    through a second translation would be slow, expensive, and could only
-    degrade it.
+Reply-keyboard (the persistent main menu) buttons are deliberately NOT
+touched here. Those are translated at build time by keyboards.main_menu_kb
+through ui_text.t, and keyboards.ButtonText routes a tap by looking the
+label up in that same table. Translating them here instead could produce a
+different wording for the same button, which would leave it looking fine
+and doing nothing.
+
+What it deliberately leaves alone:
+
+  - English users. The middleware returns before doing any work.
+  - Anything inside a ui_text.untranslated() block: AI-generated content,
+    already written in the user's language by the call that produced it,
+    and verbatim FDA label text, which is medical source material.
   - Anything it fails to translate. Every failure path sends the original
     English rather than raising: a translation outage must never stop the
     bot from talking to people.
 
-Cost and latency are bounded by ui_text's per-language cache -- a given
-message costs one Claude call the first time anyone in that language sees
-it, then a dict lookup. Most of the bot's text is fixed strings, so the
-hit rate climbs fast; dynamic ones (a drug name in a status line) are the
-minority that keep missing.
+Cost and latency are bounded by ui_text's per-language cache -- a string
+costs one Claude call the first time anyone in that language sees it, then
+a dict lookup -- and by batching: everything translatable in one outgoing
+request is translated together, so a fresh keyboard is one call, not one
+per button.
 """
 
 import asyncio
 import logging
 
-from aiogram.methods import EditMessageText, SendMessage
+from aiogram.methods import (
+    AnswerCallbackQuery,
+    EditMessageCaption,
+    EditMessageReplyMarkup,
+    EditMessageText,
+    SendAnimation,
+    SendAudio,
+    SendDocument,
+    SendInvoice,
+    SendMessage,
+    SendPhoto,
+    SendVideo,
+)
+from aiogram.types import InlineKeyboardMarkup
 
 import subscriptions
 import ui_text
 
 logger = logging.getLogger(__name__)
 
+_TEXT_METHODS = (SendMessage, EditMessageText)
+_CAPTION_METHODS = (SendDocument, SendPhoto, SendVideo, SendAudio, SendAnimation, EditMessageCaption)
+_MARKUP_METHODS = _TEXT_METHODS + _CAPTION_METHODS + (EditMessageReplyMarkup, SendInvoice)
+
 
 class TranslateOutgoingMiddleware:
-    """Outgoing-request middleware: rewrites `text` into the recipient's language."""
+    """Outgoing-request middleware: rewrites user-visible strings into the recipient's language."""
 
     async def __call__(self, make_request, bot, method):
         try:
@@ -49,45 +73,108 @@ class TranslateOutgoingMiddleware:
         except Exception:
             # Nothing here is worth failing a send over -- worst case the
             # user gets the English text they would have got anyway.
-            logger.exception("Outgoing message translation failed (non-fatal)")
+            logger.exception("Outgoing translation failed (non-fatal)")
         return await make_request(bot, method)
 
     async def _translate_in_place(self, method) -> None:
-        if not isinstance(method, (SendMessage, EditMessageText)):
-            return
-        text = getattr(method, "text", None)
-        chat_id = getattr(method, "chat_id", None)
-        if not text or not isinstance(chat_id, int):
-            return
-
-        # In a private chat -- which is every chat this bot has -- chat_id
-        # is the user's id, so it's also the key their language is stored
-        # under. A group chat would have a negative id and is skipped by
-        # get_language returning the default.
-        language = subscriptions.get_language(chat_id)
-        if ui_text.is_english(language):
-            return
-        # AI output and FDA label text are marked at their send site, since
-        # nothing about the text itself reliably identifies them.
         if ui_text.should_skip():
             return
-        if len(text) > ui_text.MAX_TRANSLATABLE_CHARS:
+        language = self._language_for(method)
+        if ui_text.is_english(language):
             return
 
-        # Cache hit is a dict lookup, so it runs inline. A miss means a
-        # blocking Claude call, which MUST go to a worker thread: this
-        # middleware sits on the event loop, and blocking it here would
-        # stall every other user's updates for the length of the call, not
-        # just this send.
-        cached = ui_text.cached_message(language, text)
-        if cached:
-            method.text = cached
+        # Gather every translatable string on this request, translate them
+        # in ONE batch, then write them back. Batching matters most for
+        # keyboards: a dozen buttons would otherwise be a dozen calls.
+        slots: list[tuple[object, str]] = []  # (owner, attribute)
+        for attr in ("text", "caption", "title", "description"):
+            value = getattr(method, attr, None)
+            if isinstance(value, str) and value.strip():
+                slots.append((method, attr))
+
+        markup = getattr(method, "reply_markup", None) if isinstance(method, _MARKUP_METHODS) else None
+        if isinstance(markup, InlineKeyboardMarkup):
+            # Work on a COPY. The method object is ours (one per request),
+            # but the markup belongs to the caller and may well be sent
+            # more than once -- translating it in place would leave the
+            # caller holding a translated keyboard, and the next send would
+            # translate the translation ("FA:FA:Stats") or miss the cache.
+            markup = markup.model_copy(deep=True)
+            method.reply_markup = markup
+            # Inline buttons route on callback_data, so their captions are
+            # free to translate -- unlike reply-keyboard buttons, whose
+            # caption IS the routing key (see this module's docstring).
+            for row in markup.inline_keyboard:
+                for button in row:
+                    if isinstance(getattr(button, "text", None), str) and button.text.strip():
+                        slots.append((button, "text"))
+
+        originals = [getattr(owner, attr) for owner, attr in slots]
+        if not originals:
             return
 
-        translated = await asyncio.to_thread(ui_text.translate_message, language, text)
-        if translated:
-            method.text = translated
+        # A cache hit is a dict lookup, so a fully-cached request never
+        # leaves the event loop. A miss means a blocking Claude call, which
+        # MUST go to a worker thread: this middleware runs on the loop, and
+        # blocking here would stall every other user's updates, not just
+        # this send.
+        if all(ui_text.cached_message(language, text) for text in originals):
+            translations = {text: ui_text.cached_message(language, text) for text in originals}
+        else:
+            translations = await asyncio.to_thread(ui_text.translate_batch, language, originals)
+
+        for owner, attr in slots:
+            translated = translations.get(getattr(owner, attr))
+            if translated:
+                setattr(owner, attr, translated)
+
+    @staticmethod
+    def _language_for(method) -> str | None:
+        """
+        The recipient's language. chat_id is the user's id in a private
+        chat -- which is every chat this bot has -- but some methods carry
+        no chat at all (a callback-query toast names only the query), so
+        those fall back to the language recorded for the update currently
+        being handled. See CurrentUserLanguageMiddleware.
+        """
+        chat_id = getattr(method, "chat_id", None)
+        if isinstance(chat_id, int) and chat_id > 0:
+            return subscriptions.get_language(chat_id)
+        if isinstance(method, AnswerCallbackQuery) or chat_id is None:
+            return ui_text.current_language()
+        return None
+
+
+class CurrentUserLanguageMiddleware:
+    """
+    Records whose update is being handled, so replies that don't name a
+    chat -- callback-query toasts and alerts -- can still be translated.
+
+    Registered as an outer middleware on the dispatcher, so it runs once
+    per update before any handler, and stores into a ContextVar that stays
+    isolated to that update's task.
+    """
+
+    async def __call__(self, handler, event, data):
+        user = None
+        for attr in ("message", "edited_message", "callback_query", "inline_query", "pre_checkout_query"):
+            carrier = getattr(event, attr, None)
+            if carrier is not None and getattr(carrier, "from_user", None) is not None:
+                user = carrier.from_user
+                break
+        if user is None:
+            return await handler(event, data)
+
+        token = ui_text.set_current_language(subscriptions.get_language(user.id))
+        try:
+            return await handler(event, data)
+        finally:
+            ui_text.reset_current_language(token)
 
 
 def install(bot) -> None:
     bot.session.middleware(TranslateOutgoingMiddleware())
+
+
+def install_dispatcher(dp) -> None:
+    dp.update.outer_middleware(CurrentUserLanguageMiddleware())
