@@ -25,6 +25,8 @@ original, and keyboards.ButtonText() is the filter built on it -- so a
 Persian user tapping "🧠 ابزار مطالعه" reaches the same handler.
 """
 
+import contextlib
+import contextvars
 import json
 import logging
 import os
@@ -125,8 +127,46 @@ def _cache_path(lang: str) -> str:
 # the bot ever sends -- and accumulate as they're encountered. Mixing them
 # would put unbounded content into the set that button matching scans.
 _MSG_CACHE_DIR = os.path.join(STORAGE_DIR, "_admin", "ui_messages")
-_MAX_CACHED_MESSAGES = 4000   # per language; a ceiling on unbounded growth
-MAX_TRANSLATABLE_CHARS = 700  # longer than this is AI-generated content, see translate_message
+_MAX_CACHED_MESSAGES = 4000    # per language; a ceiling on unbounded growth
+# A backstop against pathological input, NOT the way AI content is
+# excluded -- that's what untranslated() below is for. It started as a
+# 700-char cutoff standing in for "this must be AI output", which was
+# wrong in both directions: it skipped long static messages (the drug
+# interaction checker's intro came out in English) while a short AI answer
+# would still have been re-translated.
+MAX_TRANSLATABLE_CHARS = 3000
+
+# Content that must NOT be translated on its way out, marked at the point
+# it's sent rather than guessed at from its shape. Two kinds qualify:
+# AI-generated text, which the call that produced it already wrote in the
+# user's language, and verbatim FDA label text, which is medical source
+# material that should not be machine-translated at all.
+_skip_translation: contextvars.ContextVar[bool] = contextvars.ContextVar("skip_translation", default=False)
+
+
+@contextlib.contextmanager
+def untranslated():
+    """
+    Mark everything sent inside this block as already-final: the outgoing
+    middleware will leave it exactly as written.
+
+        with ui_text.untranslated():
+            await send_long_text(message.answer, ai_answer)
+
+    A ContextVar rather than a flag threaded through every send, so it
+    survives the awaits between here and the middleware and stays isolated
+    to this task -- one user's AI answer can't suppress translation of
+    another user's error message being sent at the same moment.
+    """
+    token = _skip_translation.set(True)
+    try:
+        yield
+    finally:
+        _skip_translation.reset(token)
+
+
+def should_skip() -> bool:
+    return _skip_translation.get()
 
 _msg_cache: dict[str, dict[str, str]] = {}
 
@@ -190,11 +230,10 @@ def translate_message(language: str | None, text: str) -> str | None:
     user in that language sees it, and a dict lookup forever after. Most of
     the bot's messages are fixed strings, so the hit rate climbs quickly.
 
-    Long text is deliberately skipped. Anything past MAX_TRANSLATABLE_CHARS
-    is AI-generated content (a summary, an ECG read, a Q&A answer) or
-    verbatim FDA label text -- the former is ALREADY written in the user's
-    language by the call that produced it, so re-translating would be a
-    slow, costly round-trip that could only make it worse.
+    AI-generated content and verbatim FDA label text are excluded at their
+    send sites with untranslated(), not by any property of the text itself.
+    MAX_TRANSLATABLE_CHARS remains only as a backstop against something
+    pathologically large reaching here.
     """
     if is_english(language) or not text or not text.strip():
         return None

@@ -10,6 +10,7 @@ first only to be told no -- the trial itself is only actually consumed
 
 import asyncio
 import logging
+import ui_text
 import os
 import uuid
 
@@ -162,7 +163,8 @@ async def handle_ecg_image(message: Message, state: FSMContext):
         return
 
     await status.edit_text("Done.")
-    ok = await send_long_text(message.answer, f"🫀 *ECG Interpretation*\n\n{result}")
+    with ui_text.untranslated():  # already written in the user's language by interpret_ecg
+        ok = await send_long_text(message.answer, f"🫀 *ECG Interpretation*\n\n{result}")
     if not ok:
         await message.answer("Couldn't send the interpretation (Telegram rejected the message).")
 
@@ -195,7 +197,8 @@ async def handle_lab_text(message: Message, state: FSMContext):
         return
 
     await status.edit_text("Done.")
-    ok = await send_long_text(message.answer, f"🧪 *Lab Interpretation*\n\n{result}")
+    with ui_text.untranslated():  # already written in the user's language by interpret_lab_*
+        ok = await send_long_text(message.answer, f"🧪 *Lab Interpretation*\n\n{result}")
     if not ok:
         await message.answer("Couldn't send the interpretation (Telegram rejected the message).")
 
@@ -230,7 +233,8 @@ async def handle_lab_image(message: Message, state: FSMContext):
         return
 
     await status.edit_text("Done.")
-    ok = await send_long_text(message.answer, f"🧪 *Lab Interpretation*\n\n{result}")
+    with ui_text.untranslated():  # already written in the user's language by interpret_lab_*
+        ok = await send_long_text(message.answer, f"🧪 *Lab Interpretation*\n\n{result}")
     if not ok:
         await message.answer("Couldn't send the interpretation (Telegram rejected the message).")
 

@@ -832,7 +832,8 @@ async def cmd_pregnancy(message: Message):
         await message.answer("Couldn't display that due to an internal error. Please try /dose instead.")
         return
 
-    ok = await send_long_text(message.answer, reply)
+    with ui_text.untranslated():  # verbatim FDA label text -- not ours to machine-translate
+        ok = await send_long_text(message.answer, reply)
     if not ok:
         await message.answer("Couldn't send that (Telegram rejected the message).")
     if table_entries:
@@ -873,7 +874,8 @@ async def handle_section_tap(callback: CallbackQuery):
         )
         return
 
-    ok = await send_long_text(callback.message.answer, reply)
+    with ui_text.untranslated():  # verbatim FDA label text -- not ours to machine-translate
+        ok = await send_long_text(callback.message.answer, reply)
     if not ok:
         await callback.message.answer(
             "Couldn't send that section (Telegram rejected the message). "

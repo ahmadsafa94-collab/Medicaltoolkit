@@ -25,6 +25,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
+import ui_text
 import drug_qa
 import name_resolver
 import session_cache
@@ -236,7 +237,8 @@ async def handle_question(message: Message, state: FSMContext):
     except Exception:
         pass  # not critical if the "Searching..." message can't be deleted (e.g. already gone)
 
-    ok = await send_long_text(message.answer, answer)
+    with ui_text.untranslated():  # drug_qa.answer_question already answered in the user's language
+        ok = await send_long_text(message.answer, answer)
     if not ok:
         await message.answer("Couldn't send that answer (Telegram rejected the message).")
 

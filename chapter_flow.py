@@ -16,6 +16,7 @@ import logging
 from aiogram import Router, F
 from aiogram.types import CallbackQuery
 
+import ui_text
 import chapter_ai
 import session_cache
 import subscriptions
@@ -119,7 +120,8 @@ async def handle_chapter_summarize(callback: CallbackQuery):
         return
 
     text = f"📝 *Summary -- {title}*\n\n{summary}{_AI_DISCLAIMER}"
-    ok = await send_long_text(callback.message.answer, text)
+    with ui_text.untranslated():  # chapter_ai/quiz_ai already wrote this in the user's language
+        ok = await send_long_text(callback.message.answer, text)
     if not ok:
         await callback.message.answer("Couldn't send the summary (Telegram rejected the message).")
 
@@ -167,7 +169,8 @@ async def handle_chapter_quiz(callback: CallbackQuery):
         return
 
     text = f"❓ *Quiz -- {title}*\n\n{quiz}{_AI_DISCLAIMER}"
-    ok = await send_long_text(callback.message.answer, text)
+    with ui_text.untranslated():  # chapter_ai/quiz_ai already wrote this in the user's language
+        ok = await send_long_text(callback.message.answer, text)
     if not ok:
         await callback.message.answer("Couldn't send the quiz (Telegram rejected the message).")
 
@@ -212,7 +215,8 @@ async def handle_chapter_mnemonics(callback: CallbackQuery):
         return
 
     text = f"🧠 *Mnemonics -- {title}*\n\n{mnemonics}{_AI_DISCLAIMER}"
-    ok = await send_long_text(callback.message.answer, text)
+    with ui_text.untranslated():  # chapter_ai/quiz_ai already wrote this in the user's language
+        ok = await send_long_text(callback.message.answer, text)
     if not ok:
         await callback.message.answer("Couldn't send the mnemonics (Telegram rejected the message).")
 

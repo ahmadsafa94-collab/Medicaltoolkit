@@ -67,6 +67,10 @@ class TranslateOutgoingMiddleware:
         language = subscriptions.get_language(chat_id)
         if ui_text.is_english(language):
             return
+        # AI output and FDA label text are marked at their send site, since
+        # nothing about the text itself reliably identifies them.
+        if ui_text.should_skip():
+            return
         if len(text) > ui_text.MAX_TRANSLATABLE_CHARS:
             return
 

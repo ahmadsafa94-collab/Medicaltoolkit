@@ -31,6 +31,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
+import ui_text
 import interaction_ai
 from drug_lookup import lookup_drug, DrugNotFoundError, DrugLookupRateLimitedError
 from keyboards import interaction_menu_kb, interaction_confirm_kb
@@ -158,7 +159,8 @@ async def handle_ix_check(callback: CallbackQuery, state: FSMContext):
     except Exception:
         pass  # not critical if the "Asking Claude..." message can't be deleted (e.g. already gone)
 
-    ok = await send_long_text(callback.message.answer, text)
+    with ui_text.untranslated():  # interaction_ai already wrote this in the user's language
+        ok = await send_long_text(callback.message.answer, text)
     if not ok:
         await callback.message.answer("Couldn't send the results (Telegram rejected the message).")
 

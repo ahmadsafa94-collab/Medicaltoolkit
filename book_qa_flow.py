@@ -36,6 +36,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
+import ui_text
 import library
 import pdf_qa
 import session_cache
@@ -160,7 +161,8 @@ async def handle_book_question(message: Message, state: FSMContext):
     reply = result["answer"]
     if pages_cited:
         reply += f"\n\n📄 Source pages: {', '.join(str(p) for p in pages_cited)}"
-    ok = await send_long_text(message.answer, reply)
+    with ui_text.untranslated():  # pdf_qa.answer_question already answered in the user's language
+        ok = await send_long_text(message.answer, reply)
     if not ok:
         await message.answer("Couldn't send that answer (Telegram rejected the message).")
 
