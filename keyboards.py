@@ -340,11 +340,19 @@ def lab_input_mode_kb() -> InlineKeyboardMarkup:
 # Customer "My Plan" panel
 # ---------------------------------------------------------------------------
 
-def my_plan_kb(is_premium: bool, premium_stars: int, yearly_stars: int) -> InlineKeyboardMarkup:
+def my_plan_kb(is_premium: bool, plans: list[dict]) -> InlineKeyboardMarkup:
+    """`plans` is config.PREMIUM_PLANS -- one upgrade button per plan, in that order."""
     rows = []
     if not is_premium:
-        rows.append([InlineKeyboardButton(text=f"⭐ Upgrade -- {premium_stars} Stars/month", callback_data="plan:buy:month")])
-        rows.append([InlineKeyboardButton(text=f"⭐ Upgrade -- {yearly_stars} Stars/year", callback_data="plan:buy:year")])
+        for plan in plans:
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text=f"⭐ {plan['label']} -- {plan['stars']} Stars",
+                        callback_data=f"plan:buy:{plan['payload']}",
+                    )
+                ]
+            )
         rows.append([InlineKeyboardButton(text="💳 Pay another way", callback_data="plan:contact_admin")])
     rows.append([InlineKeyboardButton(text="🤝 Affiliate Program", callback_data="plan:referral")])
     rows.append([InlineKeyboardButton(text="🧾 Payment history", callback_data="plan:history")])

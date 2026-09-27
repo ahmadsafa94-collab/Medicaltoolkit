@@ -28,10 +28,7 @@ import library
 import subscriptions
 from config import (
     ADMIN_USER_IDS,
-    PREMIUM_MONTHLY_STARS,
-    PREMIUM_YEARLY_STARS,
-    PREMIUM_MONTH_DAYS,
-    PREMIUM_YEAR_DAYS,
+    PREMIUM_PLANS,
     REFERRAL_BONUS_DAYS,
 )
 from keyboards import my_plan_kb
@@ -40,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 router = Router(name="customer_flow")
 
-_PLAN_PAYLOAD_TO_DAYS = {"premium_month": PREMIUM_MONTH_DAYS, "premium_year": PREMIUM_YEAR_DAYS}
+_PLANS_BY_PAYLOAD = {plan["payload"]: plan for plan in PREMIUM_PLANS}
 
 
 class CustomerStates(StatesGroup):
@@ -102,20 +99,23 @@ async def _show_plan(answer_fn, user_id: int):
     await answer_fn(
         _plan_summary_text(user_id),
         parse_mode="Markdown",
-        reply_markup=my_plan_kb(premium, PREMIUM_MONTHLY_STARS, PREMIUM_YEARLY_STARS),
+        reply_markup=my_plan_kb(premium, PREMIUM_PLANS),
     )
 
 
-@router.callback_query(F.data == "plan:buy:month")
-async def handle_buy_month(callback: CallbackQuery):
+@router.callback_query(F.data.startswith("plan:buy:"))
+async def handle_buy_plan(callback: CallbackQuery):
     await callback.answer()
-    await _send_premium_invoice(callback.message, "premium_month", "Premium -- 1 month", PREMIUM_MONTHLY_STARS)
-
-
-@router.callback_query(F.data == "plan:buy:year")
-async def handle_buy_year(callback: CallbackQuery):
-    await callback.answer()
-    await _send_premium_invoice(callback.message, "premium_year", "Premium -- 1 year", PREMIUM_YEARLY_STARS)
+    payload = callback.data.split(":", 2)[2]
+    plan = _PLANS_BY_PAYLOAD.get(payload)
+    if plan is None:
+        # Only reachable from a stale keyboard in an old message, sent when
+        # a plan that has since been removed was still on offer.
+        await callback.message.answer("That plan isn't available anymore -- open ⭐ My Plan for the current options.")
+        return
+    await _send_premium_invoice(
+        callback.message, plan["payload"], f"Premium -- {plan['label']}", plan["stars"]
+    )
 
 
 async def _send_premium_invoice(message: Message, payload: str, title: str, stars: int):
@@ -125,7 +125,7 @@ async def _send_premium_invoice(message: Message, payload: str, title: str, star
         await tg_bot.send_invoice(
             chat_id=message.chat.id,
             title=f"Medical Student Toolkit -- {title}",
-            description="Unlimited AI summaries, quizzes, Ask-AI, and ECG/lab interpretation.",
+            description="Unlimited AI summaries, quizzes, Ask-AI, ECG/lab interpretation, and Book Shelf.",
             payload=payload,
             currency="XTR",
             prices=[LabeledPrice(label=title, amount=stars)],
@@ -151,7 +151,8 @@ async def handle_successful_payment(message: Message):
         return
 
     user_id = message.from_user.id
-    days = _PLAN_PAYLOAD_TO_DAYS.get(payment.invoice_payload)
+    plan = _PLANS_BY_PAYLOAD.get(payment.invoice_payload)
+    days = plan["days"] if plan else None
     if days is None:
         logger.warning("Unknown invoice payload on successful_payment: %s", payment.invoice_payload)
         await message.answer(

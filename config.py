@@ -180,14 +180,25 @@ FREE_SHELF_BOOKS = 2
 ECG_FREE_TRIALS = 1
 LAB_FREE_TRIALS = 1
 
-# Telegram Stars pricing (currency code "XTR" in sendInvoice). 1 Star was
-# roughly $0.016 to purchase as of Sept 2026 -- 300/2500 Stars land close to
-# a $4.99/mo, $39.99/yr price point after that conversion. See the delivered
-# roadmap doc for the full cost-vs-price reasoning.
-PREMIUM_MONTHLY_STARS = 300
-PREMIUM_YEARLY_STARS = 2500
-PREMIUM_MONTH_DAYS = 30
-PREMIUM_YEAR_DAYS = 365
+# Telegram Stars pricing (currency code "XTR" in sendInvoice), in the order
+# the plans are offered in ⭐ My Plan. 1 Star was roughly $0.016 to purchase
+# as of Sept 2026, so these land near $5.60 / $12 / $24 / $40.
+#
+# "payload" is what Telegram echoes back to us on successful_payment, and it
+# is the ONLY thing that tells us how many days to grant -- so once a plan
+# has been sold under a payload, that string must never change or be reused
+# for a different duration. The 1-month and 1-year payloads deliberately
+# keep their original "premium_month"/"premium_year" spelling from when
+# those were the only two plans: an invoice opened before a deploy can be
+# paid after it, and a renamed payload would land such a payment in
+# handle_successful_payment's "unrecognized" branch -- charging the user
+# and granting them nothing.
+PREMIUM_PLANS = [
+    {"payload": "premium_month", "label": "1 month", "days": 30, "stars": 350},
+    {"payload": "premium_3month", "label": "3 months", "days": 90, "stars": 750},
+    {"payload": "premium_6month", "label": "6 months", "days": 180, "stars": 1500},
+    {"payload": "premium_year", "label": "1 year", "days": 365, "stars": 2500},
+]
 
 # Same $0.016/Star rate as above (1 / 0.016 = 62.5), used by book_requests.py
 # to convert an admin's USD quote for a 📚 Requested Book into a Stars
