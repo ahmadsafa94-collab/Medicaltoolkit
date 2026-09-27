@@ -835,15 +835,23 @@ async function deleteReaderNote(noteId) {
   renderNotesPanel();
 }
 
-document.getElementById("reader-prev").addEventListener("click", () => {
-  if (readerState.pageNum > 1) { readerState.pageNum -= 1; renderReaderPage(); }
-});
-document.getElementById("reader-next").addEventListener("click", () => {
-  if (readerState.pdf && readerState.pageNum < readerState.pdf.numPages) {
-    readerState.pageNum += 1;
-    renderReaderPage();
-  }
-});
+// Shared by the ‹ › buttons and the swipe gesture below. Scroll is reset so
+// a new page always opens at its top-left: without that, flipping while
+// scrolled down lands you in the middle of the next page, and a zoomed page
+// would start already scrolled away from the edge the swipe logic tests.
+function flipPage(delta) {
+  if (!readerState.pdf) return false;
+  const target = readerState.pageNum + delta;
+  if (target < 1 || target > readerState.pdf.numPages) return false;
+  readerState.pageNum = target;
+  readerCanvasWrap.scrollTop = 0;
+  readerCanvasWrap.scrollLeft = 0;
+  renderReaderPage();
+  return true;
+}
+
+document.getElementById("reader-prev").addEventListener("click", () => flipPage(-1));
+document.getElementById("reader-next").addEventListener("click", () => flipPage(1));
 
 document.getElementById("reader-zoom-in").addEventListener("click", () => {
   readerState.zoomFactor = Math.min(ZOOM_MAX, +(readerState.zoomFactor + ZOOM_STEP).toFixed(2));
@@ -913,6 +921,65 @@ function endPinch() {
 }
 readerCanvasWrap.addEventListener("touchend", endPinch);
 readerCanvasWrap.addEventListener("touchcancel", endPinch);
+
+// ---------------------------------------------------------------------
+// Swipe to flip pages (one-finger horizontal drag)
+// ---------------------------------------------------------------------
+//
+// Edge-aware on purpose. #reader-canvas-wrap scrolls -- that's what makes a
+// zoomed-in page pannable (see style.css) -- so a horizontal drag is only
+// treated as a page flip when there is no more page left to pan toward in
+// that direction. Without that check, zooming in would make a page
+// impossible to pan sideways: every pan would jump to the next page.
+const SWIPE_MIN_PX = 60;      // shorter than this is a tap or jitter, not a flip
+const SWIPE_MAX_MS = 800;     // a slow drag is a pan or a text selection, not a flip
+const SWIPE_H_RATIO = 1.5;    // must be clearly horizontal, not a diagonal scroll
+const SCROLL_EDGE_SLACK = 2;  // px of rounding slack when testing "already at the edge"
+
+let swipeState = null;
+
+readerCanvasWrap.addEventListener(
+  "touchstart",
+  (e) => {
+    // Anything but a single finger (i.e. the start of a pinch) cancels the
+    // swipe outright, so lifting out of a pinch can't register as one.
+    if (e.touches.length !== 1) {
+      swipeState = null;
+      return;
+    }
+    swipeState = {
+      x: e.touches[0].clientX,
+      y: e.touches[0].clientY,
+      startedAt: Date.now(),
+      atLeftEdge: readerCanvasWrap.scrollLeft <= SCROLL_EDGE_SLACK,
+      atRightEdge:
+        readerCanvasWrap.scrollLeft + readerCanvasWrap.clientWidth >=
+        readerCanvasWrap.scrollWidth - SCROLL_EDGE_SLACK,
+    };
+  },
+  { passive: true }
+);
+
+readerCanvasWrap.addEventListener(
+  "touchend",
+  (e) => {
+    const start = swipeState;
+    swipeState = null;
+    // e.touches is what's STILL down: >0 means a finger remains (lifting out
+    // of a pinch one finger at a time), which is not the end of a swipe.
+    if (!start || e.touches.length > 0 || e.changedTouches.length !== 1) return;
+    if (Date.now() - start.startedAt > SWIPE_MAX_MS) return;
+
+    const dx = e.changedTouches[0].clientX - start.x;
+    const dy = e.changedTouches[0].clientY - start.y;
+    if (Math.abs(dx) < SWIPE_MIN_PX || Math.abs(dx) < Math.abs(dy) * SWIPE_H_RATIO) return;
+
+    // Swipe left = pull the next page in from the right, as in any reader.
+    if (dx < 0 && start.atRightEdge) flipPage(1);
+    else if (dx > 0 && start.atLeftEdge) flipPage(-1);
+  },
+  { passive: true }
+);
 
 document.getElementById("reader-goto").addEventListener("click", () => {
   if (!readerState.pdf) return;

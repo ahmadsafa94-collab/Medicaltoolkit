@@ -165,7 +165,13 @@ SUPPORT_ADMIN_USERNAME = os.environ.get("SUPPORT_ADMIN_USERNAME", "").lstrip("@"
 # glossary) stays free and uncapped since it doesn't call Claude at all.
 FREE_MONTHLY_SUMMARIES = 3
 FREE_MONTHLY_QUIZZES = 3
-FREE_MONTHLY_QUESTIONS = 20
+
+# Ask-AI questions are capped per DAY rather than per month (the other two
+# above are monthly): a question is the thing users reach for constantly
+# while studying, so a monthly bucket gets drained in one session and then
+# locks them out for weeks. A daily allowance refills every morning, which
+# is both more useful free and a steadier nudge toward Premium.
+FREE_DAILY_QUESTIONS = 10
 
 # How many books a FREE user may keep on their 📚 Book Shelf at once. Unlike
 # the monthly caps above this is a standing limit on stored books, not a

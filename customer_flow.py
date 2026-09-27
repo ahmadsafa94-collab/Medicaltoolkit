@@ -60,6 +60,11 @@ def _plan_summary_text(user_id: int) -> str:
         lines.append("Unlimited summaries, quizzes, Ask-AI, ECG/lab interpretation, and Book Shelf.")
     else:
         lines.append("")
+        lines.append("Usage today:")
+        for feature, limit in usage["daily_limits"].items():
+            used = usage["usage_today"].get(feature, 0)
+            lines.append(f"  {subscriptions.FEATURE_LABELS[feature]}: {used}/{limit}")
+        lines.append("")
         lines.append("Usage this month:")
         for feature, limit in usage["limits"].items():
             used = usage["usage"].get(feature, 0)
