@@ -57,6 +57,7 @@ from drug_lookup import (
     DrugLookupRateLimitedError,
 )
 from keyboards import (
+    ButtonText,
     main_menu_kb,
     drug_search_inline_kb,
     drug_sections_kb,
@@ -93,6 +94,7 @@ import glossary
 import library
 import name_resolver
 import notes_flow
+import ui_text
 import pdf_export
 import session_cache
 import subscriptions
@@ -219,11 +221,13 @@ async def cmd_start(message: Message):
         "I am an AI based Bot designed to help you study for your Medical exams or manage your "
         "patients clinically.\n\n"
         "Lets Go.",
-        reply_markup=main_menu_kb(WEBAPP_URL, is_admin=subscriptions.is_admin(user_id)),
+        reply_markup=main_menu_kb(
+            WEBAPP_URL, is_admin=subscriptions.is_admin(user_id), language=subscriptions.get_language(user_id)
+        ),
     )
 
 
-@dp.message(F.text == BTN_SHELF)
+@dp.message(ButtonText(BTN_SHELF))
 async def open_book_shelf(message: Message):
     """
     Sends a fresh message with an INLINE web_app button rather than opening
@@ -306,41 +310,49 @@ async def cmd_help(message: Message):
     )
 
 
-@dp.message(F.text == BTN_MY_PLAN)
+@dp.message(ButtonText(BTN_MY_PLAN))
 async def btn_my_plan(message: Message):
     await customer_flow._show_plan(message.answer, message.from_user.id)
 
 
-@dp.message(F.text == BTN_LANGUAGE)
+@dp.message(ButtonText(BTN_LANGUAGE))
 async def btn_language(message: Message):
     await customer_flow._prompt_language(message.answer)
 
 
-@dp.message(F.text == BTN_CLINICAL_TOOLS)
+@dp.message(ButtonText(BTN_CLINICAL_TOOLS))
 async def btn_clinical_tools(message: Message):
+    lang = subscriptions.get_language(message.from_user.id)
+    title = ui_text.t(lang, "🩺 Clinical Tools")
     await message.answer(
-        "🩺 *Clinical Tools*\n\nPick one:", parse_mode="Markdown", reply_markup=clinical_tools_kb()
+        f"*{title}*\n\n{ui_text.t(lang, 'Pick one:')}",
+        parse_mode="Markdown",
+        reply_markup=clinical_tools_kb(lang),
     )
 
 
-@dp.message(F.text == BTN_STUDY_TOOLS)
+@dp.message(ButtonText(BTN_STUDY_TOOLS))
 async def btn_study_tools(message: Message):
+    lang = subscriptions.get_language(message.from_user.id)
+    title = ui_text.t(lang, "🧠 Study Tools")
     await message.answer(
-        "🧠 *Study Tools*\n\nPick one:", parse_mode="Markdown", reply_markup=study_tools_kb()
+        f"*{title}*\n\n{ui_text.t(lang, 'Pick one:')}",
+        parse_mode="Markdown",
+        reply_markup=study_tools_kb(lang),
     )
 
 
-@dp.message(F.text == BTN_ADMIN)
+@dp.message(ButtonText(BTN_ADMIN))
 async def btn_admin(message: Message, state: FSMContext):
     await admin_flow.cmd_admin(message, state)
 
 
-@dp.message(F.text == BTN_FEEDBACK)
+@dp.message(ButtonText(BTN_FEEDBACK))
 async def btn_feedback(message: Message, state: FSMContext):
     await customer_flow._prompt_feedback(message.answer, state)
 
 
-@dp.message(F.text == BTN_SUPPORT)
+@dp.message(ButtonText(BTN_SUPPORT))
 async def btn_support(message: Message, state: FSMContext):
     """
     A real, direct Telegram chat with the admin -- not one relayed through

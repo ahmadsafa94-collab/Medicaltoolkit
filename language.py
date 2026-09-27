@@ -2,18 +2,21 @@
 Supported response languages for AI-generated content (chapter summaries,
 quizzes, Ask-AI answers, mnemonics, ECG/lab interpretation).
 
-This is deliberately the ONLY piece of multi-language support in this round:
-every AI generation call already threads a `language` parameter through to
-its system prompt (see chapter_ai.py, quiz_ai.py, pdf_qa.py, ecg_lab_ai.py)
-asking Claude to respond in the user's chosen language -- which covers the
-high-value content with no translation data to maintain. Fixed UI strings
-(button labels, static bot messages) are NOT translated in this round; they
-stay in English regardless of the user's chosen language. Hand-translating
-dozens of UI strings without a native speaker to check them risks shipping
-confidently-wrong medical terminology, which is a worse outcome than a
-consistent English UI around correctly-localized AI content. Expanding this
-later just means adding a UI_STRINGS dict and threading a lookup through
-each hardcoded string -- nothing here needs to change to support that.
+The chosen language reaches the user in three ways:
+
+  1. AI-generated content -- every generation call threads a `language`
+     parameter through to its system prompt (chapter_ai.py, quiz_ai.py,
+     pdf_qa.py, ecg_lab_ai.py, drug_qa.py).
+  2. Menu and button labels -- translated by Claude and cached per language;
+     see ui_text.py.
+  3. What the user TYPES -- a drug or glossary name written in their own
+     script is resolved back to the English the FDA/glossary data uses;
+     see name_resolver.py.
+
+Hand-translating medical UI without a native speaker to check it risks
+shipping confidently-wrong terminology, which is why (2) is done by Claude
+against the real term rather than by a hardcoded string table, and why
+every lookup in ui_text.py falls back to English rather than guessing.
 """
 
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton

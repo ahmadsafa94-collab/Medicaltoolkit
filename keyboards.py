@@ -3,13 +3,36 @@ Fixed (persistent) keyboard shown at the bottom of the chat, plus the
 inline-search trigger button used for drug-name autocomplete.
 """
 
+from aiogram.filters import Filter
 from aiogram.types import (
+    Message,
     ReplyKeyboardMarkup,
     KeyboardButton,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
     WebAppInfo,
 )
+
+import ui_text
+
+
+class ButtonText(Filter):
+    """
+    Matches a main-menu button in ANY language.
+
+    Replaces `F.text == BTN_X`, which breaks the moment labels are
+    translated: a reply-keyboard button IS its text, so a Persian user taps
+    "🧠 ابزار مطالعه" and an equality check against the English constant
+    never fires. ui_text.canonical() maps any known translation back to the
+    English original, and anything unrecognized passes through unchanged --
+    so ordinary typed text still reaches the handlers it always did.
+    """
+
+    def __init__(self, button: str):
+        self.button = button
+
+    async def __call__(self, message: Message) -> bool:
+        return bool(message.text) and ui_text.canonical(message.text) == self.button
 
 BTN_SHELF = "📚 BOOK SHELF"
 BTN_CLINICAL_TOOLS = "🩺 Clinical Tools"
@@ -21,7 +44,7 @@ BTN_FEEDBACK = "🐞 Report a problem / Give Feedback"
 BTN_SUPPORT = "🆘 Support"
 
 
-def main_menu_kb(webapp_url: str = "", is_admin: bool = False) -> ReplyKeyboardMarkup:
+def main_menu_kb(webapp_url: str = "", is_admin: bool = False, language: str | None = None) -> ReplyKeyboardMarkup:
     """
     Built as a function (not a module-level constant) so the Book Shelf row
     can be left out entirely when webapp_url isn't configured yet.
@@ -72,15 +95,18 @@ def main_menu_kb(webapp_url: str = "", is_admin: bool = False) -> ReplyKeyboardM
     via bot.set_chat_menu_button, also a web_app launch) is the other,
     redundant, confirmed-working entry point.
     """
+    def btn(label: str) -> KeyboardButton:
+        return KeyboardButton(text=ui_text.t(language, label))
+
     rows = []
     if webapp_url:
-        rows.append([KeyboardButton(text=BTN_SHELF)])
-    rows.append([KeyboardButton(text=BTN_CLINICAL_TOOLS), KeyboardButton(text=BTN_STUDY_TOOLS)])
-    rows.append([KeyboardButton(text=BTN_MY_PLAN), KeyboardButton(text=BTN_LANGUAGE)])
-    rows.append([KeyboardButton(text=BTN_SUPPORT)])
-    rows.append([KeyboardButton(text=BTN_FEEDBACK)])
+        rows.append([btn(BTN_SHELF)])
+    rows.append([btn(BTN_CLINICAL_TOOLS), btn(BTN_STUDY_TOOLS)])
+    rows.append([btn(BTN_MY_PLAN), btn(BTN_LANGUAGE)])
+    rows.append([btn(BTN_SUPPORT)])
+    rows.append([btn(BTN_FEEDBACK)])
     if is_admin:
-        rows.append([KeyboardButton(text=BTN_ADMIN)])
+        rows.append([btn(BTN_ADMIN)])
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True, is_persistent=True)
 
 
@@ -331,16 +357,20 @@ def drug_search_inline_kb(bot_username: str) -> InlineKeyboardMarkup:
 # Clinical Tools (ECG/lab interpretation, calculators, drug lookup/interactions)
 # ---------------------------------------------------------------------------
 
-def clinical_tools_kb() -> InlineKeyboardMarkup:
+def clinical_tools_kb(language: str | None = None) -> InlineKeyboardMarkup:
+    # Inline buttons are matched by callback_data, not by their caption, so
+    # translating these is safe with no filter changes -- unlike the reply
+    # keyboard above, where the caption IS the routing key (see ButtonText).
+    items = [
+        ("🫀 ECG Interpretation", "study:ecg"),
+        ("🧪 Lab Interpretation", "study:lab"),
+        ("🧮 Calculators", "clin:calc"),
+        ("💊 Ask About Drugs", "study:drugqa"),
+        ("🔀 Drug Interactions", "clin:interactions"),
+        ("💊 Drug Lookup", "clin:dose"),
+    ]
     return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="🫀 ECG Interpretation", callback_data="study:ecg")],
-            [InlineKeyboardButton(text="🧪 Lab Interpretation", callback_data="study:lab")],
-            [InlineKeyboardButton(text="🧮 Calculators", callback_data="clin:calc")],
-            [InlineKeyboardButton(text="💊 Ask About Drugs", callback_data="study:drugqa")],
-            [InlineKeyboardButton(text="🔀 Drug Interactions", callback_data="clin:interactions")],
-            [InlineKeyboardButton(text="💊 Drug Lookup", callback_data="clin:dose")],
-        ]
+        inline_keyboard=[[InlineKeyboardButton(text=ui_text.t(language, label), callback_data=cb)] for label, cb in items]
     )
 
 
@@ -348,15 +378,16 @@ def clinical_tools_kb() -> InlineKeyboardMarkup:
 # Study Tools (flashcards, PDF splitter, notes, Ask My Books, bookmarks)
 # ---------------------------------------------------------------------------
 
-def study_tools_kb() -> InlineKeyboardMarkup:
+def study_tools_kb(language: str | None = None) -> InlineKeyboardMarkup:
+    items = [
+        ("🗂 Flashcards", "study:flashcards"),
+        ("✂️ PDF Splitter", "study:pdfsplit"),
+        ("📓 My Notes", "study:notes"),
+        ("💬 Ask My Books", "study:askbooks"),
+        ("🔖 Bookmarks", "study:bookmarks"),
+    ]
     return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="🗂 Flashcards", callback_data="study:flashcards")],
-            [InlineKeyboardButton(text="✂️ PDF Splitter", callback_data="study:pdfsplit")],
-            [InlineKeyboardButton(text="📓 My Notes", callback_data="study:notes")],
-            [InlineKeyboardButton(text="💬 Ask My Books", callback_data="study:askbooks")],
-            [InlineKeyboardButton(text="🔖 Bookmarks", callback_data="study:bookmarks")],
-        ]
+        inline_keyboard=[[InlineKeyboardButton(text=ui_text.t(language, label), callback_data=cb)] for label, cb in items]
     )
 
 

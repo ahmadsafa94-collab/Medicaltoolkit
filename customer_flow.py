@@ -11,6 +11,7 @@ delivered roadmap doc for why Stars was chosen over Stripe/card checkout for
 this first version.
 """
 
+import asyncio
 import logging
 import time
 
@@ -26,12 +27,14 @@ import book_requests
 import language
 import library
 import subscriptions
+import ui_text
 from config import (
     ADMIN_USER_IDS,
+    WEBAPP_URL,
     PREMIUM_PLANS,
     REFERRAL_BONUS_DAYS,
 )
-from keyboards import my_plan_kb
+from keyboards import main_menu_kb, my_plan_kb
 
 logger = logging.getLogger(__name__)
 
@@ -509,7 +512,27 @@ async def handle_language_set(callback: CallbackQuery):
     lang = callback.data.split(":", 2)[2]
     subscriptions.set_language(callback.from_user.id, lang)
     await callback.answer(f"Language set to {lang}.")
-    await callback.message.answer(f"✅ AI-generated content will now be written in {lang}.")
+
+    # Translate the menu labels now, while the user is watching and a brief
+    # wait makes sense, rather than on their next tap. Cached per language,
+    # so only the first person to choose one ever waits; English is a no-op.
+    if not ui_text.is_english(lang):
+        status = await callback.message.answer("Translating the menu...")
+        await asyncio.to_thread(ui_text.ensure_language, lang)
+        try:
+            await status.delete()
+        except Exception:
+            pass  # cosmetic only -- never worth failing the language change over
+
+    # The persistent keyboard only changes when a message carries a new one,
+    # so it is re-sent here; otherwise the old language's buttons would sit
+    # at the bottom of the chat until something else happened to replace them.
+    await callback.message.answer(
+        f"✅ The bot will now use {lang}.",
+        reply_markup=main_menu_kb(
+            WEBAPP_URL, is_admin=subscriptions.is_admin(callback.from_user.id), language=lang
+        ),
+    )
 
 
 def register_customer_handlers(dp) -> None:
