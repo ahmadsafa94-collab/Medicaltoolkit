@@ -193,10 +193,15 @@ async def cmd_start(message: Message):
     -- see subscriptions.register_referral/maybe_credit_referral.
     """
     user_id = message.from_user.id
-    subscriptions.touch_user(user_id, message.from_user.username)
+    # Whether this is their first-ever contact is what decides if a referral
+    # link counts, and only the users index records it -- a user who has just
+    # tapped /start has no subscription record for register_referral to see.
+    # Taken from touch_user itself so the answer can't depend on the order
+    # these two calls happen to be written in.
+    is_new_user = subscriptions.touch_user(user_id, message.from_user.username)
 
     args = message.text.split(maxsplit=1)
-    if len(args) > 1:
+    if is_new_user and len(args) > 1:
         payload = args[1].strip()
         if payload.startswith("ref_"):
             try:

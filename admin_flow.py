@@ -88,6 +88,13 @@ async def cmd_admin(message: Message, state: FSMContext):
     await message.answer("🛠 *Admin Panel*", parse_mode="Markdown", reply_markup=admin_menu_kb())
 
 
+def _pct(part: int, whole: int) -> str:
+    """Whole-number percentage for the stats view; "--" rather than 0% when there's nothing to divide by yet."""
+    if not whole:
+        return "--"
+    return f"{round(100 * part / whole)}%"
+
+
 @router.callback_query(F.data == "admin:stats")
 async def handle_stats(callback: CallbackQuery):
     if not await _require_admin_callback(callback):
@@ -95,15 +102,25 @@ async def handle_stats(callback: CallbackQuery):
     await callback.answer()
     stats = subscriptions.get_bot_stats()
     revenue = subscriptions.get_revenue_stats()
+    total = stats["total_users"]
+    referred = stats["referred_signups"]
+    direct = stats["direct_signups"]
+    converted = stats["referral_conversions"]
+
     text = (
         "📊 *Bot-wide stats*\n\n"
-        f"Total users: {stats['total_users']}\n"
+        f"Total users: {total}\n"
         f"Premium users: {stats['premium_users']}\n"
         f"Active (7d): {stats['active_7d']}\n"
         f"Active (30d): {stats['active_30d']}\n\n"
-        f"This month ({revenue['period']}): {revenue['stars_total']} Stars across {revenue['payments_count']} payment(s)\n\n"
-        f"🤝 Affiliate program: {stats['referred_signups']} signup(s) via a referral link, "
-        f"{stats['referral_conversions']} converted to a paid Premium purchase"
+        "How users joined:\n"
+        f"  🔗 Bot link direct: {direct} ({_pct(direct, total)})\n"
+        f"  🤝 Referral link: {referred} ({_pct(referred, total)})\n"
+        # Converted is measured against REFERRED signups, not all users --
+        # it answers "is the affiliate program bringing paying users?",
+        # which a share of the whole user base wouldn't.
+        f"     of whom {converted} bought Premium ({_pct(converted, referred)} of referred)\n\n"
+        f"This month ({revenue['period']}): {revenue['stars_total']} Stars across {revenue['payments_count']} payment(s)"
     )
     await callback.message.answer(text, parse_mode="Markdown")
 

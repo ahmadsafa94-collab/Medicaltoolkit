@@ -228,25 +228,33 @@ def _save_index(idx: dict) -> None:
     os.replace(tmp_path, _INDEX_PATH)
 
 
-def _touch_index(user_id: int, username: str | None = None) -> None:
+def _touch_index(user_id: int, username: str | None = None) -> bool:
+    """Returns True if this is the first time the bot has ever seen this user."""
     idx = _load_index()
     key = str(user_id)
-    entry = idx.get(key) or {"first_seen": time.time(), "username": None}
+    existing = idx.get(key)
+    entry = existing or {"first_seen": time.time(), "username": None}
     if username:
         entry["username"] = username
     entry["last_seen"] = time.time()
     idx[key] = entry
     _save_index(idx)
+    return existing is None
 
 
-def touch_user(user_id: int, username: str | None = None) -> None:
+def touch_user(user_id: int, username: str | None = None) -> bool:
     """
     Record that this user is known to the bot, and (when given) their
     current @username -- call this from entry points where a username is
     actually available (e.g. /start), since _save() above already keeps
     last_seen fresh on every subscription write regardless of username.
+
+    Returns True if this was the user's FIRST ever contact with the bot.
+    /start uses that to decide whether a referral deep link counts: the
+    index is the only record written for a user who has merely started the
+    bot, so it's the one dependable "have we seen you before?" signal.
     """
-    _touch_index(user_id, username)
+    return _touch_index(user_id, username)
 
 
 def all_user_ids() -> list[int]:
@@ -437,10 +445,19 @@ def get_referral_link_payload(user_id: int) -> str:
 def register_referral(new_user_id: int, referrer_id: int) -> bool:
     """
     Called from /start when a brand-new user arrives via a ?start=ref_<id>
-    deep link. Only takes effect for a genuinely NEW user (no subscription
-    record yet) -- an existing user re-tapping a referral link doesn't
-    retroactively get a referrer, and self-referral is rejected. Returns
-    True if the referral was recorded.
+    deep link. Only takes effect for a genuinely NEW user -- an existing
+    user re-tapping a referral link doesn't retroactively get a referrer,
+    and self-referral is rejected. Returns True if the referral was
+    recorded.
+
+    The subscription-file check below is NOT sufficient on its own to prove
+    a user is new: someone who has only ever tapped /start has no
+    subscription file at all (touch_user writes the users index, and it's
+    _save that creates the file), so this check alone would let such a user
+    be retroactively claimed by whoever's referral link they next tapped --
+    miscrediting the referrer and skewing the admin's signup-source split.
+    Callers must therefore gate on touch_user()'s "first ever contact"
+    return value; this stays as a second line of defense.
     """
     if referrer_id == new_user_id:
         return False
@@ -564,7 +581,13 @@ def get_bot_stats() -> dict:
         "premium_users": premium_count,
         "active_7d": active_7d,
         "active_30d": active_30d,
+        # How each user arrived. There are exactly two routes into the bot:
+        # a "?start=ref_<id>" referral deep link (register_referral stamps
+        # referred_by), or anything else -- the plain t.me/<bot> link, a
+        # search, a forward. So "direct" is the remainder by definition, not
+        # a separately-tracked signal, and the two always sum to total_users.
         "referred_signups": referred_signups,
+        "direct_signups": len(ids) - referred_signups,
         "referral_conversions": referral_conversions,
     }
 
