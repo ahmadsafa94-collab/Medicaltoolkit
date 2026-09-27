@@ -1460,6 +1460,13 @@ async def main():
             )
         except TelegramAPIError:
             logger.exception("Failed to set the chat menu button to the Book Shelf web app.")
+    # Top up the translation cache for every language already in use, in
+    # the background. A deploy that adds or reworks a message would
+    # otherwise leave it untranslated until some user happened to be the
+    # first to trigger it and waited for it. Languages with nothing
+    # missing cost nothing, so this is usually a no-op.
+    asyncio.create_task(asyncio.to_thread(ui_text.warm_known_languages))
+
     server_config = uvicorn.Config(webapp_app, host="0.0.0.0", port=PORT, log_level="info")
     server = uvicorn.Server(server_config)
     await asyncio.gather(

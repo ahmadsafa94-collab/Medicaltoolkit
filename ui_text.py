@@ -34,6 +34,7 @@ import re
 import threading
 
 import cost_ledger
+import ui_strings
 from config import STORAGE_DIR, TRANSLATION_MODEL
 from pdf_processor import client  # reuse the one Anthropic client instance
 
@@ -438,6 +439,63 @@ def ensure_language(language: str) -> bool:
     _save(language, merged)
     _warm_common_messages(language)
     return True
+
+
+WARM_BATCH_SIZE = 40  # strings per translation call when pre-warming
+
+
+def warm_all_messages(language: str) -> int:
+    """
+    Translate every fixed message and button caption in the bot that this
+    language doesn't have yet, and cache them. Returns how many were added.
+
+    This is what makes static text feel instant rather than "slow the
+    first time each one appears". Translating only on demand meant a user
+    exploring the bot kept being the first to reach some string and kept
+    waiting for it; doing the whole set up front means the cache is
+    already complete by the time they get there.
+
+    Blocking and batched -- call it from a thread, off the event loop.
+    Batches are committed as they complete, so an interruption or a
+    failure part-way keeps everything already translated instead of
+    discarding the lot.
+    """
+    if is_english(language):
+        return 0
+
+    cached = _load_messages(language)
+    wanted = list(dict.fromkeys(list(UI_STRINGS) + list(COMMON_MESSAGES) + ui_strings.extract_static_messages()))
+    missing = [s for s in wanted if s not in cached]
+    if not missing:
+        return 0
+
+    added = 0
+    for i in range(0, len(missing), WARM_BATCH_SIZE):
+        batch = missing[i : i + WARM_BATCH_SIZE]
+        try:
+            translated = _translate(language, batch)
+        except Exception:
+            logger.exception("Pre-warm batch failed for %s -- those strings translate on demand instead", language)
+            continue
+        for english, value in translated.items():
+            _remember_message(language, english, value)
+            added += 1
+    logger.info("Pre-translated %d/%d fixed strings into %s", added, len(missing), language)
+    return added
+
+
+def warm_known_languages() -> None:
+    """
+    Top up every language already cached on disk. Run at startup, off the
+    main thread: a deploy that adds new messages would otherwise leave
+    them untranslated until a user happened to trigger each one. Languages
+    with nothing missing cost nothing.
+    """
+    for lang in _known_languages():
+        try:
+            warm_all_messages(lang)
+        except Exception:
+            logger.exception("Startup pre-warm failed for %s (non-fatal)", lang)
 
 
 def _warm_common_messages(language: str) -> None:

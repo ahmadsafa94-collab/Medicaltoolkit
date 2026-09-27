@@ -518,11 +518,20 @@ async def handle_language_set(callback: CallbackQuery):
     # so only the first person to choose one ever waits; English is a no-op.
     if not ui_text.is_english(lang):
         status = await callback.message.answer("Changing the Language")
+        # The menu labels are translated now, so the keyboard below is
+        # already in the new language when it arrives.
         await asyncio.to_thread(ui_text.ensure_language, lang)
         try:
             await status.delete()
         except Exception:
             pass  # cosmetic only -- never worth failing the language change over
+
+        # Everything else -- every fixed message and button caption in the
+        # bot -- is translated in the background. Not awaited: it's a few
+        # hundred strings and the user should not sit through it. Anything
+        # they reach before its batch lands still translates on demand, so
+        # the only difference is how long the bot feels slow for.
+        asyncio.create_task(asyncio.to_thread(ui_text.warm_all_messages, lang))
 
     # The persistent keyboard only changes when a message carries a new one,
     # so it is re-sent here; otherwise the old language's buttons would sit
