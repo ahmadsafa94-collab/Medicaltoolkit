@@ -60,6 +60,44 @@ _DISCLAIMER = (
     "patient, use it only alongside -- never instead of -- clinical judgment and a qualified reviewer."
 )
 
+# How to get the rate right. Reported wrong by a user, and the cause was
+# that the draft prompt asked for "Rate: <value or estimate>" and left the
+# method entirely to the model -- which means eyeballing a millimetre grid,
+# something vision models are unreliable at without being told exactly what
+# to do. Two things fix it: nearly every real 12-lead PRINTS the
+# machine-computed rate in its header, which is derived from the digital
+# signal and is far more trustworthy than any measurement off a photo; and
+# when it isn't printed, an explicit counting method beats an impression.
+# The sanity check is there because the classic failure is being out by a
+# factor of two or more (counting every other R wave, or misreading the
+# paper speed), which a glance at the R-R spacing catches.
+_RATE_METHOD_INSTRUCTION = (
+    "DETERMINING THE RATE -- work through this in order, it is the value most often gotten wrong:\n"
+    "1. Most 12-lead ECGs print the machine-measured rate in the header (often labelled 'Rate', 'HR', "
+    "'Vent. rate' or 'bpm'). If a printed rate is visible ANYWHERE on the image, read it and use it -- it "
+    "is computed from the digital signal and is more reliable than measuring off a photograph.\n"
+    "2. If no rate is printed, measure it. At the standard 25 mm/s paper speed, one large (5 mm) box is "
+    "0.20 s: rate = 300 / (number of large boxes between two consecutive R waves), or equivalently "
+    "1500 / (number of small 1 mm boxes). Use several consecutive R-R intervals, not one.\n"
+    "3. If the rhythm is irregular, counting boxes between one pair of beats is wrong -- instead count "
+    "the QRS complexes across the full 10-second recording and multiply by 6, and report it as an "
+    "average.\n"
+    "4. Check the number you land on against the tracing before writing it: R waves roughly 5 large "
+    "boxes apart is about 60/min, 3 apart about 100/min, 1.5 apart about 200/min. If your figure "
+    "disagrees with that spacing, you have likely misread the paper speed or skipped beats -- redo it. "
+    "State the rate as a single number (or a narrow range if genuinely variable), never a guess.\n"
+    "5. If the paper speed is printed and is NOT 25 mm/s (e.g. 50 mm/s), scale accordingly and say so."
+)
+
+# Retrieved alongside the tracing's own findings so the books' rate/interval
+# METHOD is in front of the verify pass, not just passages about whatever
+# pattern this tracing shows -- see ecg_reference.build_reference on why
+# this is a separate query rather than appended to the draft text.
+_RATE_METHOD_QUERY = (
+    "determining heart rate from an ECG, calculating rate, 300 rule, 1500 rule, large squares between "
+    "R waves, paper speed 25 mm/s, 10 second rule for irregular rhythms, measuring PR QRS QT intervals"
+)
+
 # Shared across both ECG and lab-image verify prompts: the specific
 # instruction that reins in over-cautious "image unclear" hedging.
 _IMAGE_CLARITY_REVIEW_INSTRUCTION = (
@@ -116,7 +154,7 @@ def interpret_ecg(image_bytes: bytes, media_type: str, language: str = "English"
         "You are helping a medical student practice ECG interpretation as a STUDY EXERCISE, not a clinical "
         "read for patient care. Look at the ECG image and describe what it shows using ALWAYS this exact "
         "structure, one line per item:\n"
-        "Rate: <value or estimate, beats/min>\n"
+        "Rate: <value in beats/min>\n"
         "Rhythm: <regular/irregular; P-wave presence and morphology>\n"
         "Axis: <normal / left deviation / right deviation, estimated>\n"
         "Intervals: <PR, QRS, QT -- and QTc if a rate is determinable>\n"
@@ -127,6 +165,7 @@ def interpret_ecg(image_bytes: bytes, media_type: str, language: str = "English"
         "intervals' or 'ST elevation pattern in the anterior leads, commonly associated with anterior wall "
         "ischemia/infarction as a category' -- NEVER state or imply this specific image IS a diagnosis like "
         "'this is a STEMI' or 'this patient has X'.>\n\n"
+        f"{_RATE_METHOD_INSTRUCTION}\n\n"
         "Only say the image is too low-quality, cropped, or unclear to read reliably if you genuinely cannot "
         "make out the waveform at all -- a phone photo at an angle, mild glare, or an ordinary background is "
         "still readable and does NOT warrant that caveat. If it's truly unreadable, say plainly which parts "
@@ -147,12 +186,20 @@ def interpret_ecg(image_bytes: bytes, media_type: str, language: str = "English"
     # tracing precisely enough to pull the passages that actually teach this
     # pattern. Empty when no reference books are loaded, in which case the
     # verify prompt below is exactly what it was before -- see ecg_reference.py.
-    reference_block, reference_hits = ecg_reference.build_reference(draft)
+    reference_block, reference_hits = ecg_reference.build_reference([draft, _RATE_METHOD_QUERY])
 
     instructions = [
         "Re-examine the image yourself and check the draft's Rate/Rhythm/Axis/Intervals/Notable morphology/"
         "Overall impression against what the image actually shows. Correct anything wrong; keep anything "
         "already correct.",
+        # Called out separately from the general re-check above because the
+        # rate is the line users report as wrong, and a verify pass reads
+        # much more like a rubber stamp when it is only told to "check".
+        "Derive the RATE yourself from the image before looking at what the draft said, then compare. "
+        f"Work through this, in this order:\n{_RATE_METHOD_INSTRUCTION}\n"
+        "If your value and the draft's disagree, do not split the difference or defer to the draft -- "
+        "a printed rate on the tracing wins outright; otherwise trust the one that matches the R-R "
+        "spacing on the image.",
     ]
     if reference_block:
         instructions.append(
@@ -161,8 +208,11 @@ def interpret_ecg(image_bytes: bytes, media_type: str, language: str = "English"
             "criterion (a measurement cutoff, the defining features of a named pattern, a lead-by-lead "
             "rule), apply it exactly as written in preference to your own recollection, and prefer the "
             "book's own terminology and level of detail so the read sounds like the textbook a student is "
-            "learning from. If the references don't cover part of the draft, fall back to standard ECG "
-            "knowledge rather than forcing an irrelevant reference in. Do NOT add citations, page numbers "
+            "learning from. This applies to the RATE as much as to the pattern: if a reference gives a "
+            "method for determining or checking the rate, follow that method rather than your own. "
+            "Where the references don't cover something -- part of the pattern, or the rate method -- "
+            "fall back to standard ECG knowledge rather than forcing an irrelevant reference in. Do NOT "
+            "add citations, page numbers "
             "or book names inside the six lines themselves -- the student is shown the exact books and "
             "pages separately, under your output, so an inline citation would only duplicate that and "
             "break the structure."

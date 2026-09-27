@@ -207,10 +207,16 @@ def search_sync(query: str, top_k: int = ECG_REFERENCE_TOP_K) -> list[dict]:
     return hits[:top_k]
 
 
-def build_reference(query: str, top_k: int = ECG_REFERENCE_TOP_K) -> tuple[str, list[dict]]:
+def build_reference(queries: str | list[str], top_k: int = ECG_REFERENCE_TOP_K) -> tuple[str, list[dict]]:
     """
     Returns (prompt_block, hits_actually_included) -- both empty when
     there's nothing to add (no books uploaded, no index, retrieval failed).
+
+    Several queries can be passed, and each gets its own top_k slice before
+    they're merged. One combined query would let the stronger topic crowd
+    the other out entirely: the caller asks about this tracing's PATTERN and
+    about how to MEASURE a rate, and a pattern-heavy tracing would otherwise
+    return nothing at all on measurement -- the exact thing being checked.
 
     The second element is what gets shown to the reader as the sources the
     interpretation was checked against, so it is deliberately the passages
@@ -223,11 +229,21 @@ def build_reference(query: str, top_k: int = ECG_REFERENCE_TOP_K) -> tuple[str, 
     an index is missing -- grounding is an enhancement to the read, never a
     prerequisite for it.
     """
-    try:
-        hits = search_sync(query, top_k=top_k)
-    except Exception:
-        logger.exception("ECG reference retrieval failed (non-fatal, falling back to an unreferenced read)")
-        return "", []
+    if isinstance(queries, str):
+        queries = [queries]
+
+    hits: list[dict] = []
+    seen_text = set()
+    for query in queries:
+        try:
+            for hit in search_sync(query, top_k=top_k):
+                if hit["text"] in seen_text:
+                    continue
+                seen_text.add(hit["text"])
+                hits.append(hit)
+        except Exception:
+            logger.exception("ECG reference retrieval failed (non-fatal, falling back to an unreferenced read)")
+            return "", []
 
     blocks, used_hits, used = [], [], 0
     for hit in hits:
