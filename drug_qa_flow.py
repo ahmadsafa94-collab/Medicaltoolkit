@@ -29,6 +29,7 @@ import drug_qa
 import session_cache
 import subscriptions
 from drug_lookup import lookup_drug, DrugNotFoundError, DrugLookupRateLimitedError
+from keyboards import drug_qa_suggestion_kb
 from telegram_helpers import send_long_text
 
 logger = logging.getLogger(__name__)
@@ -38,6 +39,7 @@ router = Router(name="drug_qa_flow")
 _NOT_A_COMMAND = F.text & ~F.text.startswith("/")
 _LOOKUP_TIMEOUT_SECONDS = 25
 _ANSWER_TIMEOUT_SECONDS = 30
+_RESOLVE_TIMEOUT_SECONDS = 20  # the "what did they mean?" Claude call, on a lookup miss
 
 
 class DrugQAStates(StatesGroup):
@@ -74,18 +76,103 @@ async def handle_drug_name(message: Message, state: FSMContext):
     except DrugLookupRateLimitedError as e:
         await status.edit_text(str(e))
         return
-    except DrugNotFoundError as e:
-        await status.edit_text(str(e) + "\n\nTry another name, or /cancel to stop.")
+    except DrugNotFoundError:
+        # A direct miss is usually a typo or a brand name the FDA record
+        # doesn't carry -- ask Claude what was meant and offer it back,
+        # rather than telling the user their drug doesn't exist.
+        await _offer_name_suggestions(status, state, drug_name)
         return
     except Exception as e:
         logger.exception("Drug lookup failed (Ask AI about drugs flow)")
         await status.edit_text(f"Lookup failed: {e}\n\nTry another name, or /cancel to stop.")
         return
 
-    name = sections.get("_name", drug_name)
+    await _begin_questions(status.edit_text, state, sections, drug_name)
+
+
+async def _begin_questions(answer_fn, state: FSMContext, sections: dict, fallback_name: str):
+    """Shared by a direct hit and a confirmed suggestion -- both land in the same question loop."""
+    name = sections.get("_name", fallback_name)
     await state.set_state(DrugQAStates.awaiting_question)
     await state.update_data(drug_name=name, sections=sections, history=[])
-    await status.edit_text(f"Found {name}. Ask your question -- dose, side effects, interactions, anything the label covers (or /cancel to stop):")
+    await answer_fn(
+        f"Found {name}. Ask your question -- dose, side effects, interactions, anything the label "
+        "covers (or /cancel to stop):"
+    )
+
+
+async def _resolve_candidate(name: str) -> tuple[str, dict] | None:
+    """Look a suggested name up; None if it doesn't resolve after all."""
+    try:
+        sections = await asyncio.wait_for(lookup_drug(name), timeout=_LOOKUP_TIMEOUT_SECONDS)
+    except Exception:
+        return None
+    return sections.get("_name", name), sections
+
+
+async def _offer_name_suggestions(status: Message, state: FSMContext, raw_name: str):
+    await status.edit_text(f"No FDA label found for '{raw_name}'. Checking what you might have meant...")
+
+    try:
+        candidates = await asyncio.wait_for(
+            asyncio.to_thread(drug_qa.suggest_drug_names, raw_name), timeout=_RESOLVE_TIMEOUT_SECONDS
+        )
+    except Exception:
+        logger.exception("drug_qa.suggest_drug_names failed for '%s'", raw_name)
+        candidates = []
+
+    # Every candidate is verified against openFDA before being offered:
+    # Claude naming a real drug is no guarantee the database carries a label
+    # under that name, and a button that fails when tapped is worse than not
+    # offering it. Concurrently, so N candidates cost one round-trip of
+    # latency rather than N.
+    resolved = await asyncio.gather(*(_resolve_candidate(c) for c in candidates))
+    options = []
+    seen = set()
+    for item in resolved:
+        if item is None:
+            continue
+        display_name, sections = item
+        if display_name.lower() in seen:
+            continue  # two spellings that resolve to the same label
+        seen.add(display_name.lower())
+        options.append((session_cache.put(sections), display_name))
+
+    if not options:
+        await status.edit_text(
+            f"No FDA label found for '{raw_name}', and I couldn't work out what you meant.\n\n"
+            "Try the plain generic name (e.g. 'amoxicillin' rather than 'Amoxil 500mg'), or /cancel to stop."
+        )
+        return
+
+    # Plain text, no parse_mode: drug names come from openFDA and can carry
+    # characters Telegram's legacy Markdown treats as formatting, which
+    # would make it reject the edit outright and leave the user staring at
+    # the "Checking..." message with no buttons.
+    if len(options) == 1:
+        prompt = f"Did you mean {options[0][1]}?"
+    else:
+        prompt = f"I couldn't find '{raw_name}'. Did you mean one of these?"
+    await status.edit_text(prompt, reply_markup=drug_qa_suggestion_kb(options))
+
+
+@router.callback_query(F.data == "dqa:pick:none", DrugQAStates.awaiting_drug_name)
+async def handle_suggestion_rejected(callback: CallbackQuery):
+    await callback.answer()
+    await callback.message.answer(
+        "Okay -- type the name again, spelled differently, or try the generic name. /cancel to stop."
+    )
+
+
+@router.callback_query(F.data.startswith("dqa:pick:"), DrugQAStates.awaiting_drug_name)
+async def handle_suggestion_picked(callback: CallbackQuery, state: FSMContext):
+    cache_id = callback.data.split(":", 2)[2]
+    sections = session_cache.get(cache_id)
+    if sections is None:
+        await callback.answer("That suggestion expired. Type the drug name again.", show_alert=True)
+        return
+    await callback.answer()
+    await _begin_questions(callback.message.answer, state, sections, "this drug")
 
 
 @router.callback_query(F.data.startswith("dqa:ask:"))

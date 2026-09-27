@@ -218,6 +218,29 @@ def interaction_menu_kb(drug_count: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def drug_qa_suggestion_kb(options: list[tuple[str, str]]) -> InlineKeyboardMarkup:
+    """
+    "Did you mean...?" for 💊 Ask About Drugs, when a typed name didn't match
+    the FDA database and drug_qa.suggest_drug_names() found candidates that
+    DO resolve (see drug_qa_flow.py).
+
+    options: [(cache_id, display_name)] -- the cache_id references the label
+    already fetched while verifying that candidate, so confirming doesn't
+    cost a second openFDA round-trip.
+
+    One button per candidate rather than a yes/no, since the whole point is
+    to let the user pick when a mangled name is ambiguous between real
+    drugs. "None of these" is always offered so a wrong guess is never the
+    only way forward.
+    """
+    rows = [
+        [InlineKeyboardButton(text=f"💊 {name}", callback_data=f"dqa:pick:{cache_id}")]
+        for cache_id, name in options
+    ]
+    rows.append([InlineKeyboardButton(text="❌ None of these", callback_data="dqa:pick:none")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def interaction_confirm_kb() -> InlineKeyboardMarkup:
     """
     Shown when a typed drug name didn't match the FDA database directly but
