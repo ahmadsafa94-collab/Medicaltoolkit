@@ -45,8 +45,10 @@ import base64
 import logging
 
 import cost_ledger
+import ecg_qtc
 import ecg_reference
 import glossary
+import ui_text
 from config import CLAUDE_MODEL
 from pdf_processor import client  # reuse the one Anthropic client instance
 
@@ -92,14 +94,17 @@ _MEASUREMENT_METHOD_INSTRUCTION = (
     "in the lead where the onset and offset are clearest, then confirm in a second lead.\n"
     "- PR: start of P to start of QRS. Normal 120-200 ms (3-5 small boxes).\n"
     "- QRS: onset to offset of QRS. Normal under 120 ms (under 3 small boxes).\n"
-    "- QT and QTc: measure QT from the start of QRS to the end of T, in the lead where the T-wave end "
-    "is clearest (often II or V5). ALWAYS go on to correct it for rate with Bazett -- "
-    "QTc = QT / sqrt(RR in seconds), RR in seconds being 60 / rate -- and ALWAYS report BOTH the QT "
-    "and the QTc, labelled, plus what the QTc means: normal is up to about 440 ms in men and 460 ms "
-    "in women, borderline just above that, and over 500 ms is the threshold usually flagged as "
-    "clinically important. QTc is the single most commonly omitted value and the one a student most "
-    "needs, so it is never optional: if the rate or the T-wave end genuinely cannot be read, say so "
-    "explicitly on this line rather than leaving QTc out.\n\n"
+    "- QT: measure it from the start of QRS to the end of T, in the lead where the T-wave end is "
+    "clearest (often II or V5), and report it in ms on the Intervals line.\n"
+    "  Do NOT compute QTc yourself and do NOT write a QTc value you worked out -- square roots and "
+    "cube roots done in your head are exactly what goes wrong, and this app calculates QTc for you "
+    "from the two numbers you measured. Instead, end your whole reply with this marker on its own "
+    "final line, using your measured QT in milliseconds and your measured rate in beats per minute:\n"
+    "    <<QTDATA qt_ms=NNN rate_bpm=NNN>>\n"
+    "  Plain ASCII, exactly that format, digits only, whatever language the rest of your answer is "
+    "in. It is stripped out before the reader sees anything, and the QTc is inserted in its place. "
+    "If the T-wave end or the rate genuinely cannot be read, omit the marker entirely and say so on "
+    "the Intervals line -- never guess numbers just to fill it in.\n\n"
     "AXIS: use the quadrant method on the NET deflection (positive minus negative "
     "area) of leads I and aVF, judging the whole complex rather than the tallest spike:\n"
     "- I positive, aVF positive -> normal axis\n"
@@ -343,8 +348,10 @@ def interpret_ecg(image_bytes: bytes, media_type: str, language: str = "English"
         "reviewing or show your reasoning, just the corrected final text a student should read. Never "
         "reply with nothing: if the draft needed no changes at all, output it back unchanged rather "
         "than returning an empty message. ALL SIX LINES ARE REQUIRED: emit Notable morphology and "
-        "Overall impression even if the draft omitted them, and make sure the Intervals line carries "
-        "both QT and QTc with the QTc interpreted. If the draft stops part-way through, finish it.",
+        "Overall impression even if the draft omitted them. If the draft stops part-way through, "
+        "finish it. End your reply with the <<QTDATA ...>> marker carrying YOUR measured QT and "
+        "rate, exactly as specified above -- the app computes and inserts the QTc from it, so a "
+        "missing marker means the reader gets no QTc at all.",
         "Same safety rules as the draft: never state or imply a specific diagnosis for this image, only "
         f"describe the pattern. Respond in {language}.",
     ]
@@ -375,6 +382,20 @@ def interpret_ecg(image_bytes: bytes, media_type: str, language: str = "English"
     # time would just be noise on an otherwise unchanged read.
     sources = ecg_reference.format_sources(reference_hits)
     interpretation = _require_text(verified, draft, "ECG interpretation")
+
+    # QTc is computed here, from the QT and rate the model measured, rather
+    # than by the model -- see ecg_qtc. The marker is taken from the verify
+    # pass where present (its measurements are the final ones), falling
+    # back to the draft's, and is always stripped so it never reaches the
+    # reader whether or not it parsed.
+    measurements = ecg_qtc.parse_marker(verified) or ecg_qtc.parse_marker(draft)
+    interpretation = ecg_qtc.strip_marker(interpretation)
+    if measurements:
+        interpretation += "\n\n" + ecg_qtc.format_line(
+            *measurements, translate=lambda s: ui_text.translate_message(language, s) or s
+        )
+    else:
+        logger.warning("No usable QTDATA marker in the ECG read -- QTc omitted rather than guessed")
     if sources:
         interpretation += f"\n\n{sources}"
     return interpretation + _DISCLAIMER

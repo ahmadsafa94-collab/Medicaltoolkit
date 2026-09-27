@@ -34,6 +34,7 @@ import re
 import threading
 
 import cost_ledger
+import ecg_qtc
 import language
 import ui_strings
 from config import STORAGE_DIR, TRANSLATION_MODEL
@@ -100,7 +101,7 @@ COMMON_MESSAGES = [
     "Searching the book...",
     "Analyzing the ECG, then double-checking the read...",
     "Done.",
-]
+] + ecg_qtc.TRANSLATABLE_FRAGMENTS
 
 # language -> {english: translated}. Loaded lazily from disk, then kept in
 # memory: every keyboard render hits this, so re-reading JSON each time
