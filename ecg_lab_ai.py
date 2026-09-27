@@ -172,7 +172,40 @@ def _call_claude(feature: str, system_prompt: str, content, max_tokens: int = 12
     except Exception:
         logger.exception("Cost ledger logging failed (non-fatal)")
 
-    return "".join(block.text for block in response.content if block.type == "text").strip()
+    text = "".join(block.text for block in response.content if block.type == "text").strip()
+    if not text:
+        # A pass that comes back with no text at all used to vanish silently:
+        # interpret_ecg fell through to `verified or draft`, and when BOTH
+        # were empty the user got a header, the sources and the disclaimer
+        # wrapped around nothing. Log what the API actually returned so the
+        # cause is identifiable from the admin error log rather than having
+        # to guess; the caller turns a wholly-empty result into a real error.
+        logger.error(
+            "%s returned no text (stop_reason=%s, block types=%s, output_tokens=%s)",
+            feature,
+            getattr(response, "stop_reason", "?"),
+            [getattr(b, "type", "?") for b in response.content],
+            getattr(getattr(response, "usage", None), "output_tokens", "?"),
+        )
+    return text
+
+
+def _require_text(verified: str, draft: str, what: str) -> str:
+    """
+    The final interpretation, or a real error if both passes came back
+    empty. Without this the caller would happily send a heading, the
+    sources and the disclaimer wrapped around an empty interpretation --
+    which is what a user actually got: a card with nothing in it and no
+    indication anything had gone wrong. _call_claude has already logged
+    the API's stop_reason and block types by this point.
+    """
+    text = verified or draft
+    if not text.strip():
+        raise InterpretationError(
+            f"The AI returned an empty {what}. This is usually temporary -- please try again, "
+            "and if it keeps happening send a clearer photo of the tracing."
+        )
+    return text
 
 
 def interpret_ecg(image_bytes: bytes, media_type: str, language: str = "English") -> str:
@@ -198,11 +231,17 @@ def interpret_ecg(image_bytes: bytes, media_type: str, language: str = "English"
         "ischemia/infarction as a category' -- NEVER state or imply this specific image IS a diagnosis like "
         "'this is a STEMI' or 'this patient has X'.>\n\n"
         f"{_MEASUREMENT_METHOD_INSTRUCTION}\n\n"
+        "Do the measuring silently. Output ONLY the six lines above -- no working, no box counts, no "
+        "commentary before or after them. Never reply with nothing: if something genuinely cannot be "
+        "measured, still emit all six lines and say so on the line it belongs to.\n\n"
         "Only say the image is too low-quality, cropped, or unclear to read reliably if you genuinely cannot "
         "make out the waveform at all -- a phone photo at an angle, mild glare, or an ordinary background is "
         "still readable and does NOT warrant that caveat. If it's truly unreadable, say plainly which parts "
         f"are unreadable instead of guessing at values you can't see. Respond in {language}."
     )
+    # Roomier than the 1200 the other passes use: the measurement
+    # instructions ask for real work across six lines, and a read truncated
+    # mid-structure is worse than a slightly costlier one.
     draft = _call_claude(
         "ecg_interpretation",
         draft_system_prompt,
@@ -210,6 +249,7 @@ def interpret_ecg(image_bytes: bytes, media_type: str, language: str = "English"
             _image_block(image_bytes, media_type),
             {"type": "text", "text": "Interpret this ECG tracing for study purposes."},
         ],
+        max_tokens=2000,
     )
 
     # The draft's TEXT is the retrieval query for the admin's ECG textbooks:
@@ -255,7 +295,9 @@ def interpret_ecg(image_bytes: bytes, media_type: str, language: str = "English"
         _IMAGE_CLARITY_REVIEW_INSTRUCTION,
         "Output ONLY the corrected final interpretation, in the exact same six-line structure as the draft "
         "(Rate/Rhythm/Axis/Intervals/Notable morphology/Overall impression) -- do not mention that you are "
-        "reviewing or show your reasoning, just the corrected final text a student should read.",
+        "reviewing or show your reasoning, just the corrected final text a student should read. Never "
+        "reply with nothing: if the draft needed no changes at all, output it back unchanged rather "
+        "than returning an empty message.",
         "Same safety rules as the draft: never state or imply a specific diagnosis for this image, only "
         f"describe the pattern. Respond in {language}.",
     ]
@@ -284,7 +326,7 @@ def interpret_ecg(image_bytes: bytes, media_type: str, language: str = "English"
     # "no sources" line -- there is nothing to cite, and saying so every
     # time would just be noise on an otherwise unchanged read.
     sources = ecg_reference.format_sources(reference_hits)
-    interpretation = verified or draft
+    interpretation = _require_text(verified, draft, "ECG interpretation")
     if sources:
         interpretation += f"\n\n{sources}"
     return interpretation + _DISCLAIMER
@@ -350,7 +392,7 @@ def interpret_lab_text(values_text: str, language: str = "English") -> str:
     )
     verified = _call_claude("lab_interpretation_verify", verify_system_prompt, "Verify/correct the draft per your instructions.")
 
-    return (verified or draft) + _DISCLAIMER
+    return _require_text(verified, draft, "lab interpretation") + _DISCLAIMER
 
 
 def interpret_lab_image(image_bytes: bytes, media_type: str, language: str = "English") -> str:
@@ -393,4 +435,4 @@ def interpret_lab_image(image_bytes: bytes, media_type: str, language: str = "En
         ],
     )
 
-    return (verified or draft) + _DISCLAIMER
+    return _require_text(verified, draft, "lab interpretation") + _DISCLAIMER
