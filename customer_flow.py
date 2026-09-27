@@ -517,7 +517,7 @@ async def handle_language_set(callback: CallbackQuery):
     # wait makes sense, rather than on their next tap. Cached per language,
     # so only the first person to choose one ever waits; English is a no-op.
     if not ui_text.is_english(lang):
-        status = await callback.message.answer("Translating the menu...")
+        status = await callback.message.answer("Changing the Language")
         await asyncio.to_thread(ui_text.ensure_language, lang)
         try:
             await status.delete()

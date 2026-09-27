@@ -92,6 +92,7 @@ import flashcard_flow
 import flashcards
 import glossary
 import library
+import message_translation
 import name_resolver
 import notes_flow
 import ui_text
@@ -100,6 +101,11 @@ import session_cache
 import subscriptions
 import user_history
 from bot_instance import bot
+
+# Every outgoing message leaves in the user's chosen language -- one
+# interception point rather than a translate() call at hundreds of
+# send sites. See message_translation.py.
+message_translation.install(bot)
 from webapp_api import app as webapp_app
 
 logging.basicConfig(level=logging.INFO)

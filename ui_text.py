@@ -72,6 +72,32 @@ UI_STRINGS = [
     "Pick one:",
 ]
 
+# Fixed messages common enough to be worth translating up front, in the
+# same batch as the labels, rather than one Claude call each the first time
+# a user happens to hit them. Everything NOT listed here still gets
+# translated on demand (see translate_message) -- this list only decides
+# what is already warm the moment someone switches language. Only strings
+# with no interpolated values belong here; a message with a drug name or a
+# number in it would never match the cache key anyway.
+COMMON_MESSAGES = [
+    "Changing the Language",
+    "Cancelled.",
+    "Loading...",
+    "Please send your question as text.",
+    "That took too long. Please try again.",
+    "Something went wrong answering that. Please try again.",
+    "The FDA database took too long to respond. Please try again in a moment.",
+    "That doesn't look like a PDF. Please send a .pdf file.",
+    "This isn't available to you.",
+    "Okay -- try /dose again with a different spelling, or the generic name.",
+    "Okay -- type the name again, spelled differently, or try the generic name. /cancel to stop.",
+    "Please send an image (as a photo or an image file), or /cancel.",
+    "Searching the label...",
+    "Searching the book...",
+    "Analyzing the ECG, then double-checking the read...",
+    "Done.",
+]
+
 # language -> {english: translated}. Loaded lazily from disk, then kept in
 # memory: every keyboard render hits this, so re-reading JSON each time
 # would be pure waste.
@@ -81,11 +107,141 @@ _reverse: dict[str, str] = {}
 _lock = threading.Lock()
 
 
+def _safe_name(lang: str) -> str:
+    # Language names come from language.SUPPORTED_LANGUAGES, but these build
+    # filesystem paths, so they're sanitized rather than trusted.
+    return re.sub(r"[^\w-]", "_", lang)[:40] or "unknown"
+
+
 def _cache_path(lang: str) -> str:
-    # Language names come from language.SUPPORTED_LANGUAGES, but this builds
-    # a filesystem path, so it is sanitized rather than trusted.
-    safe = re.sub(r"[^\w-]", "_", lang)[:40] or "unknown"
-    return os.path.join(_CACHE_DIR, f"{safe}.json")
+    return os.path.join(_CACHE_DIR, f"{_safe_name(lang)}.json")
+
+
+# --- messages -------------------------------------------------------------
+#
+# Kept in a SEPARATE cache from the UI labels above. Labels are a fixed,
+# curated set translated in one batch and reverse-indexed for button
+# routing; messages are open-ended -- every error, prompt and status line
+# the bot ever sends -- and accumulate as they're encountered. Mixing them
+# would put unbounded content into the set that button matching scans.
+_MSG_CACHE_DIR = os.path.join(STORAGE_DIR, "_admin", "ui_messages")
+_MAX_CACHED_MESSAGES = 4000   # per language; a ceiling on unbounded growth
+MAX_TRANSLATABLE_CHARS = 700  # longer than this is AI-generated content, see translate_message
+
+_msg_cache: dict[str, dict[str, str]] = {}
+
+
+def _msg_cache_path(lang: str) -> str:
+    return os.path.join(_MSG_CACHE_DIR, f"{_safe_name(lang)}.json")
+
+
+def _load_messages(lang: str) -> dict[str, str]:
+    if lang in _msg_cache:
+        return _msg_cache[lang]
+    data = {}
+    path = _msg_cache_path(lang)
+    if os.path.exists(path):
+        try:
+            with open(path) as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                data = {k: v for k, v in loaded.items() if isinstance(k, str) and isinstance(v, str) and v.strip()}
+        except (json.JSONDecodeError, OSError):
+            logger.exception("Unreadable message cache for %s -- treating as empty", lang)
+    with _lock:
+        _msg_cache[lang] = data
+    return data
+
+
+def _remember_message(lang: str, english: str, translated: str) -> None:
+    data = _load_messages(lang)
+    if len(data) >= _MAX_CACHED_MESSAGES:
+        return  # keep serving from what's cached; just stop growing the file
+    with _lock:
+        data[english] = translated
+    os.makedirs(_MSG_CACHE_DIR, exist_ok=True)
+    path = _msg_cache_path(lang)
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(data, f, ensure_ascii=False)
+        os.replace(tmp, path)
+    except OSError:
+        logger.exception("Could not persist message cache for %s (kept in memory)", lang)
+
+
+def cached_message(language: str | None, text: str) -> str | None:
+    """
+    An already-cached translation, or None. Never calls Claude, so callers
+    on the event loop can take the common path without a thread hop --
+    see message_translation.py.
+    """
+    if is_english(language) or not text:
+        return None
+    return _load_messages(language).get(text)
+
+
+def translate_message(language: str | None, text: str) -> str | None:
+    """
+    Translate one outgoing bot message. Returns None to mean "send the
+    original unchanged" -- English, nothing worth translating, or a failure.
+
+    Cache-first: a given message costs one Claude call the first time any
+    user in that language sees it, and a dict lookup forever after. Most of
+    the bot's messages are fixed strings, so the hit rate climbs quickly.
+
+    Long text is deliberately skipped. Anything past MAX_TRANSLATABLE_CHARS
+    is AI-generated content (a summary, an ECG read, a Q&A answer) or
+    verbatim FDA label text -- the former is ALREADY written in the user's
+    language by the call that produced it, so re-translating would be a
+    slow, costly round-trip that could only make it worse.
+    """
+    if is_english(language) or not text or not text.strip():
+        return None
+    if len(text) > MAX_TRANSLATABLE_CHARS:
+        return None
+
+    cached = cached_message(language, text)
+    if cached:
+        return cached
+
+    try:
+        translated = _translate_one(language, text)
+    except Exception:
+        logger.exception("Message translation failed for %s -- sending English", language)
+        return None
+    if not translated or translated == text:
+        return None
+
+    _remember_message(language, text, translated)
+    return translated
+
+
+def _translate_one(language: str, text: str) -> str:
+    system_prompt = (
+        f"Translate this message from a medical study Telegram bot into {language}.\n\n"
+        "Rules:\n"
+        "- Reply with ONLY the translation. No quotes, no commentary, no explanation.\n"
+        "- Keep every emoji, line break and blank line exactly where they are.\n"
+        "- Keep Telegram Markdown markers (*bold*, _italic_, `code`) around the same words, and keep "
+        "the number of * and _ characters balanced exactly as in the original.\n"
+        "- Do NOT translate: bot commands starting with / (/dose, /cancel), drug names, medical "
+        "abbreviations that are normally left in English, numbers, units, file names, or anything "
+        "inside backticks. Copy those through unchanged.\n"
+        "- Use the wording a clinician or medical student in that language actually uses.\n"
+        "- Keep it about as short as the original; this is UI text, not prose."
+    )
+    response = client.messages.create(
+        model=CLAUDE_MODEL,
+        max_tokens=800,
+        system=system_prompt,
+        messages=[{"role": "user", "content": text}],
+    )
+    try:
+        cost_ledger.record_claude_response("message_translation", response)
+    except Exception:
+        logger.exception("Cost ledger logging failed (non-fatal)")
+    return "".join(b.text for b in response.content if b.type == "text").strip()
 
 
 def is_english(language: str | None) -> bool:
@@ -186,7 +342,28 @@ def ensure_language(language: str) -> bool:
         return bool(existing)
     merged = {**existing, **translated}
     _save(language, merged)
+    _warm_common_messages(language)
     return True
+
+
+def _warm_common_messages(language: str) -> None:
+    """
+    Translate the common fixed messages in one batch, so the first errors
+    and prompts a user sees after switching are instant instead of each
+    costing its own call. Best-effort: on-demand translation still covers
+    anything this misses.
+    """
+    cached = _load_messages(language)
+    missing = [m for m in dict.fromkeys(COMMON_MESSAGES) if m not in cached]
+    if not missing:
+        return
+    try:
+        translated = _translate(language, missing)
+    except Exception:
+        logger.exception("Could not pre-warm common messages for %s (they'll translate on demand)", language)
+        return
+    for english, value in translated.items():
+        _remember_message(language, english, value)
 
 
 def _translate(language: str, strings: list[str]) -> dict[str, str]:
