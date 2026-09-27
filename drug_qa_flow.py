@@ -26,10 +26,11 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
 import drug_qa
+import name_resolver
 import session_cache
 import subscriptions
 from drug_lookup import lookup_drug, DrugNotFoundError, DrugLookupRateLimitedError
-from keyboards import drug_qa_suggestion_kb
+from keyboards import drug_suggestion_kb
 from telegram_helpers import send_long_text
 
 logger = logging.getLogger(__name__)
@@ -115,10 +116,10 @@ async def _offer_name_suggestions(status: Message, state: FSMContext, raw_name: 
 
     try:
         candidates = await asyncio.wait_for(
-            asyncio.to_thread(drug_qa.suggest_drug_names, raw_name), timeout=_RESOLVE_TIMEOUT_SECONDS
+            asyncio.to_thread(name_resolver.resolve_drug_names, raw_name), timeout=_RESOLVE_TIMEOUT_SECONDS
         )
     except Exception:
-        logger.exception("drug_qa.suggest_drug_names failed for '%s'", raw_name)
+        logger.exception("name_resolver.resolve_drug_names failed for '%s'", raw_name)
         candidates = []
 
     # Every candidate is verified against openFDA before being offered:
@@ -153,7 +154,7 @@ async def _offer_name_suggestions(status: Message, state: FSMContext, raw_name: 
         prompt = f"Did you mean {options[0][1]}?"
     else:
         prompt = f"I couldn't find '{raw_name}'. Did you mean one of these?"
-    await status.edit_text(prompt, reply_markup=drug_qa_suggestion_kb(options))
+    await status.edit_text(prompt, reply_markup=drug_suggestion_kb(options, "dqa:pick"))
 
 
 @router.callback_query(F.data == "dqa:pick:none", DrugQAStates.awaiting_drug_name)

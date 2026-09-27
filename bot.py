@@ -60,6 +60,7 @@ from keyboards import (
     main_menu_kb,
     drug_search_inline_kb,
     drug_sections_kb,
+    drug_suggestion_kb,
     recent_list_kb,
     make_searchable_kb,
     study_tools_kb,
@@ -90,6 +91,7 @@ import flashcard_flow
 import flashcards
 import glossary
 import library
+import name_resolver
 import notes_flow
 import pdf_export
 import session_cache
@@ -459,14 +461,23 @@ async def _dose_lookup_and_show(answer_fn, drug_name: str, user_id: int | None) 
     except DrugLookupRateLimitedError as e:
         await status_msg.edit_text(str(e))
         return
-    except DrugNotFoundError as e:
-        await status_msg.edit_text(str(e))
+    except DrugNotFoundError:
+        # Not necessarily a wrong name: it may be misspelled, a brand the FDA
+        # record doesn't carry, or written in the user's own language (the
+        # openFDA index is English-only). Ask what was meant and offer it
+        # back rather than dead-ending. See name_resolver.py.
+        await _offer_drug_suggestions(status_msg, drug_name)
         return
     except Exception as e:
         logger.exception("Drug lookup failed")
         await status_msg.edit_text(f"Lookup failed: {e}")
         return
 
+    await _show_dose_menu(status_msg.edit_text, sections, drug_name, user_id)
+
+
+async def _show_dose_menu(edit_fn, sections: dict, drug_name: str, user_id: int | None) -> None:
+    """The section-picker menu for an already-fetched label -- shared by a direct hit and a confirmed suggestion."""
     sections_present = available_sections(sections)
     cache_id = session_cache.put(sections)
     name = sections.get("_name", drug_name)
@@ -481,13 +492,88 @@ async def _dose_lookup_and_show(answer_fn, drug_name: str, user_id: int | None) 
 
     menu_text = f"💊 *{name}* — found {len(sections_present)} section(s). Tap what you need:"
     try:
-        await status_msg.edit_text(
+        await edit_fn(
             menu_text, parse_mode="Markdown", reply_markup=drug_sections_kb(cache_id, sections_present)
         )
     except TelegramBadRequest:
-        await status_msg.edit_text(
+        await edit_fn(
             menu_text.replace("*", ""), reply_markup=drug_sections_kb(cache_id, sections_present)
         )
+
+
+async def _verify_drug_candidate(name: str):
+    """Look a suggested name up; None if it doesn't actually resolve."""
+    try:
+        sections = await asyncio.wait_for(lookup_drug(name), timeout=25)
+    except Exception:
+        return None
+    return sections.get("_name", name), sections
+
+
+async def _offer_drug_suggestions(status_msg, raw_name: str) -> None:
+    """
+    Ask what the user meant and offer the candidates that really resolve.
+
+    Every candidate is verified against openFDA before being shown -- Claude
+    naming a real drug is no guarantee a label exists under that name, and a
+    button that fails when tapped is worse than no button. Verified
+    concurrently, so N candidates cost one round-trip rather than N.
+    """
+    await status_msg.edit_text(f"No FDA label found for '{raw_name}'. Checking what you might have meant...")
+
+    try:
+        candidates = await asyncio.wait_for(
+            asyncio.to_thread(name_resolver.resolve_drug_names, raw_name), timeout=20
+        )
+    except Exception:
+        logger.exception("name_resolver.resolve_drug_names failed for '%s'", raw_name)
+        candidates = []
+
+    options = []
+    seen = set()
+    for item in await asyncio.gather(*(_verify_drug_candidate(c) for c in candidates)):
+        if item is None:
+            continue
+        display_name, sections = item
+        if display_name.lower() in seen:
+            continue
+        seen.add(display_name.lower())
+        options.append((session_cache.put(sections), display_name))
+
+    if not options:
+        await status_msg.edit_text(
+            f"No FDA label found for '{raw_name}', and I couldn't work out what you meant.\n\n"
+            "Try the plain generic name (e.g. 'amoxicillin' rather than 'Amoxil 500mg')."
+        )
+        return
+
+    # Plain text: names come from openFDA and can carry characters Telegram's
+    # legacy Markdown treats as formatting, which would make it reject the
+    # edit and leave the user on "Checking..." with no buttons at all.
+    prompt = (
+        f"Did you mean {options[0][1]}?"
+        if len(options) == 1
+        else f"I couldn't find '{raw_name}'. Did you mean one of these?"
+    )
+    await status_msg.edit_text(prompt, reply_markup=drug_suggestion_kb(options, "dose:pick"))
+
+
+@dp.callback_query(F.data == "dose:pick:none")
+async def handle_dose_suggestion_rejected(callback: CallbackQuery):
+    await callback.answer()
+    await callback.message.answer("Okay -- try /dose again with a different spelling, or the generic name.")
+
+
+@dp.callback_query(F.data.startswith("dose:pick:"))
+async def handle_dose_suggestion_picked(callback: CallbackQuery):
+    cache_id = callback.data.split(":", 2)[2]
+    sections = session_cache.get(cache_id)
+    if sections is None:
+        await callback.answer("That suggestion expired. Please run /dose again.", show_alert=True)
+        return
+    await callback.answer()
+    sent = await callback.message.answer("Loading...")
+    await _show_dose_menu(sent.edit_text, sections, sections.get("_name", "this drug"), callback.from_user.id)
 
 
 @dp.message(Command("dose"))
@@ -661,10 +747,31 @@ async def cmd_glossary(message: Message):
     try:
         t, c, d = glossary.lookup_term(term)
     except glossary.GlossaryNotFoundError as e:
+        # Prefix/substring matching first (free, instant). Only if that finds
+        # nothing does Claude get asked -- which is what makes a term typed
+        # in the user's own script resolve, since the glossary itself is
+        # English-only. It can only pick from the real term list, and the
+        # definition shown is still the curated one.
         matches = glossary.search_glossary(term, limit=8)
-        suggestion = f"\n\nDid you mean: {', '.join(matches)}?" if matches else ""
-        await message.answer(str(e) + suggestion)
-        return
+        if matches:
+            await message.answer(str(e) + f"\n\nDid you mean: {', '.join(matches)}?")
+            return
+        try:
+            resolved = await asyncio.wait_for(
+                asyncio.to_thread(name_resolver.resolve_glossary_term, term, glossary.all_terms()),
+                timeout=20,
+            )
+        except Exception:
+            logger.exception("name_resolver.resolve_glossary_term failed for '%s'", term)
+            resolved = None
+        if resolved is None:
+            await message.answer(str(e))
+            return
+        t, c, d = glossary.lookup_term(resolved)
+        await message.answer(
+            f"Showing *{t}* -- the closest glossary entry to \"{term}\".",
+            parse_mode="Markdown",
+        )
 
     await message.answer(glossary.format_entry(t, c, d), parse_mode="Markdown")
 
@@ -687,8 +794,11 @@ async def cmd_pregnancy(message: Message):
     except DrugLookupRateLimitedError as e:
         await status_msg.edit_text(str(e))
         return
-    except DrugNotFoundError as e:
-        await status_msg.edit_text(str(e))
+    except DrugNotFoundError:
+        # Same "what did you mean?" fallback as /dose. Its buttons land on
+        # the full section menu, where Pregnancy is one more tap -- better
+        # than dead-ending a name that was only mistyped or in another script.
+        await _offer_drug_suggestions(status_msg, drug_name)
         return
     except Exception as e:
         logger.exception("Drug lookup failed (pregnancy shortcut)")

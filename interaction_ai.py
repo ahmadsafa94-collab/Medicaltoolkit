@@ -5,13 +5,13 @@ Two jobs, both grounded in real FDA data (openFDA via drug_lookup.py) rather
 than Claude's own training knowledge of any specific drug:
 
   1. resolve_drug_name() -- when a typed name doesn't resolve directly via
-     drug_lookup.lookup_drug() (a typo, or a brand/trade name openFDA's
-     brand_name field doesn't carry for that exact product), ask Claude to
-     name the single real medication the user most likely meant, so the
-     flow can re-try the lookup and confirm with the user ("Did you mean
-     X?") instead of failing outright. Claude is only ever asked WHICH drug
-     was meant, never to describe or dose it -- the actual FDA label is
-     still fetched fresh from openFDA once a name is confirmed.
+     drug_lookup.lookup_drug() (a typo, a brand/trade name openFDA's
+     brand_name field doesn't carry, or a name written in the user's own
+     language), name_resolver names the real medication meant, so the flow
+     can re-try the lookup and confirm with the user ("Did you mean X?")
+     instead of failing outright. Claude is only ever asked WHICH drug was
+     meant, never to describe or dose it -- the actual FDA label is still
+     fetched fresh from openFDA once a name is confirmed.
 
   2. analyze_interactions() -- given each drug's own FDA-label Drug
      Interactions/Contraindications excerpts (the same drug_lookup.py data
@@ -26,6 +26,7 @@ than Claude's own training knowledge of any specific drug:
 import logging
 
 import cost_ledger
+import name_resolver
 from config import CLAUDE_MODEL
 from pdf_processor import client  # reuse the one Anthropic client instance
 
@@ -41,40 +42,19 @@ class InteractionAIError(Exception):
 def resolve_drug_name(raw_input: str) -> str | None:
     """
     Fallback ONLY -- call this after a direct drug_lookup.lookup_drug(raw_input)
-    has already raised DrugNotFoundError. Asks Claude what real medication
-    (generic or brand name, correctly spelled) the input most likely meant.
-    Returns a single name to re-try the lookup with, or None if Claude
-    doesn't recognize this as any real medication.
+    has already raised DrugNotFoundError. Returns the single most likely real
+    medication name to re-try the lookup with, or None.
+
+    Delegates to name_resolver, so a name typed in Persian/Arabic/Urdu
+    resolves here exactly as it does everywhere else a drug name is typed.
+    This flow adds drugs one at a time and confirms each with a yes/no, so
+    it takes only the top candidate rather than offering the whole list.
     """
-    system_prompt = (
-        "The user typed a medication name into a drug-interaction checker, but it didn't match "
-        "anything in the FDA drug label database (likely a typo, or a brand/trade name spelled "
-        "differently than the FDA record uses). Your ONLY job is to identify which real medication "
-        "they most likely meant -- correcting spelling, and resolving common brand names to a name "
-        "likely to be found in a drug label database -- and reply with ONLY that single drug name, "
-        "nothing else, no punctuation or explanation. If you cannot confidently identify a real "
-        "medication from the input, reply with exactly: NONE"
-    )
     try:
-        response = client.messages.create(
-            model=CLAUDE_MODEL,
-            max_tokens=30,
-            system=system_prompt,
-            messages=[{"role": "user", "content": raw_input.strip()}],
-        )
-    except Exception as e:
-        raise InteractionAIError(f"Claude request failed: {e}")
-
-    try:
-        cost_ledger.record_claude_response("interaction_name_resolve", response)
-    except Exception:
-        logger.exception("Cost ledger logging failed (non-fatal)")
-
-    text = "".join(block.text for block in response.content if block.type == "text").strip()
-    text = text.strip(" \"'.\n")
-    if not text or text.upper() == "NONE":
-        return None
-    return text
+        names = name_resolver.resolve_drug_names(raw_input, limit=1)
+    except name_resolver.NameResolverError as e:
+        raise InteractionAIError(str(e))
+    return names[0] if names else None
 
 
 def _label_context(name: str, sections: dict) -> str:

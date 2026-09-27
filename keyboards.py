@@ -218,26 +218,30 @@ def interaction_menu_kb(drug_count: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def drug_qa_suggestion_kb(options: list[tuple[str, str]]) -> InlineKeyboardMarkup:
+def drug_suggestion_kb(options: list[tuple[str, str]], prefix: str) -> InlineKeyboardMarkup:
     """
-    "Did you mean...?" for 💊 Ask About Drugs, when a typed name didn't match
-    the FDA database and drug_qa.suggest_drug_names() found candidates that
-    DO resolve (see drug_qa_flow.py).
+    "Did you mean...?" for any flow where a typed drug name didn't match the
+    FDA database and name_resolver.resolve_drug_names() found candidates that
+    DO resolve -- a misspelling, a brand name, or a name written in the
+    user's own language.
 
     options: [(cache_id, display_name)] -- the cache_id references the label
     already fetched while verifying that candidate, so confirming doesn't
     cost a second openFDA round-trip.
+    prefix: callback namespace of the calling flow ("dqa:pick" for 💊 Ask
+    About Drugs, "dose:pick" for /dose), so the same keyboard lands the user
+    back in whichever flow they were in.
 
     One button per candidate rather than a yes/no, since the whole point is
-    to let the user pick when a mangled name is ambiguous between real
-    drugs. "None of these" is always offered so a wrong guess is never the
-    only way forward.
+    to let the user pick when a mangled or transliterated name is ambiguous
+    between real drugs. "None of these" is always offered so an AI guess is
+    never the only way forward.
     """
     rows = [
-        [InlineKeyboardButton(text=f"💊 {name}", callback_data=f"dqa:pick:{cache_id}")]
+        [InlineKeyboardButton(text=f"💊 {name}", callback_data=f"{prefix}:{cache_id}")]
         for cache_id, name in options
     ]
-    rows.append([InlineKeyboardButton(text="❌ None of these", callback_data="dqa:pick:none")])
+    rows.append([InlineKeyboardButton(text="❌ None of these", callback_data=f"{prefix}:none")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
