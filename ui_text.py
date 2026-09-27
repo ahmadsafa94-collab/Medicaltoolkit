@@ -266,16 +266,15 @@ def translate_message(language: str | None, text: str) -> str | None:
     if cached:
         return cached
 
-    try:
-        translated = _translate_one(language, text)
-    except Exception:
-        logger.exception("Message translation failed for %s -- sending English", language)
-        return None
-    if not translated or translated == text:
-        return None
-
-    _remember_message(language, text, translated)
-    return translated
+    # Deliberately the same JSON batch path a keyboard uses, even for one
+    # string. The old single-string path sent the text as a plain chat
+    # message, and a short input read as an instruction rather than as
+    # content: asked to translate the single word "normal", the model
+    # replied "I'm ready to translate... please share the message", and
+    # that got cached as the translation and shipped inside an ECG read.
+    # A JSON object keyed by the exact source string cannot be answered
+    # conversationally -- a reply like that fails to parse and is dropped.
+    return translate_batch(language, [text]).get(text)
 
 
 def translate_batch(language: str | None, texts: list[str]) -> dict[str, str]:
@@ -312,33 +311,6 @@ def translate_batch(language: str | None, texts: list[str]) -> dict[str, str]:
             _remember_message(language, english, value)
             out[english] = value
     return out
-
-
-def _translate_one(language: str, text: str) -> str:
-    system_prompt = (
-        f"Translate this message from a medical study Telegram bot into {language}.\n\n"
-        "Rules:\n"
-        "- Reply with ONLY the translation. No quotes, no commentary, no explanation.\n"
-        "- Keep every emoji, line break and blank line exactly where they are.\n"
-        "- Keep Telegram Markdown markers (*bold*, _italic_, `code`) around the same words, and keep "
-        "the number of * and _ characters balanced exactly as in the original.\n"
-        "- Do NOT translate: bot commands starting with / (/dose, /cancel), drug names, medical "
-        "abbreviations that are normally left in English, numbers, units, file names, or anything "
-        "inside backticks. Copy those through unchanged.\n"
-        "- Use the wording a clinician or medical student in that language actually uses.\n"
-        "- Keep it about as short as the original; this is UI text, not prose."
-    )
-    response = client.messages.create(
-        model=TRANSLATION_MODEL,
-        max_tokens=800,
-        system=system_prompt,
-        messages=[{"role": "user", "content": text}],
-    )
-    try:
-        cost_ledger.record_claude_response("message_translation", response)
-    except Exception:
-        logger.exception("Cost ledger logging failed (non-fatal)")
-    return "".join(b.text for b in response.content if b.type == "text").strip()
 
 
 def is_english(language: str | None) -> bool:
@@ -486,6 +458,37 @@ def warm_all_messages(language: str) -> int:
     return added
 
 
+def _prune_implausible(lang: str) -> None:
+    """
+    Drop cached entries that clearly aren't translations, so they get
+    fetched again properly.
+
+    A bad value used to be able to enter the cache and then stay there
+    forever: asked to translate the single word "normal", the model once
+    replied "I'm ready to translate... please share the message", and that
+    was cached and shipped inside an ECG read. The path that allowed it is
+    fixed, but a cache written before the fix still holds the damage, and
+    nothing else would ever evict it.
+    """
+    cached = _load_messages(lang)
+    bad = [k for k, v in cached.items() if len(v) > max(80, len(k) * 6)]
+    if not bad:
+        return
+    logger.warning("Dropping %d implausible cached translation(s) for %s: %s", len(bad), lang, bad[:5])
+    with _lock:
+        for key in bad:
+            cached.pop(key, None)
+    os.makedirs(_MSG_CACHE_DIR, exist_ok=True)
+    path = _msg_cache_path(lang)
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(cached, f, ensure_ascii=False)
+        os.replace(tmp, path)
+    except OSError:
+        logger.exception("Could not rewrite the pruned message cache for %s", lang)
+
+
 def warm_known_languages() -> None:
     """
     Top up every offered language, and any already cached on disk. Run at
@@ -498,6 +501,12 @@ def warm_known_languages() -> None:
     leave the bot paying to keep translating into it forever. The file is
     left on disk, so re-adding the language picks up where it left off.
     """
+    for lang in _known_languages():
+        try:
+            _prune_implausible(lang)
+        except Exception:
+            logger.exception("Could not prune the message cache for %s (non-fatal)", lang)
+
     offered = {lang.lower() for lang in language.SUPPORTED_LANGUAGES}
     candidates = list(language.SUPPORTED_LANGUAGES) + [
         lang for lang in _known_languages() if lang.lower() in offered
@@ -567,8 +576,19 @@ def _translate(language: str, strings: list[str]) -> dict[str, str]:
     # translation: a partial reply should give partial translation, not a
     # cache full of junk keys that never match anything.
     wanted = set(strings)
-    return {
-        k: v.strip()
-        for k, v in parsed.items()
-        if isinstance(k, str) and isinstance(v, str) and k in wanted and v.strip()
-    }
+    kept = {}
+    for k, v in parsed.items():
+        if not (isinstance(k, str) and isinstance(v, str) and k in wanted and v.strip()):
+            continue
+        value = v.strip()
+        # A translation runs roughly as long as its source. Something many
+        # times longer is not a translation -- it's the model having
+        # answered the request instead of performing it, which is how
+        # "I'm ready to translate, please share the message" once ended up
+        # cached as the word "normal". Cheap to check, and the cost of a
+        # false reject is one string staying English.
+        if len(value) > max(80, len(k) * 6):
+            logger.warning("Discarding implausible translation for %r into %s: %r", k[:40], language, value[:60])
+            continue
+        kept[k] = value
+    return kept

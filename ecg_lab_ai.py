@@ -391,6 +391,10 @@ def interpret_ecg(image_bytes: bytes, media_type: str, language: str = "English"
     measurements = ecg_qtc.parse_marker(verified) or ecg_qtc.parse_marker(draft)
     interpretation = ecg_qtc.strip_marker(interpretation)
     if measurements:
+        # Drop any QTc the model wrote anyway, so the computed one below is
+        # the only figure on screen -- two disagreeing QTc values with no
+        # way to tell which is right is worse than either alone.
+        interpretation = ecg_qtc.strip_model_qtc(interpretation)
         interpretation += "\n\n" + ecg_qtc.format_line(
             *measurements, translate=lambda s: ui_text.translate_message(language, s) or s
         )

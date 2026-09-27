@@ -55,6 +55,35 @@ def strip_marker(text: str) -> str:
     return re.sub(r"[ \t]*" + MARKER_RE.pattern + r"[ \t]*", "", text or "", flags=re.IGNORECASE).strip()
 
 
+# A QTc the model wrote into its own prose: "QTc" (Latin in every language
+# the bot offers, since abbreviations are kept as-is), then anything short
+# of a digit, then a number, optionally with a unit. Bounded so it cannot
+# run across a sentence and eat surrounding text.
+_MODEL_QTC_RE = re.compile(
+    r"[;,،]?\s*\(?\s*QTc\b[^0-9\n]{0,40}?\d{2,4}\s*"
+    r"(?:ms|msec|milli\w*|میلی[\s‌]*ثانیه|مللي\s*ثانية)?\s*\)?"
+    # A trailing "(Bazett)" / "(بازت)" belongs to the value that was just
+    # removed; left behind it reads as a stray fragment mid-sentence.
+    r"(?:\s*\([^)\n]{0,24}\))?",
+    re.IGNORECASE,
+)
+
+
+def strip_model_qtc(text: str) -> str:
+    """
+    Remove any QTc value the model wrote itself.
+
+    It is told not to compute one, but when it does anyway the reader is
+    shown two different QTc figures -- the model's arithmetic and the
+    computed one -- with no way to tell which to believe. Since the
+    computed value is appended right below, the model's is removed so only
+    one number survives. Deliberately conservative: it matches a QTc
+    followed by a number and nothing more, so a mention of QTc with no
+    value ("QTc could not be measured") is left intact.
+    """
+    return re.sub(r"[ \t]{2,}", " ", _MODEL_QTC_RE.sub("", text or "")).strip()
+
+
 def compute(qt_ms: int, rate_bpm: int) -> dict:
     """
     Both rate corrections, in ms, rounded to whole milliseconds.
