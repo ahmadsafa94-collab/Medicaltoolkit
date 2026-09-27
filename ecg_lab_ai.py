@@ -165,7 +165,7 @@ def _call_claude(feature: str, system_prompt: str, content, max_tokens: int = 12
             messages=[{"role": "user", "content": content}],
         )
     except Exception as e:
-        raise InterpretationError(f"Claude request failed: {e}")
+        raise InterpretationError(f"The AI request failed: {e}")
 
     try:
         cost_ledger.record_claude_response(feature, response)
@@ -234,7 +234,18 @@ def interpret_ecg(image_bytes: bytes, media_type: str, language: str = "English"
         "Do the measuring silently. Output ONLY the six lines above -- no working, no box counts, no "
         "commentary before or after them. Never reply with nothing: if something genuinely cannot be "
         "measured, still emit all six lines and say so on the line it belongs to.\n\n"
-        "Only say the image is too low-quality, cropped, or unclear to read reliably if you genuinely cannot "
+        + (
+            ""
+            if language.strip().lower() == "english"
+            else (
+                f"Write the six line LABELS in {language} too, not just the values -- same six lines "
+                "in the same order, translated. A line that starts in English and continues in "
+                "another script renders out of order for the reader. Measurement abbreviations "
+                "(PR, QRS, QT, QTc, ST, lead names like V1-V3) stay in Latin letters as they are "
+                "written in every language.\n\n"
+            )
+        )
+        + "Only say the image is too low-quality, cropped, or unclear to read reliably if you genuinely cannot "
         "make out the waveform at all -- a phone photo at an angle, mild glare, or an ordinary background is "
         "still readable and does NOT warrant that caveat. If it's truly unreadable, say plainly which parts "
         f"are unreadable instead of guessing at values you can't see. Respond in {language}."

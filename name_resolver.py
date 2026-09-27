@@ -47,7 +47,7 @@ def _ask(system_prompt: str, user_text: str, feature: str, max_tokens: int) -> s
             messages=[{"role": "user", "content": user_text.strip()}],
         )
     except Exception as e:
-        raise NameResolverError(f"Claude request failed: {e}")
+        raise NameResolverError(f"The AI request failed: {e}")
 
     try:
         cost_ledger.record_claude_response(feature, response)

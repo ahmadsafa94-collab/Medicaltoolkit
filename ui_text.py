@@ -34,7 +34,7 @@ import re
 import threading
 
 import cost_ledger
-from config import CLAUDE_MODEL, STORAGE_DIR
+from config import STORAGE_DIR, TRANSLATION_MODEL
 from pdf_processor import client  # reuse the one Anthropic client instance
 
 logger = logging.getLogger(__name__)
@@ -326,7 +326,7 @@ def _translate_one(language: str, text: str) -> str:
         "- Keep it about as short as the original; this is UI text, not prose."
     )
     response = client.messages.create(
-        model=CLAUDE_MODEL,
+        model=TRANSLATION_MODEL,
         max_tokens=800,
         system=system_prompt,
         messages=[{"role": "user", "content": text}],
@@ -474,7 +474,7 @@ def _translate(language: str, strings: list[str]) -> dict[str, str]:
         "- If a term is normally left in English in that language, leave it in English."
     )
     response = client.messages.create(
-        model=CLAUDE_MODEL,
+        model=TRANSLATION_MODEL,
         max_tokens=2000,
         system=system_prompt,
         messages=[{"role": "user", "content": json.dumps(strings, ensure_ascii=False)}],

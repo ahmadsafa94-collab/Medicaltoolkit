@@ -121,7 +121,7 @@ def answer_question(
             messages=messages,
         )
     except Exception as e:
-        raise DrugQAError(f"Claude request failed: {e}")
+        raise DrugQAError(f"The AI request failed: {e}")
 
     try:
         cost_ledger.record_claude_response("drug_qa", response)

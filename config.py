@@ -36,6 +36,14 @@ STORAGE_DIR = os.environ.get("STORAGE_DIR", "./storage")
 # Claude model to use for chapter-boundary detection and Q&A answers
 CLAUDE_MODEL = "claude-sonnet-5"
 
+# Model for translating UI labels and bot messages (see ui_text.py). A
+# deliberately smaller, faster model: these are short fixed strings, and
+# the call sits directly in the send path, so its latency is added to
+# every message a non-English user receives until it's cached. Using the
+# main model here made the bot noticeably slower in other languages for
+# no gain in quality on a handful of button captions.
+TRANSLATION_MODEL = "claude-haiku-4-5-20251001"
+
 # Embedding model for "Ask my book" semantic search (voyage-4 is current as
 # of Sep 2026 -- verified against Voyage's own docs). voyage-4-lite is a
 # cheaper/faster alternative in the same embedding space if you want to swap.

@@ -442,7 +442,7 @@ async def answer_question(
             messages=messages,
         )
     except Exception as e:
-        raise IndexingError(f"Claude request failed: {e}")
+        raise IndexingError(f"The AI request failed: {e}")
 
     try:
         cost_ledger.record_claude_response("ask_ai", response)

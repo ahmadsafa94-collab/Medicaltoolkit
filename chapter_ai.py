@@ -142,7 +142,7 @@ def summarize_chapter(title: str, text: str, truncated: bool, language: str = "E
     try:
         summary = _call_claude(system_prompt, f"Chapter title: {title}\n\n{text}", max_tokens=2000, feature="chapter_summary")
     except Exception as e:
-        raise ChapterAIError(f"Claude request failed: {e}")
+        raise ChapterAIError(f"The AI request failed: {e}")
 
     note = "\n\n_(Note: this chapter was long, so the summary is based on its first portion only.)_" if truncated else ""
     return summary + note
@@ -186,7 +186,7 @@ def summarize_chapter_full(title: str, text: str, hard_truncated: bool = False, 
             try:
                 part_notes.append(_call_claude(part_prompt, chunk, max_tokens=1200, feature="chapter_summary"))
             except Exception as e:
-                raise ChapterAIError(f"Claude request failed summarizing part {i + 1}/{len(chunks)}: {e}")
+                raise ChapterAIError(f"The AI request failed summarizing part {i + 1}/{len(chunks)}: {e}")
 
         combined = "\n\n".join(f"[Part {i + 1} of {len(chunks)}]\n{notes}" for i, notes in enumerate(part_notes))
         reduce_prompt = (
@@ -200,7 +200,7 @@ def summarize_chapter_full(title: str, text: str, hard_truncated: bool = False, 
         try:
             summary = _call_claude(reduce_prompt, combined, max_tokens=2200, feature="chapter_summary")
         except Exception as e:
-            raise ChapterAIError(f"Claude request failed combining chapter parts: {e}")
+            raise ChapterAIError(f"The AI request failed combining chapter parts: {e}")
 
     if hard_truncated:
         summary += (
@@ -223,7 +223,7 @@ def quiz_chapter(title: str, text: str, truncated: bool, num_questions: int = 5,
     try:
         quiz = _call_claude(system_prompt, f"Chapter title: {title}\n\n{text}", max_tokens=2500, feature="chapter_quiz")
     except Exception as e:
-        raise ChapterAIError(f"Claude request failed: {e}")
+        raise ChapterAIError(f"The AI request failed: {e}")
 
     note = "\n\n_(Note: this chapter was long, so questions are based on its first portion only.)_" if truncated else ""
     return quiz + note
@@ -248,7 +248,7 @@ def generate_mnemonics(title: str, text: str, language: str = "English") -> str:
     try:
         return _call_claude(system_prompt, f"Chapter title: {title}\n\n{text}", max_tokens=1500, feature="mnemonics")
     except Exception as e:
-        raise ChapterAIError(f"Claude request failed: {e}")
+        raise ChapterAIError(f"The AI request failed: {e}")
 
 
 MAX_CARDS_PER_GENERATION = 50
@@ -319,7 +319,7 @@ def generate_flashcards(
             messages=[{"role": "user", "content": f"Chapter title: {title}\n\n{text}"}],
         )
     except Exception as e:
-        raise ChapterAIError(f"Claude request failed: {e}")
+        raise ChapterAIError(f"The AI request failed: {e}")
 
     try:
         cost_ledger.record_claude_response("flashcards", response)
@@ -332,10 +332,10 @@ def generate_flashcards(
     try:
         cards = json.loads(raw)
     except json.JSONDecodeError as e:
-        raise ChapterAIError(f"Could not parse Claude's flashcard response as JSON: {e}\nRaw: {raw[:500]}")
+        raise ChapterAIError(f"Could not read the AI's flashcard response: {e}\nRaw: {raw[:500]}")
 
     if not isinstance(cards, list) or not cards:
-        raise ChapterAIError("Claude returned no flashcards.")
+        raise ChapterAIError("The AI returned no flashcards.")
 
     validated = []
     for c in cards:
@@ -344,7 +344,7 @@ def generate_flashcards(
         validated.append({"front": str(c["front"]), "back": str(c["back"])})
 
     if not validated:
-        raise ChapterAIError("Claude's flashcard response had no usable cards.")
+        raise ChapterAIError("The AI's flashcard response had no usable cards.")
     return validated
 
 
@@ -473,4 +473,4 @@ def summarize_whole_book(title: str, pdf_path: str, chapters: list[dict], progre
     try:
         return _call_claude(system_prompt, combined, max_tokens=2500, feature="book_summary")
     except Exception as e:
-        raise ChapterAIError(f"Claude request failed: {e}")
+        raise ChapterAIError(f"The AI request failed: {e}")

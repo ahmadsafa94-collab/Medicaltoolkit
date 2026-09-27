@@ -54,6 +54,7 @@ from aiogram.methods import (
 )
 from aiogram.types import InlineKeyboardMarkup
 
+import bidi_text
 import subscriptions
 import ui_text
 
@@ -77,10 +78,17 @@ class TranslateOutgoingMiddleware:
         return await make_request(bot, method)
 
     async def _translate_in_place(self, method) -> None:
-        if ui_text.should_skip():
-            return
         language = self._language_for(method)
         if ui_text.is_english(language):
+            return
+
+        # Bidi marks go on regardless of untranslated(): an AI answer
+        # written in Persian still contains English (PR, QRS, V1-V3, ms)
+        # and still renders out of order without them. That's a rendering
+        # fix, not a translation, so being marked "already final" doesn't
+        # exempt it. See bidi_text.
+        if ui_text.should_skip():
+            self._apply_bidi(method, language)
             return
 
         # Gather every translatable string on this request, translate them
@@ -127,6 +135,19 @@ class TranslateOutgoingMiddleware:
             translated = translations.get(getattr(owner, attr))
             if translated:
                 setattr(owner, attr, translated)
+
+        for owner, attr in slots:
+            setattr(owner, attr, bidi_text.fix(getattr(owner, attr), language))
+
+    @staticmethod
+    def _apply_bidi(method, language: str | None) -> None:
+        """Bidi marks only, for content that opted out of translation."""
+        if not bidi_text.is_rtl_language(language):
+            return
+        for attr in ("text", "caption", "title", "description"):
+            value = getattr(method, attr, None)
+            if isinstance(value, str) and value.strip():
+                setattr(method, attr, bidi_text.fix(value, language))
 
     @staticmethod
     def _language_for(method) -> str | None:

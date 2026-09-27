@@ -114,7 +114,7 @@ def analyze_interactions(drugs: list[dict], language: str = "English") -> str:
             messages=[{"role": "user", "content": f"Analyze possible interactions among: {names}"}],
         )
     except Exception as e:
-        raise InteractionAIError(f"Claude request failed: {e}")
+        raise InteractionAIError(f"The AI request failed: {e}")
 
     try:
         cost_ledger.record_claude_response("interaction_analysis", response)

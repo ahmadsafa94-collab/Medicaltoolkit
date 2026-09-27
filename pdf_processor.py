@@ -120,10 +120,10 @@ def detect_chapters(previews: list[str]) -> list[dict]:
     try:
         chapters = json.loads(raw)
     except json.JSONDecodeError as e:
-        raise ChapterDetectionError(f"Could not parse Claude's response as JSON: {e}\nRaw: {raw[:500]}")
+        raise ChapterDetectionError(f"Could not read the AI's response: {e}\nRaw: {raw[:500]}")
 
     if not isinstance(chapters, list) or not chapters:
-        raise ChapterDetectionError("Claude returned no chapters.")
+        raise ChapterDetectionError("The AI returned no chapters.")
 
     for ch in chapters:
         if not isinstance(ch, dict) or "title" not in ch or "start_page" not in ch:
@@ -149,7 +149,7 @@ def detect_chapters(previews: list[str]) -> list[dict]:
     start_pages = [c["start_page"] for c in chapters]
     if len(set(start_pages)) != len(start_pages):
         raise ChapterDetectionError(
-            f"Claude returned duplicate start_page values: {start_pages}. "
+            f"The AI returned duplicate start_page values: {start_pages}. "
             "Try again, or report this PDF if it keeps happening."
         )
 

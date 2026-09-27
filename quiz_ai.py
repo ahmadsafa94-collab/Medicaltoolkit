@@ -109,7 +109,7 @@ def generate_quiz(
             messages=[{"role": "user", "content": context}],
         )
     except Exception as e:
-        raise QuizError(f"Claude request failed: {e}")
+        raise QuizError(f"The AI request failed: {e}")
 
     try:
         cost_ledger.record_claude_response("quiz", response)
@@ -122,10 +122,10 @@ def generate_quiz(
     try:
         questions = json.loads(raw)
     except json.JSONDecodeError as e:
-        raise QuizError(f"Could not parse Claude's response as JSON: {e}\nRaw: {raw[:500]}")
+        raise QuizError(f"Could not read the AI's response: {e}\nRaw: {raw[:500]}")
 
     if not isinstance(questions, list) or not questions:
-        raise QuizError("Claude returned no questions.")
+        raise QuizError("The AI returned no questions.")
 
     validated = []
     for q in questions:

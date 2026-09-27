@@ -267,7 +267,7 @@ async def cmd_help(message: Message):
     await message.answer(
         "Just send a .pdf file as a document (not a photo) and I'll:\n"
         "1. Read it\n"
-        "2. Ask Claude to find the chapter boundaries\n"
+        "2. Find the chapter boundaries with AI\n"
         "3. Send you back one PDF per chapter, each with '📝 Summarize' and "
         "'❓ Quiz me' buttons for an on-demand AI study aid on that chapter "
         "(generated only if you tap the button -- always check it against "

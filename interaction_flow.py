@@ -66,7 +66,7 @@ async def cmd_interactions(message: Message, state: FSMContext):
     await message.answer(
         "🔀 *Drug Interaction Checker*\n\n"
         "Type a drug name to add it to the list -- generic or brand name, and it's fine if the "
-        "spelling isn't perfect. When you have at least 2, tap *Check Interactions* and Claude will "
+        "spelling isn't perfect. When you have at least 2, tap *Check Interactions* and the bot will "
         "read each drug's own FDA label (Drug Interactions + Contraindications sections) and describe "
         "what each one says about the others.\n\n"
         "⚠️ This is grounded in each drug's own label text, not a curated interaction database. A drug "
@@ -137,7 +137,7 @@ async def handle_ix_check(callback: CallbackQuery, state: FSMContext):
         await callback.message.answer("Add at least 2 drugs before checking interactions.")
         return
 
-    status = await callback.message.answer("Asking Claude to read each label...")
+    status = await callback.message.answer("Processing...")
     try:
         text = await asyncio.wait_for(
             asyncio.to_thread(
@@ -160,7 +160,7 @@ async def handle_ix_check(callback: CallbackQuery, state: FSMContext):
     try:
         await status.delete()
     except Exception:
-        pass  # not critical if the "Asking Claude..." message can't be deleted (e.g. already gone)
+        pass  # not critical if the "Processing..." message can't be deleted (e.g. already gone)
 
     with ui_text.untranslated():  # interaction_ai already wrote this in the user's language
         ok = await send_long_text(callback.message.answer, text)
