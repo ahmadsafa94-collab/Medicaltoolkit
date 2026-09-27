@@ -33,6 +33,7 @@ from aiogram.types import CallbackQuery, Message
 
 import ui_text
 import interaction_ai
+import subscriptions
 from drug_lookup import lookup_drug, DrugNotFoundError, DrugLookupRateLimitedError
 from keyboards import interaction_menu_kb, interaction_confirm_kb
 from telegram_helpers import send_long_text
@@ -139,7 +140,9 @@ async def handle_ix_check(callback: CallbackQuery, state: FSMContext):
     status = await callback.message.answer("Asking Claude to read each label...")
     try:
         text = await asyncio.wait_for(
-            asyncio.to_thread(interaction_ai.analyze_interactions, drugs),
+            asyncio.to_thread(
+                interaction_ai.analyze_interactions, drugs, subscriptions.get_language(callback.from_user.id)
+            ),
             timeout=_ANALYZE_TIMEOUT_SECONDS,
         )
     except asyncio.TimeoutError:

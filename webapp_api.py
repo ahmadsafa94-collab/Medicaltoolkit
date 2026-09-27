@@ -585,7 +585,13 @@ async def summarize(request: Request):
                     chapter_ai.MAX_CHARS_HARD_CAP,
                 )
                 return await asyncio.wait_for(
-                    asyncio.to_thread(chapter_ai.summarize_chapter_full, chapter["title"], text, hard_truncated),
+                    asyncio.to_thread(
+                        chapter_ai.summarize_chapter_full,
+                        chapter["title"],
+                        text,
+                        hard_truncated,
+                        subscriptions.get_language(user["id"]),
+                    ),
                     timeout=CHAPTER_SUMMARY_TIMEOUT_SECONDS,
                 )
             except chapter_ai.ChapterAIError as e:
@@ -600,7 +606,12 @@ async def summarize(request: Request):
             try:
                 return await asyncio.wait_for(
                     asyncio.to_thread(
-                        chapter_ai.summarize_whole_book, book["title"], book["pdf_path"], chapters, progress
+                        chapter_ai.summarize_whole_book,
+                        book["title"],
+                        book["pdf_path"],
+                        chapters,
+                        progress,
+                        subscriptions.get_language(user["id"]),
                     ),
                     timeout=BOOK_SUMMARY_TIMEOUT_SECONDS,
                 )
@@ -916,7 +927,13 @@ async def create_quiz(request: Request):
         try:
             return await asyncio.wait_for(
                 asyncio.to_thread(
-                    quiz_ai.generate_quiz, book["title"], book["pdf_path"], selected, difficulty, num_questions
+                    quiz_ai.generate_quiz,
+                    book["title"],
+                    book["pdf_path"],
+                    selected,
+                    difficulty,
+                    num_questions,
+                    subscriptions.get_language(user["id"]),
                 ),
                 timeout=QUIZ_GENERATION_TIMEOUT_SECONDS,
             )
@@ -1092,6 +1109,7 @@ async def generate_flashcards_endpoint(request: Request):
                     book["pdf_path"],
                     selected,
                     num_cards,
+                    subscriptions.get_language(user["id"]),
                     existing_fronts=existing_fronts,
                 ),
                 timeout=FLASHCARD_GENERATION_TIMEOUT_SECONDS,

@@ -105,7 +105,13 @@ async def handle_chapter_summarize(callback: CallbackQuery):
 
     try:
         summary = await asyncio.wait_for(
-            asyncio.to_thread(chapter_ai.summarize_chapter_full, title, entry["text"], entry["hard_truncated"]),
+            asyncio.to_thread(
+                chapter_ai.summarize_chapter_full,
+                title,
+                entry["text"],
+                entry["hard_truncated"],
+                subscriptions.get_language(callback.from_user.id),
+            ),
             timeout=_GENERATION_TIMEOUT_SECONDS,
         )
     except asyncio.TimeoutError:
@@ -154,7 +160,14 @@ async def handle_chapter_quiz(callback: CallbackQuery):
 
     try:
         quiz = await asyncio.wait_for(
-            asyncio.to_thread(chapter_ai.quiz_chapter, title, quiz_text, quiz_truncated),
+            asyncio.to_thread(
+                chapter_ai.quiz_chapter,
+                title,
+                quiz_text,
+                quiz_truncated,
+                5,
+                subscriptions.get_language(callback.from_user.id),
+            ),
             timeout=_GENERATION_TIMEOUT_SECONDS,
         )
     except asyncio.TimeoutError:

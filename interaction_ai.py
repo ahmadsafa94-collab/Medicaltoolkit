@@ -73,7 +73,7 @@ def _label_context(name: str, sections: dict) -> str:
     return "\n".join(lines)
 
 
-def analyze_interactions(drugs: list[dict]) -> str:
+def analyze_interactions(drugs: list[dict], language: str = "English") -> str:
     """
     drugs: [{"name": str, "sections": <drug_lookup.lookup_drug() result>}, ...],
     at least 2. Asks Claude to read each drug's own Drug Interactions/
@@ -98,6 +98,8 @@ def analyze_interactions(drugs: list[dict]) -> str:
         "3. If neither label mentions a given pair at all, say so plainly -- do not invent a mechanism, "
         "severity rating, or clinical recommendation that isn't in the text.\n"
         "4. Be concise and direct -- this will be read on a phone screen.\n"
+        f"4b. Write your entire answer in {language}. Drug names, and abbreviations normally left in "
+        "English (CYP3A4, QT), stay as they are.\n"
         "5. End with one line noting this reads each drug's own label text only: it is not a substitute "
         "for a dedicated interaction-checker database or pharmacist consult, and a label not mentioning "
         "something does not rule out a real interaction.\n"
