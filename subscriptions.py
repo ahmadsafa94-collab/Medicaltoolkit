@@ -12,15 +12,16 @@ Storage layout (small per-purpose JSON files, same pattern as library.py):
 
 Design notes:
   - Free-tier usage counters (summaries/quizzes/questions) reset automatically
-    the first time they're touched in a new calendar month (UTC) -- no cron
-    job needed, see _period_key()/_load().
+    the first time they're touched on a new UTC day -- no cron job needed,
+    see _day_key()/_load(). (_period_key() still exists, but only to group
+    PAYMENTS by calendar month for the revenue stats.)
   - Premium is a plain expiry timestamp (premium_until), extended (not
     replaced) by a renewal/grant that arrives before the current one lapses
     -- see grant_premium(). is_premium() lazily downgrades an expired user
     back to "free" the next time anything checks their status.
   - ECG/lab interpretation use a SEPARATE one-shot trial mechanism
-    (trial_used) rather than the monthly counters: once ever, not once a
-    month, per the "give one free try" ask.
+    (trial_used) rather than the daily counters: once ever, not once a
+    day, per the "give one free try" ask.
 """
 
 import json
@@ -31,8 +32,8 @@ import time
 from config import (
     STORAGE_DIR,
     ADMIN_USER_IDS,
-    FREE_MONTHLY_SUMMARIES,
-    FREE_MONTHLY_QUIZZES,
+    FREE_DAILY_SUMMARIES,
+    FREE_DAILY_QUIZZES,
     FREE_DAILY_QUESTIONS,
     FREE_SHELF_BOOKS,
     ECG_FREE_TRIALS,
@@ -49,15 +50,10 @@ logger = logging.getLogger(__name__)
 _ADMIN_DIR = os.path.join(STORAGE_DIR, "_admin")
 _INDEX_PATH = os.path.join(_ADMIN_DIR, "users_index.json")
 
-# Per calendar month, reset by usage_period.
+# Every free-tier cap is per UTC day, reset by usage_day (see _load).
 FREE_LIMITS = {
-    "summaries": FREE_MONTHLY_SUMMARIES,
-    "quizzes": FREE_MONTHLY_QUIZZES,
-}
-# Per UTC day, reset by usage_day -- kept in a separate table (and separate
-# counters) because the reset cadence differs, not the mechanism. A feature
-# belongs to exactly one of the two; check_and_consume picks by lookup.
-FREE_DAILY_LIMITS = {
+    "summaries": FREE_DAILY_SUMMARIES,
+    "quizzes": FREE_DAILY_QUIZZES,
     "questions": FREE_DAILY_QUESTIONS,
 }
 FEATURE_LABELS = {
@@ -72,19 +68,12 @@ TRIAL_LABELS = {"ecg": "ECG interpretation", "lab": "lab interpretation"}
 class QuotaExceeded(Exception):
     """Raised when a FREE user has hit their cap on a Claude-token-heavy feature."""
 
-    def __init__(self, feature: str, daily: bool = False):
+    def __init__(self, feature: str):
         self.feature = feature
-        self.daily = daily
-        label = FEATURE_LABELS.get(feature, feature)
-        if daily:
-            limit = FREE_DAILY_LIMITS.get(feature, "?")
-            when, resets = "today", "come back tomorrow"
-        else:
-            limit = FREE_LIMITS.get(feature, "?")
-            when, resets = "this month", "wait for next month's reset"
         super().__init__(
-            f"You've used all {limit} free {label} {when}. "
-            f"Upgrade to Premium (⭐ My Plan) for unlimited access, or {resets}."
+            f"You've used all {FREE_LIMITS.get(feature, '?')} free "
+            f"{FEATURE_LABELS.get(feature, feature)} today. Upgrade to Premium (⭐ My Plan) for "
+            "unlimited access, or come back tomorrow."
         )
 
 
@@ -127,7 +116,7 @@ def _period_key(ts: float | None = None) -> str:
 
 
 def _day_key(ts: float | None = None) -> str:
-    """UTC calendar day, for the per-day limits (see FREE_DAILY_LIMITS)."""
+    """UTC calendar day -- the reset boundary for every free-tier cap (see FREE_LIMITS)."""
     t = time.gmtime(ts if ts is not None else time.time())
     return f"{t.tm_year:04d}-{t.tm_mon:02d}-{t.tm_mday:02d}"
 
@@ -138,10 +127,8 @@ def _default_sub(user_id: int) -> dict:
         "plan": "free",
         "premium_until": None,
         "premium_source": None,
-        "usage_period": _period_key(),
-        "usage": {"summaries": 0, "quizzes": 0},
         "usage_day": _day_key(),
-        "usage_today": {"questions": 0},
+        "usage": {"summaries": 0, "quizzes": 0, "questions": 0},
         "trial_used": {"ecg": False, "lab": False},
         "language": "English",
         "referred_by": None,
@@ -166,6 +153,12 @@ def _load(user_id: int) -> dict:
         return _default_sub(user_id)
 
     default = _default_sub(user_id)
+    # Read the stored day BEFORE the setdefault loop below, which would
+    # otherwise fill a missing usage_day in with TODAY and so convince the
+    # reset further down that a stale record is already current. Records
+    # written before caps went daily have no usage_day at all, and their
+    # old counters must not be charged against today's allowance.
+    stored_day = data.get("usage_day")
     for k, v in default.items():
         data.setdefault(k, v)
     # usage/trial_used are nested dicts -- setdefault above only fills them in
@@ -173,20 +166,12 @@ def _load(user_id: int) -> dict:
     # one sub-field is missing (a newer field added to a still-existing record).
     for k, v in default["usage"].items():
         data["usage"].setdefault(k, v)
-    for k, v in default["usage_today"].items():
-        data["usage_today"].setdefault(k, v)
     for k, v in default["trial_used"].items():
         data["trial_used"].setdefault(k, v)
 
-    if data.get("usage_period") != _period_key():
-        data["usage_period"] = _period_key()
-        data["usage"] = dict(default["usage"])
-    # Separate reset from the monthly one above: questions refill every UTC
-    # day while summaries/quizzes refill monthly, so the two counters roll
-    # over on their own schedules.
-    if data.get("usage_day") != _day_key():
+    if stored_day != _day_key():
         data["usage_day"] = _day_key()
-        data["usage_today"] = dict(default["usage_today"])
+        data["usage"] = dict(default["usage"])
     return data
 
 
@@ -364,23 +349,18 @@ def check_and_consume(user_id: int, feature: str) -> None:
     feature in {"summaries", "quizzes", "questions"}. Premium users always
     pass (their usage is still counted, for visibility on the admin/customer
     dashboards, just never enforced). Free users get FREE_LIMITS[feature]
-    uses per calendar month, or FREE_DAILY_LIMITS[feature] per UTC day for
-    the daily-capped ones; raises QuotaExceeded once that's used up.
+    uses per UTC day; raises QuotaExceeded once that's used up.
     """
     sub = _load(user_id)
     premium = is_premium(user_id)
     if premium:
         sub = _load(user_id)  # is_premium() may have just auto-downgraded/saved -- reload to stay consistent
 
-    daily = feature in FREE_DAILY_LIMITS
-    bucket = "usage_today" if daily else "usage"
-    limit = FREE_DAILY_LIMITS[feature] if daily else FREE_LIMITS[feature]
+    used = sub["usage"].get(feature, 0)
+    if not premium and used >= FREE_LIMITS[feature]:
+        raise QuotaExceeded(feature)
 
-    used = sub[bucket].get(feature, 0)
-    if not premium and used >= limit:
-        raise QuotaExceeded(feature, daily=daily)
-
-    sub[bucket][feature] = used + 1
+    sub["usage"][feature] = used + 1
     _save(user_id, sub)
 
 
@@ -446,8 +426,6 @@ def usage_summary(user_id: int) -> dict:
     return {
         "usage": sub["usage"],
         "limits": FREE_LIMITS,
-        "usage_today": sub["usage_today"],
-        "daily_limits": FREE_DAILY_LIMITS,
         "trial_used": sub["trial_used"],
     }
 

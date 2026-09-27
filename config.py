@@ -163,14 +163,13 @@ SUPPORT_ADMIN_USERNAME = os.environ.get("SUPPORT_ADMIN_USERNAME", "").lstrip("@"
 # Free-tier monthly caps on the Claude-token-heavy features -- see
 # subscriptions.py. Everything else (dose lookup, interactions, calculators,
 # glossary) stays free and uncapped since it doesn't call Claude at all.
-FREE_MONTHLY_SUMMARIES = 3
-FREE_MONTHLY_QUIZZES = 3
-
-# Ask-AI questions are capped per DAY rather than per month (the other two
-# above are monthly): a question is the thing users reach for constantly
-# while studying, so a monthly bucket gets drained in one session and then
-# locks them out for weeks. A daily allowance refills every morning, which
-# is both more useful free and a steadier nudge toward Premium.
+# All three are per UTC DAY, not per month. A monthly bucket gets drained
+# in a single study session and then locks a free user out for weeks, which
+# makes the free tier feel broken rather than limited; a daily allowance
+# refills every morning, so it stays useful while still being a steady,
+# visible nudge toward Premium.
+FREE_DAILY_SUMMARIES = 3
+FREE_DAILY_QUIZZES = 3
 FREE_DAILY_QUESTIONS = 10
 
 # How many books a FREE user may keep on their 📚 Book Shelf at once. Unlike

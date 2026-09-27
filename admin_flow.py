@@ -337,7 +337,7 @@ async def _send_lookup_result(answer_fn, target_id: int):
     if premium and sub.get("premium_until"):
         until = time.strftime("%Y-%m-%d", time.gmtime(sub["premium_until"]))
         lines.append(f"Premium until: {until} (source: {sub.get('premium_source')})")
-    lines.append(f"Usage this month: {sub['usage']}")
+    lines.append(f"Usage today: {sub['usage']}")
     lines.append(f"ECG/Lab trials used: {sub['trial_used']}")
     lines.append(f"Blocked: {'yes' if sub.get('blocked') else 'no'}")
     lines.append(f"Payments on file: {len(sub.get('payments', []))}")
