@@ -89,6 +89,8 @@ def resolve_drug_names(raw_input: str, limit: int = MAX_DRUG_SUGGESTIONS) -> lis
         f"- Reply with 1 to {limit} medication names, most likely first, one per line.\n"
         "- Always reply in ENGLISH using the GENERIC name, whatever language the input was in -- that is "
         "what a drug label database indexes. Resolve brand names to their generic.\n"
+        "- Name the plain single-ingredient drug, not a combination product or a brand that happens to "
+        "contain it: 'metofm' means metformin, never a metformin-containing combination.\n"
         "- Give more than one name only when the input is genuinely ambiguous between different "
         "medications. If one reading is clearly right, reply with just that one.\n"
         "- Output ONLY the names -- no numbering, bullets, punctuation, explanation or commentary.\n"

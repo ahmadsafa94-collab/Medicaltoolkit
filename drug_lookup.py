@@ -265,6 +265,49 @@ async def lookup_drug(drug_name: str) -> dict:
     return sections
 
 
+_CANDIDATE_LIMIT = 10  # records to weigh per query variant before picking one
+
+
+def _record_score(record: dict, wanted: str) -> tuple[int, int]:
+    """
+    How well does this label match the name the user asked for?
+
+    openFDA's phrase search matches a name anywhere inside a field, so a
+    search for "metformin" also matches combination products whose generic
+    name is "sitagliptin and metformin hydrochloride" -- and since those
+    carry their own brand name, taking whatever came back first is how
+    searching "metformin" ended up showing Zituvimet. Scoring by how
+    exactly the generic name matches, and preferring single-ingredient
+    products, picks the drug the user actually named.
+
+    Returns (match_quality, single_ingredient) -- higher sorts first.
+    """
+    openfda = record.get("openfda", {})
+    names = [n.lower() for n in (openfda.get("generic_name") or [])]
+    names += [n.lower() for n in (openfda.get("brand_name") or [])]
+
+    quality = 0
+    for name in names:
+        if name == wanted:
+            quality = max(quality, 3)                       # exactly this drug
+        elif name.startswith(wanted):
+            quality = max(quality, 2)                       # "metformin hydrochloride"
+        elif wanted in name.split():
+            quality = max(quality, 1)                       # an ingredient of a combination
+
+    # A combination product lists several substances; the plain drug lists
+    # one. Used only to break ties within the same match quality.
+    substances = openfda.get("substance_name") or []
+    single_ingredient = 1 if len(substances) <= 1 else 0
+    return (quality, single_ingredient)
+
+
+def _best_record(results: list[dict], drug_name: str) -> dict:
+    """Pick the label that best matches `drug_name`, falling back to openFDA's own first result."""
+    wanted = drug_name.strip().lower()
+    return max(results, key=lambda r: _record_score(r, wanted))
+
+
 async def _fetch_label_record(drug_name: str, retries: int = 1) -> dict | None:
     """
     Try a sequence of increasingly loose queries against openFDA until one
@@ -289,7 +332,10 @@ async def _fetch_label_record(drug_name: str, retries: int = 1) -> dict | None:
 
     async with httpx.AsyncClient(timeout=10) as client:
         for query_index, query in enumerate(queries):
-            params = {"search": query, "limit": 1}
+            # Ask for several records, not one, so _best_record can pick the
+            # product this name actually IS rather than whichever label
+            # openFDA happened to return first -- see _best_record.
+            params = {"search": query, "limit": _CANDIDATE_LIMIT}
             url = f"{OPENFDA_LABEL_URL}?{urllib.parse.urlencode(params)}"
             logger.info("openFDA lookup attempt %d for '%s': %s", query_index, drug_name, url)
 
@@ -323,7 +369,7 @@ async def _fetch_label_record(drug_name: str, retries: int = 1) -> dict | None:
                 results = response.json().get("results", [])
                 if results:
                     logger.info("openFDA match found on query %d for '%s'", query_index, drug_name)
-                    return results[0]
+                    return _best_record(results, drug_name)
                 break  # 200 but empty results, try next query variant
 
     logger.info("openFDA: no match for '%s' after trying all query variants", drug_name)
