@@ -71,32 +71,60 @@ _DISCLAIMER = (
 # The sanity check is there because the classic failure is being out by a
 # factor of two or more (counting every other R wave, or misreading the
 # paper speed), which a glance at the R-R spacing catches.
-_RATE_METHOD_INSTRUCTION = (
-    "DETERMINING THE RATE -- work through this in order, it is the value most often gotten wrong:\n"
-    "1. Most 12-lead ECGs print the machine-measured rate in the header (often labelled 'Rate', 'HR', "
-    "'Vent. rate' or 'bpm'). If a printed rate is visible ANYWHERE on the image, read it and use it -- it "
-    "is computed from the digital signal and is more reliable than measuring off a photograph.\n"
-    "2. If no rate is printed, measure it. At the standard 25 mm/s paper speed, one large (5 mm) box is "
-    "0.20 s: rate = 300 / (number of large boxes between two consecutive R waves), or equivalently "
-    "1500 / (number of small 1 mm boxes). Use several consecutive R-R intervals, not one.\n"
-    "3. If the rhythm is irregular, counting boxes between one pair of beats is wrong -- instead count "
-    "the QRS complexes across the full 10-second recording and multiply by 6, and report it as an "
-    "average.\n"
-    "4. Check the number you land on against the tracing before writing it: R waves roughly 5 large "
-    "boxes apart is about 60/min, 3 apart about 100/min, 1.5 apart about 200/min. If your figure "
-    "disagrees with that spacing, you have likely misread the paper speed or skipped beats -- redo it. "
-    "State the rate as a single number (or a narrow range if genuinely variable), never a guess.\n"
-    "5. If the paper speed is printed and is NOT 25 mm/s (e.g. 50 mm/s), scale accordingly and say so."
+_MEASUREMENT_METHOD_INSTRUCTION = (
+    "MEASURED VALUES -- rate, intervals and axis are the lines most often gotten wrong. Work through "
+    "them in this order:\n\n"
+    "READ THE PRINTED HEADER FIRST. Nearly every 12-lead prints its machine-computed measurements "
+    "along the top or side -- typically rate ('Rate', 'HR', 'Vent. rate'), 'PR', 'QRS'/'QRSD', "
+    "'QT/QTc', and the 'P-QRS-T axes'. Anything printed there was computed from the digital signal "
+    "and is more reliable than measuring off a photograph: read it and use it. Only measure by hand "
+    "what is NOT printed. If the printed paper speed is not the standard 25 mm/s (e.g. 50 mm/s), or "
+    "gain is not 10 mm/mV, scale accordingly and say so.\n\n"
+    "RATE (if not printed): at 25 mm/s one large (5 mm) box is 0.20 s, so rate = 300 / (large boxes "
+    "between two consecutive R waves), or 1500 / (small 1 mm boxes). Use several consecutive R-R "
+    "intervals, not one. If the rhythm is IRREGULAR, box-counting between one pair of beats is wrong: "
+    "count the QRS complexes across the full 10-second recording, multiply by 6, and report it as an "
+    "average.\n\n"
+    "INTERVALS (each, if not printed): at 25 mm/s one small box = 0.04 s (40 ms), one large box = "
+    "0.20 s (200 ms). Measure in the lead where the onset and offset are clearest, then confirm in a "
+    "second lead.\n"
+    "- PR: start of P to start of QRS. Normal 120-200 ms (3-5 small boxes).\n"
+    "- QRS: onset to offset of QRS. Normal under 120 ms (under 3 small boxes).\n"
+    "- QT: start of QRS to the end of T, read where the T-wave end is clearest (often II or V5). "
+    "Correct for rate using Bazett: QTc = QT / sqrt(RR in seconds). Give QTc whenever a rate is "
+    "determinable, and say which you are quoting.\n\n"
+    "AXIS (if not printed): use the quadrant method on the NET deflection (positive minus negative "
+    "area) of leads I and aVF, judging the whole complex rather than the tallest spike:\n"
+    "- I positive, aVF positive -> normal axis\n"
+    "- I positive, aVF negative -> left axis deviation (confirm with II: also negative supports it)\n"
+    "- I negative, aVF positive -> right axis deviation\n"
+    "- I negative, aVF negative -> extreme/northwest axis\n"
+    "Normal is about -30 to +90 degrees.\n\n"
+    "ST-SEGMENT DEVIATION: measure at the J point, relative to the TP (or PR) baseline, and state it "
+    "in mm with the leads it appears in -- not as a general impression.\n\n"
+    "SANITY-CHECK EVERY VALUE AGAINST THE TRACING BEFORE WRITING IT. R waves about 5 large boxes "
+    "apart is roughly 60/min, 3 apart roughly 100/min. A QRS you call narrow must look narrow "
+    "(under 3 small boxes); a PR you call normal must be 3-5 small boxes wide; an axis you call "
+    "normal must have both I and aVF upright. If a value contradicts what the tracing looks like, "
+    "you have likely misread the paper speed, the calibration or the lead -- redo it rather than "
+    "reporting it. State each value as a number, or say plainly that it cannot be measured from this "
+    "image; never guess."
 )
 
-# Retrieved alongside the tracing's own findings so the books' rate/interval
-# METHOD is in front of the verify pass, not just passages about whatever
-# pattern this tracing shows -- see ecg_reference.build_reference on why
-# this is a separate query rather than appended to the draft text.
-_RATE_METHOD_QUERY = (
-    "determining heart rate from an ECG, calculating rate, 300 rule, 1500 rule, large squares between "
-    "R waves, paper speed 25 mm/s, 10 second rule for irregular rhythms, measuring PR QRS QT intervals"
-)
+# Retrieved alongside the tracing's own findings so the books' METHOD for
+# each measured value is in front of the verify pass, not just passages
+# about whatever pattern this tracing happens to show. Separate queries
+# rather than one combined one, and separate from the draft text, because a
+# single query lets the strongest topic crowd the others out -- see
+# ecg_reference.build_reference.
+_METHOD_QUERIES = [
+    "determining heart rate from an ECG, 300 rule, 1500 rule, large squares between R waves, "
+    "paper speed 25 mm/s, 10 second rule for an irregular rhythm",
+    "measuring ECG intervals, PR interval, QRS duration, QT interval and QTc correction, "
+    "Bazett formula, normal interval values in milliseconds",
+    "determining the QRS axis, quadrant method with leads I and aVF, left axis deviation, "
+    "right axis deviation, normal axis range in degrees",
+]
 
 # Shared across both ECG and lab-image verify prompts: the specific
 # instruction that reins in over-cautious "image unclear" hedging.
@@ -165,7 +193,7 @@ def interpret_ecg(image_bytes: bytes, media_type: str, language: str = "English"
         "intervals' or 'ST elevation pattern in the anterior leads, commonly associated with anterior wall "
         "ischemia/infarction as a category' -- NEVER state or imply this specific image IS a diagnosis like "
         "'this is a STEMI' or 'this patient has X'.>\n\n"
-        f"{_RATE_METHOD_INSTRUCTION}\n\n"
+        f"{_MEASUREMENT_METHOD_INSTRUCTION}\n\n"
         "Only say the image is too low-quality, cropped, or unclear to read reliably if you genuinely cannot "
         "make out the waveform at all -- a phone photo at an angle, mild glare, or an ordinary background is "
         "still readable and does NOT warrant that caveat. If it's truly unreadable, say plainly which parts "
@@ -186,20 +214,22 @@ def interpret_ecg(image_bytes: bytes, media_type: str, language: str = "English"
     # tracing precisely enough to pull the passages that actually teach this
     # pattern. Empty when no reference books are loaded, in which case the
     # verify prompt below is exactly what it was before -- see ecg_reference.py.
-    reference_block, reference_hits = ecg_reference.build_reference([draft, _RATE_METHOD_QUERY])
+    reference_block, reference_hits = ecg_reference.build_reference([draft, *_METHOD_QUERIES])
 
     instructions = [
         "Re-examine the image yourself and check the draft's Rate/Rhythm/Axis/Intervals/Notable morphology/"
         "Overall impression against what the image actually shows. Correct anything wrong; keep anything "
         "already correct.",
-        # Called out separately from the general re-check above because the
-        # rate is the line users report as wrong, and a verify pass reads
+        # Called out separately from the general re-check above because
+        # these are the lines users report as wrong, and a verify pass reads
         # much more like a rubber stamp when it is only told to "check".
-        "Derive the RATE yourself from the image before looking at what the draft said, then compare. "
-        f"Work through this, in this order:\n{_RATE_METHOD_INSTRUCTION}\n"
-        "If your value and the draft's disagree, do not split the difference or defer to the draft -- "
-        "a printed rate on the tracing wins outright; otherwise trust the one that matches the R-R "
-        "spacing on the image.",
+        "Derive the RATE, the INTERVALS and the AXIS yourself from the image FIRST, before reading "
+        "what the draft said about them, then compare. Work through this:\n"
+        f"{_MEASUREMENT_METHOD_INSTRUCTION}\n"
+        "Where your value and the draft's disagree, do not split the difference and do not defer to "
+        "the draft: a value printed on the tracing itself wins outright, and otherwise take the one "
+        "that matches what the image actually shows. If the draft quoted a value the image does not "
+        "support, replace it.",
     ]
     if reference_block:
         instructions.append(

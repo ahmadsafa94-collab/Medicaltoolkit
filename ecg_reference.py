@@ -212,11 +212,19 @@ def build_reference(queries: str | list[str], top_k: int = ECG_REFERENCE_TOP_K) 
     Returns (prompt_block, hits_actually_included) -- both empty when
     there's nothing to add (no books uploaded, no index, retrieval failed).
 
-    Several queries can be passed, and each gets its own top_k slice before
-    they're merged. One combined query would let the stronger topic crowd
-    the other out entirely: the caller asks about this tracing's PATTERN and
-    about how to MEASURE a rate, and a pattern-heavy tracing would otherwise
-    return nothing at all on measurement -- the exact thing being checked.
+    Several queries can be passed, and each gets its own top_k slice. One
+    combined query would let the strongest topic crowd the others out
+    entirely: the caller asks about this tracing's PATTERN and about how to
+    measure the RATE, the INTERVALS and the AXIS, and a pattern-heavy
+    tracing would otherwise return nothing on measurement -- the exact
+    thing being checked.
+
+    Their results are then INTERLEAVED, best-first from each query in turn,
+    rather than concatenated query by query. The char cap below truncates
+    the tail, so concatenating would let the first query spend the whole
+    budget and leave the last topic with no passages at all. Round-robin
+    means every topic contributes its best passage before any topic
+    contributes its second.
 
     The second element is what gets shown to the reader as the sources the
     interpretation was checked against, so it is deliberately the passages
@@ -232,18 +240,23 @@ def build_reference(queries: str | list[str], top_k: int = ECG_REFERENCE_TOP_K) 
     if isinstance(queries, str):
         queries = [queries]
 
+    try:
+        per_query = [search_sync(query, top_k=top_k) for query in queries]
+    except Exception:
+        logger.exception("ECG reference retrieval failed (non-fatal, falling back to an unreferenced read)")
+        return "", []
+
     hits: list[dict] = []
     seen_text = set()
-    for query in queries:
-        try:
-            for hit in search_sync(query, top_k=top_k):
-                if hit["text"] in seen_text:
-                    continue
-                seen_text.add(hit["text"])
-                hits.append(hit)
-        except Exception:
-            logger.exception("ECG reference retrieval failed (non-fatal, falling back to an unreferenced read)")
-            return "", []
+    for rank in range(max((len(r) for r in per_query), default=0)):
+        for results in per_query:
+            if rank >= len(results):
+                continue
+            hit = results[rank]
+            if hit["text"] in seen_text:
+                continue
+            seen_text.add(hit["text"])
+            hits.append(hit)
 
     blocks, used_hits, used = [], [], 0
     for hit in hits:

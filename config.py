@@ -138,8 +138,12 @@ SEND_CHAPTER_FILES_TIMEOUT_SECONDS = 300
 # lab interpretation. Shared across ALL users (one admin-curated set), which
 # is why this lives under _admin/ rather than any one user's directory.
 ECG_REFERENCE_DIR = os.path.join(STORAGE_DIR, "_admin", "ecg_reference")
-ECG_REFERENCE_TOP_K = 6           # passages pulled per ECG read, across all reference books
-ECG_REFERENCE_MAX_CHARS = 7000    # ceiling on retrieved text injected into the verify prompt
+ECG_REFERENCE_TOP_K = 6           # passages pulled per query, across all reference books
+# Ceiling on retrieved text injected into the verify prompt. Raised from
+# 7000 when the read started retrieving per-topic (the tracing's pattern
+# plus the method for rate, intervals and axis): with four topics sharing
+# one budget, the old cap left roughly one passage each.
+ECG_REFERENCE_MAX_CHARS = 10000
 
 # --- Admin / premium subscription system ---
 
