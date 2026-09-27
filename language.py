@@ -21,23 +21,37 @@ every lookup in ui_text.py falls back to English rather than guessing.
 
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# A deliberately short, high-coverage list rather than every language Claude
-# can technically produce -- these cover the large majority of medical
-# students worldwide who study in a language other than English. Add more
-# by just adding an entry here; nothing else needs to change.
+# Every language the bot offers. Short on purpose: each one carries a real
+# cost beyond the picker entry -- the whole fixed-message set is translated
+# and cached per language (ui_text.warm_all_messages), and each is a
+# wording nobody on the team can proofread. Add one by adding it here;
+# nothing else needs to change, though an RTL language must also be listed
+# in bidi_text.RTL_LANGUAGES or its mixed English will render out of order.
 SUPPORTED_LANGUAGES = [
     "English",
     "Arabic",
-    "French",
-    "Spanish",
-    "Portuguese",
-    "German",
-    "Turkish",
-    "Urdu",
-    "Hindi",
-    "Indonesian",
     "Persian",
+    "Russian",
 ]
+
+
+def normalize(language: str | None) -> str:
+    """
+    The language to actually use, falling back to English for anything not
+    on the list above.
+
+    Applied on READ (subscriptions.get_language) rather than by migrating
+    stored records: a user whose language was dropped from the list simply
+    gets English from then on, with no migration pass to write and nothing
+    to go wrong if the list changes again. Their stored value is left
+    alone, so re-adding a language restores whoever had picked it.
+    """
+    if not language:
+        return "English"
+    for supported in SUPPORTED_LANGUAGES:
+        if supported.lower() == language.strip().lower():
+            return supported
+    return "English"
 
 
 def language_picker_kb() -> InlineKeyboardMarkup:

@@ -34,6 +34,7 @@ import re
 import threading
 
 import cost_ledger
+import language
 import ui_strings
 from config import STORAGE_DIR, TRANSLATION_MODEL
 from pdf_processor import client  # reuse the one Anthropic client instance
@@ -486,12 +487,21 @@ def warm_all_messages(language: str) -> int:
 
 def warm_known_languages() -> None:
     """
-    Top up every language already cached on disk. Run at startup, off the
-    main thread: a deploy that adds new messages would otherwise leave
-    them untranslated until a user happened to trigger each one. Languages
-    with nothing missing cost nothing.
+    Top up every offered language, and any already cached on disk. Run at
+    startup, off the main thread: a deploy that adds new messages would
+    otherwise leave them untranslated until a user happened to trigger each
+    one. Languages with nothing missing cost nothing.
+
+    A cache file for a language no longer offered is skipped rather than
+    maintained -- otherwise dropping a language from the picker would
+    leave the bot paying to keep translating into it forever. The file is
+    left on disk, so re-adding the language picks up where it left off.
     """
-    for lang in _known_languages():
+    offered = {lang.lower() for lang in language.SUPPORTED_LANGUAGES}
+    candidates = list(language.SUPPORTED_LANGUAGES) + [
+        lang for lang in _known_languages() if lang.lower() in offered
+    ]
+    for lang in dict.fromkeys(candidates):
         try:
             warm_all_messages(lang)
         except Exception:

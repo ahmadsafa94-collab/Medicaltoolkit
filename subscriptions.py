@@ -25,6 +25,7 @@ Design notes:
 """
 
 import json
+import language
 import logging
 import os
 import time
@@ -336,7 +337,10 @@ def set_language(user_id: int, language: str) -> None:
 
 
 def get_language(user_id: int) -> str:
-    return _load(user_id).get("language", "English")
+    # Normalized on read so a language later dropped from the offered list
+    # resolves to English everywhere at once -- every AI prompt, every
+    # translated label -- without a migration over stored records.
+    return language.normalize(_load(user_id).get("language"))
 
 
 # ---------------------------------------------------------------------------
