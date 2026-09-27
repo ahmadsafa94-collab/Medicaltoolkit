@@ -33,6 +33,7 @@ SUPPORTED_LANGUAGES = [
     "Urdu",
     "Hindi",
     "Indonesian",
+    "Persian",
 ]
 
 

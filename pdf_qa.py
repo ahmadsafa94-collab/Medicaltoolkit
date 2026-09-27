@@ -241,6 +241,49 @@ def _search_query_text(question: str, history: list[dict]) -> str:
 QA_CONTEXTUAL_TOP_K = 4  # extra history-aware matches folded in on top of the plain-question search
 
 
+async def translate_question_for_search(question: str, language: str) -> str:
+    """
+    Translate a non-English question into English for retrieval.
+
+    The index is built from the book's own text, which is English, so a
+    question asked in another script embeds nowhere near the passage that
+    answers it -- a Persian question against an English textbook retrieves
+    essentially at random without this step. Claude translates the question
+    first and the SEARCH runs on that; the answer is still generated in the
+    user's own language, since answer_question passes `language` through to
+    the answering prompt separately.
+
+    Falls back to the original question on any failure: a translation
+    outage should degrade retrieval quality, never take down Q&A entirely.
+    """
+    try:
+        response = await asyncio.to_thread(
+            claude_client.messages.create,
+            model=CLAUDE_MODEL,
+            max_tokens=300,
+            system=(
+                "Translate the user's question into English. It will be used as a search query over an "
+                "English-language medical textbook, so accuracy of the medical terminology matters more "
+                "than natural phrasing: use the standard English clinical term for each concept. Keep "
+                "every number (page numbers, doses, lab values) exactly as given, rewriting non-ASCII "
+                "digits as ordinary 0-9. If the text is already English, return it unchanged. Output "
+                "ONLY the translated question -- no preamble, no explanation, no quotation marks."
+            ),
+            messages=[{"role": "user", "content": question}],
+        )
+    except Exception:
+        logger.exception("Question translation failed (non-fatal, searching with the original text)")
+        return question
+
+    try:
+        cost_ledger.record_claude_response("question_translation", response)
+    except Exception:
+        logger.exception("Cost ledger logging failed (non-fatal)")
+
+    translated = "".join(block.text for block in response.content if block.type == "text").strip()
+    return translated or question
+
+
 _PAGE_REF_RE = re.compile(r"\b(?:page|pages|pg\.?|p\.)\s*#?\s*(\d{1,4})\b", re.IGNORECASE)
 MAX_EXPLICIT_PAGES = 3            # cap how many distinct named pages get force-included
 MAX_CHUNKS_PER_EXPLICIT_PAGE = 3  # a long page can be split into several chunks; cap per page
@@ -312,11 +355,21 @@ async def answer_question(
 
     history = (history or [])[-MAX_HISTORY_TURNS:]
 
+    # RETRIEVAL runs on an English rendering of the question, since the
+    # index holds the book's own English text -- see
+    # translate_question_for_search. Everything below therefore searches
+    # with search_question while the ANSWER is still produced in the user's
+    # own language further down, from the untouched original `question`.
+    # For an English user the two are the same string and nothing changes.
+    search_question = question
+    if language and language.strip().lower() != "english":
+        search_question = await translate_question_for_search(question, language)
+
     # Always search on the plain question first -- this is the primary
     # signal and must never be diluted, since a self-contained follow-up
     # ("explain the techniques from the text") needs to match on its own
     # words exactly as well as it would as a fresh, first question.
-    matches = await search_index(meta, vectors, question)
+    matches = await search_index(meta, vectors, search_question)
     if history:
         # Additionally search with recent questions folded in, purely to
         # ADD candidates that help a pronoun-heavy follow-up ("what about
@@ -325,12 +378,16 @@ async def answer_question(
         # which previously caused history text to dilute self-contained
         # follow-ups enough to miss the exact chunk a plain search finds.
         contextual = await search_index(
-            meta, vectors, _search_query_text(question, history), top_k=QA_CONTEXTUAL_TOP_K
+            meta, vectors, _search_query_text(search_question, history), top_k=QA_CONTEXTUAL_TOP_K
         )
         seen = {m["text"] for m in matches}
         matches += [m for m in contextual if m["text"] not in seen]
 
-    forced = _force_include_pages(meta, _explicit_page_numbers(question))
+    # Page numbers are read off the TRANSLATED question: the translation
+    # prompt rewrites non-ASCII digits as 0-9 and "صفحه ۱۱۰" comes back as
+    # "page 110", so a named page works in any script without this regex
+    # having to know about every numeral system.
+    forced = _force_include_pages(meta, _explicit_page_numbers(search_question))
     # Named pages go first, then the semantic matches; de-dupe identical
     # chunk text so a page that was ALSO found semantically isn't repeated.
     seen_texts = set()

@@ -134,7 +134,12 @@ async def handle_book_question(message: Message, state: FSMContext):
     status_msg = await message.answer("Searching the book...")
 
     try:
-        result = await asyncio.wait_for(pdf_qa.answer_question(book_id, question), timeout=_QA_ANSWER_TIMEOUT_SECONDS)
+        result = await asyncio.wait_for(
+            pdf_qa.answer_question(
+                book_id, question, language=subscriptions.get_language(message.from_user.id)
+            ),
+            timeout=_QA_ANSWER_TIMEOUT_SECONDS,
+        )
     except asyncio.TimeoutError:
         await status_msg.edit_text("That took too long. Please try again.")
         return

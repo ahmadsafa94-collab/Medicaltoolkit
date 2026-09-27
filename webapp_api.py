@@ -741,7 +741,10 @@ async def ask_book(request: Request):
 
     try:
         result = await asyncio.wait_for(
-            pdf_qa.answer_question(book_id, question, history=history), timeout=ASK_TIMEOUT_SECONDS
+            pdf_qa.answer_question(
+                book_id, question, history=history, language=subscriptions.get_language(user["id"])
+            ),
+            timeout=ASK_TIMEOUT_SECONDS,
         )
     except asyncio.TimeoutError:
         raise ApiError(status_code=504, detail="That took too long. Please try again.")
