@@ -60,40 +60,42 @@ _DISCLAIMER = (
     "patient, use it only alongside -- never instead of -- clinical judgment and a qualified reviewer."
 )
 
-# How to get the rate right. Reported wrong by a user, and the cause was
-# that the draft prompt asked for "Rate: <value or estimate>" and left the
-# method entirely to the model -- which means eyeballing a millimetre grid,
-# something vision models are unreliable at without being told exactly what
-# to do. Two things fix it: nearly every real 12-lead PRINTS the
-# machine-computed rate in its header, which is derived from the digital
-# signal and is far more trustworthy than any measurement off a photo; and
-# when it isn't printed, an explicit counting method beats an impression.
-# The sanity check is there because the classic failure is being out by a
-# factor of two or more (counting every other R wave, or misreading the
-# paper speed), which a glance at the R-R spacing catches.
+# Every value is measured from the WAVEFORM, never read off the machine's
+# printout. A study tool that transcribes the header isn't interpreting the
+# ECG -- it's copying someone else's answer, teaches the student nothing,
+# and inherits the machine's own errors (automated readings are routinely
+# wrong on axis, on QT, and on any rhythm that isn't plain sinus). So the
+# printed measurements and the machine's interpretation line are explicitly
+# off limits, and the methods below are what produce the numbers. The
+# calibration markers are the one exception and are not a result: they are
+# the scale of the graph, and without them no measurement means anything.
+# The sanity check is here because the classic failure is being out by a
+# clean factor (counting every other R wave, or misreading paper speed),
+# which a glance at R-R spacing catches.
 _MEASUREMENT_METHOD_INSTRUCTION = (
-    "MEASURED VALUES -- rate, intervals and axis are the lines most often gotten wrong. Work through "
-    "them in this order:\n\n"
-    "READ THE PRINTED HEADER FIRST. Nearly every 12-lead prints its machine-computed measurements "
-    "along the top or side -- typically rate ('Rate', 'HR', 'Vent. rate'), 'PR', 'QRS'/'QRSD', "
-    "'QT/QTc', and the 'P-QRS-T axes'. Anything printed there was computed from the digital signal "
-    "and is more reliable than measuring off a photograph: read it and use it. Only measure by hand "
-    "what is NOT printed. If the printed paper speed is not the standard 25 mm/s (e.g. 50 mm/s), or "
-    "gain is not 10 mm/mV, scale accordingly and say so.\n\n"
-    "RATE (if not printed): at 25 mm/s one large (5 mm) box is 0.20 s, so rate = 300 / (large boxes "
-    "between two consecutive R waves), or 1500 / (small 1 mm boxes). Use several consecutive R-R "
-    "intervals, not one. If the rhythm is IRREGULAR, box-counting between one pair of beats is wrong: "
-    "count the QRS complexes across the full 10-second recording, multiply by 6, and report it as an "
-    "average.\n\n"
-    "INTERVALS (each, if not printed): at 25 mm/s one small box = 0.04 s (40 ms), one large box = "
-    "0.20 s (200 ms). Measure in the lead where the onset and offset are clearest, then confirm in a "
-    "second lead.\n"
+    "MEASURED VALUES -- derive every one of these from the waveform yourself.\n\n"
+    "IGNORE ANYTHING THE MACHINE PRINTED. Most ECGs print computed values along the top or side "
+    "(rate/HR/'Vent. rate', PR, QRS/QRSD, QT/QTc, the P-QRS-T axes) and often a machine "
+    "interpretation line as well. Do NOT read, use, quote or be influenced by any of them, and do "
+    "not mention that they exist. They are frequently wrong -- especially for axis, QT, and any "
+    "rhythm other than plain sinus -- and the point of this exercise is to measure the tracing, not "
+    "to copy a printout. Every number you give must come from your own measurement of the waveform.\n"
+    "The ONE thing you may read from the page is the CALIBRATION: paper speed (standard 25 mm/s) and "
+    "gain (standard 10 mm/mV), plus the calibration pulse if shown. Those are the scale of the grid, "
+    "not a result. If the speed or gain is non-standard, scale your measurements accordingly and say "
+    "so; if calibration isn't visible, assume 25 mm/s and 10 mm/mV and state that assumption.\n\n"
+    "RATE: at 25 mm/s one large (5 mm) box is 0.20 s, so rate = 300 / (large boxes between two "
+    "consecutive R waves), or 1500 / (small 1 mm boxes). Use several consecutive R-R intervals, not "
+    "one. If the rhythm is IRREGULAR, box-counting between one pair of beats is wrong: count the QRS "
+    "complexes across the full 10-second recording, multiply by 6, and report it as an average.\n\n"
+    "INTERVALS: at 25 mm/s one small box = 0.04 s (40 ms), one large box = 0.20 s (200 ms). Measure "
+    "in the lead where the onset and offset are clearest, then confirm in a second lead.\n"
     "- PR: start of P to start of QRS. Normal 120-200 ms (3-5 small boxes).\n"
     "- QRS: onset to offset of QRS. Normal under 120 ms (under 3 small boxes).\n"
     "- QT: start of QRS to the end of T, read where the T-wave end is clearest (often II or V5). "
     "Correct for rate using Bazett: QTc = QT / sqrt(RR in seconds). Give QTc whenever a rate is "
     "determinable, and say which you are quoting.\n\n"
-    "AXIS (if not printed): use the quadrant method on the NET deflection (positive minus negative "
+    "AXIS: use the quadrant method on the NET deflection (positive minus negative "
     "area) of leads I and aVF, judging the whole complex rather than the tallest spike:\n"
     "- I positive, aVF positive -> normal axis\n"
     "- I positive, aVF negative -> left axis deviation (confirm with II: also negative supports it)\n"
@@ -108,7 +110,9 @@ _MEASUREMENT_METHOD_INSTRUCTION = (
     "normal must have both I and aVF upright. If a value contradicts what the tracing looks like, "
     "you have likely misread the paper speed, the calibration or the lead -- redo it rather than "
     "reporting it. State each value as a number, or say plainly that it cannot be measured from this "
-    "image; never guess."
+    "image; never guess.\n\n"
+    "Report each value plainly, as your own measurement. Do not annotate it with where it came from "
+    "-- no '(printed)', '(printed header)', '(from the machine)' or similar."
 )
 
 # Retrieved alongside the tracing's own findings so the books' METHOD for
@@ -223,13 +227,13 @@ def interpret_ecg(image_bytes: bytes, media_type: str, language: str = "English"
         # Called out separately from the general re-check above because
         # these are the lines users report as wrong, and a verify pass reads
         # much more like a rubber stamp when it is only told to "check".
-        "Derive the RATE, the INTERVALS and the AXIS yourself from the image FIRST, before reading "
-        "what the draft said about them, then compare. Work through this:\n"
+        "Measure the RATE, the INTERVALS and the AXIS off the waveform yourself FIRST, before "
+        "reading what the draft said about them, then compare. Work through this:\n"
         f"{_MEASUREMENT_METHOD_INSTRUCTION}\n"
         "Where your value and the draft's disagree, do not split the difference and do not defer to "
-        "the draft: a value printed on the tracing itself wins outright, and otherwise take the one "
-        "that matches what the image actually shows. If the draft quoted a value the image does not "
-        "support, replace it.",
+        "the draft: re-measure that one value and take whichever matches the waveform. If the draft "
+        "quoted a value the tracing does not support -- or one that looks copied from the machine's "
+        "printout rather than measured -- replace it with your own measurement.",
     ]
     if reference_block:
         instructions.append(
