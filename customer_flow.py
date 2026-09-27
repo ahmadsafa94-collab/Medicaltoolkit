@@ -484,14 +484,24 @@ async def handle_history(callback: CallbackQuery):
     await callback.message.answer("\n".join(lines), parse_mode="Markdown")
 
 
-@router.callback_query(F.data == "plan:language")
-async def handle_language_prompt(callback: CallbackQuery):
-    await callback.answer()
-    await callback.message.answer(
+async def _prompt_language(answer_fn):
+    """Shared by the 🌐 Language main-menu button (bot.py) and the legacy plan:language callback below."""
+    await answer_fn(
         "🌐 Pick the language AI-generated content (summaries, quizzes, Ask-AI, ECG/lab interpretation) "
         "should be written in:",
         reply_markup=language.language_picker_kb(),
     )
+
+
+@router.callback_query(F.data == "plan:language")
+async def handle_language_prompt(callback: CallbackQuery):
+    """
+    Kept after 🌐 Language moved to the main menu: My Plan messages already
+    sent carry this button, and an unhandled callback just spins and dies
+    with no feedback at all. New My Plan panels no longer offer it.
+    """
+    await callback.answer()
+    await _prompt_language(callback.message.answer)
 
 
 @router.callback_query(F.data.startswith("lang:set:"))

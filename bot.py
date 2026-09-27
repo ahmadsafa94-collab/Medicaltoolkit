@@ -66,6 +66,7 @@ from keyboards import (
     clinical_tools_kb,
     BTN_SHELF,
     BTN_MY_PLAN,
+    BTN_LANGUAGE,
     BTN_STUDY_TOOLS,
     BTN_CLINICAL_TOOLS,
     BTN_ADMIN,
@@ -306,6 +307,11 @@ async def cmd_help(message: Message):
 @dp.message(F.text == BTN_MY_PLAN)
 async def btn_my_plan(message: Message):
     await customer_flow._show_plan(message.answer, message.from_user.id)
+
+
+@dp.message(F.text == BTN_LANGUAGE)
+async def btn_language(message: Message):
+    await customer_flow._prompt_language(message.answer)
 
 
 @dp.message(F.text == BTN_CLINICAL_TOOLS)

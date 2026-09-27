@@ -15,6 +15,7 @@ BTN_SHELF = "📚 BOOK SHELF"
 BTN_CLINICAL_TOOLS = "🩺 Clinical Tools"
 BTN_STUDY_TOOLS = "🧠 Study Tools"
 BTN_MY_PLAN = "⭐ My Plan"
+BTN_LANGUAGE = "🌐 Language"
 BTN_ADMIN = "🛠 Admin Panel"
 BTN_FEEDBACK = "🐞 Report a problem / Give Feedback"
 BTN_SUPPORT = "🆘 Support"
@@ -40,7 +41,11 @@ def main_menu_kb(webapp_url: str = "", is_admin: bool = False) -> ReplyKeyboardM
     row -- the closest a plain-text ReplyKeyboardMarkup button (no bold/size
     control in the Bot API) can get to looking "big" is a full-width row of
     its own with no sibling button splitting it, plus the all-caps label.
-    BTN_MY_PLAN opens the customer subscription panel (customer_flow.py).
+    BTN_MY_PLAN opens the customer subscription panel (customer_flow.py), and
+    BTN_LANGUAGE sits beside it -- the language of AI-generated content is a
+    per-user setting like the plan itself, and it lives out here rather than
+    buried inside My Plan because it's the one setting a non-English user
+    needs to find BEFORE anything else makes sense to them.
     BTN_ADMIN only appears for Telegram user ids in config.ADMIN_USER_IDS
     (admin_flow.py) -- and for those same ids, subscriptions.is_premium()
     always returns True, so nothing under either submenu is ever
@@ -71,7 +76,8 @@ def main_menu_kb(webapp_url: str = "", is_admin: bool = False) -> ReplyKeyboardM
     if webapp_url:
         rows.append([KeyboardButton(text=BTN_SHELF)])
     rows.append([KeyboardButton(text=BTN_CLINICAL_TOOLS), KeyboardButton(text=BTN_STUDY_TOOLS)])
-    rows.append([KeyboardButton(text=BTN_MY_PLAN), KeyboardButton(text=BTN_SUPPORT)])
+    rows.append([KeyboardButton(text=BTN_MY_PLAN), KeyboardButton(text=BTN_LANGUAGE)])
+    rows.append([KeyboardButton(text=BTN_SUPPORT)])
     rows.append([KeyboardButton(text=BTN_FEEDBACK)])
     if is_admin:
         rows.append([KeyboardButton(text=BTN_ADMIN)])
@@ -354,9 +360,12 @@ def my_plan_kb(is_premium: bool, plans: list[dict]) -> InlineKeyboardMarkup:
                 ]
             )
         rows.append([InlineKeyboardButton(text="💳 Pay another way", callback_data="plan:contact_admin")])
+    # Language deliberately absent: it moved out to BTN_LANGUAGE on the main
+    # menu. customer_flow still handles the old "plan:language" callback, so
+    # the button in any My Plan message already sitting in a user's chat
+    # history keeps working instead of going silently dead.
     rows.append([InlineKeyboardButton(text="🤝 Affiliate Program", callback_data="plan:referral")])
     rows.append([InlineKeyboardButton(text="🧾 Payment history", callback_data="plan:history")])
-    rows.append([InlineKeyboardButton(text="🌐 Language", callback_data="plan:language")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
