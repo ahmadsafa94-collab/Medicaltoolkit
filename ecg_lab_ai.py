@@ -325,12 +325,37 @@ def _output_budget(language: str) -> int:
     ceiling likelier to bite, and the six lines this produces are short, so
     the headroom costs little and only gets billed when it is used --
     output tokens are charged on what is generated, not on the budget.
+
+    Raised once more, and by more than looks necessary, after a verify pass
+    spent an entire 3000-token ceiling and emitted exactly one line of
+    text. Six short lines do not cost 3000 tokens, so those tokens went
+    into blocks that are not text and never reach the reader; whatever the
+    ceiling is, it has to leave room for that on top of the visible answer.
+    _pick_read is the backstop for when it still is not enough, and
+    _call_claude_meta logs the block types so the next occurrence says
+    outright where the budget went.
     """
-    return 3000 if language.strip().lower() == "english" else 5000
+    return 6000 if language.strip().lower() == "english" else 8000
 
 
 def _call_claude(feature: str, system_prompt: str, content, max_tokens: int = 1200) -> str:
-    """Shared single-Claude-call plumbing (client call + cost logging + text extraction) for every pass below."""
+    """Just the text -- for callers that have no second pass to fall back on."""
+    return _call_claude_meta(feature, system_prompt, content, max_tokens)[0]
+
+
+def _call_claude_meta(feature: str, system_prompt: str, content, max_tokens: int = 1200) -> tuple[str, bool]:
+    """
+    (text, was_truncated) -- shared single-Claude-call plumbing (client call
+    + cost logging + text extraction) for every pass below.
+
+    Truncation is returned, not just logged, because a caller with two
+    passes has to be able to act on it. A verify pass that stopped after
+    "Rate: approximately 95" is not a better read than a complete draft,
+    but it is longer than nothing, so a plain `verified or draft` picks it
+    and shows the user a one-line interpretation -- which is exactly what
+    happened, with the QTc line underneath quoting a different rate because
+    the marker had fallen back to the draft.
+    """
     try:
         response = client.messages.create(
             model=CLAUDE_MODEL,
@@ -347,15 +372,25 @@ def _call_claude(feature: str, system_prompt: str, content, max_tokens: int = 12
         logger.exception("Cost ledger logging failed (non-fatal)")
 
     text = "".join(block.text for block in response.content if block.type == "text").strip()
-    if getattr(response, "stop_reason", None) == "max_tokens":
+    truncated = getattr(response, "stop_reason", None) == "max_tokens"
+    if truncated:
         # Truncation is silent from the reader's side: the answer just
         # stops, mid-sentence, with the last lines missing but everything
         # above them looking right. Log it loudly so a budget that has
         # become too small shows up here instead of in a bug report.
+        #
+        # The block types are logged too, because they answer the question
+        # this raises: a pass that burns thousands of tokens and emits one
+        # line of text spent them somewhere, and a non-text block in this
+        # list is where.
         logger.error(
-            "%s hit its token limit (%s tokens) and was TRUNCATED -- raise _output_budget",
+            "%s hit its token limit and was TRUNCATED at %s output tokens (max_tokens=%s, "
+            "block types=%s, text length=%d) -- raise _output_budget",
             feature,
             getattr(getattr(response, "usage", None), "output_tokens", "?"),
+            max_tokens,
+            [getattr(b, "type", "?") for b in response.content],
+            len(text),
         )
     if not text:
         # A pass that comes back with no text at all used to vanish silently:
@@ -371,7 +406,55 @@ def _call_claude(feature: str, system_prompt: str, content, max_tokens: int = 12
             [getattr(b, "type", "?") for b in response.content],
             getattr(getattr(response, "usage", None), "output_tokens", "?"),
         )
-    return text
+    return text, truncated
+
+
+# Below this fraction of the draft's length, a verify pass is treated as
+# stunted rather than concise. A real verify pass rewrites the same six
+# lines, so it lands near the draft's length; a third of it means it
+# stopped early. Deliberately not a check for the six line labels, which
+# are translated into the user's language and so cannot be matched on.
+_STUNTED_RATIO = 0.5
+
+
+def _pick_read(verified: str, verified_truncated: bool, draft: str, draft_truncated: bool) -> tuple[str, bool]:
+    """
+    (final text, came_from_verify) -- which of the two passes to actually show.
+
+    The verify pass wins by default: that is the whole point of running it.
+    It loses only when it is visibly incomplete next to the draft, because
+    a truncated verify is not a corrected read, it is the first line of
+    one. `verified or draft` used to make this choice on emptiness alone,
+    so a verify pass that died after its first line beat a complete draft
+    and the user was shown a one-line ECG interpretation.
+    """
+    if not verified.strip():
+        return draft, False
+    if not draft.strip():
+        return verified, True
+
+    # Both truncated: nothing is complete, so take whichever got further.
+    if verified_truncated and draft_truncated:
+        return (verified, True) if len(verified) >= len(draft) else (draft, False)
+
+    stunted = len(verified) < _STUNTED_RATIO * len(draft)
+    if verified_truncated and stunted:
+        logger.error(
+            "Verify pass was truncated to %d chars against a %d-char draft -- showing the draft instead",
+            len(verified), len(draft),
+        )
+        return draft, False
+    if stunted:
+        # No truncation flag, but the length says otherwise. Worth honouring:
+        # the flag depends on the API reporting a stop_reason we recognise,
+        # and being wrong here costs the user most of their read.
+        logger.error(
+            "Verify pass returned %d chars against a %d-char draft without a truncation flag "
+            "-- showing the draft instead",
+            len(verified), len(draft),
+        )
+        return draft, False
+    return verified, True
 
 
 def _require_text(verified: str, draft: str, what: str, hint: str = "") -> str:
@@ -567,7 +650,7 @@ def interpret_ecg(image_bytes: bytes, media_type: str, language: str = "English"
     # Both passes get the same, language-aware budget (see _output_budget):
     # a read truncated mid-structure is worse than a slightly costlier one,
     # and the VERIFY pass is the one the user actually sees.
-    draft = _call_claude(
+    draft, draft_truncated = _call_claude_meta(
         "ecg_interpretation",
         _ecg_draft_prompt(language, views_note),
         [*image_content, {"type": "text", "text": DRAFT_REQUEST_TEXT}],
@@ -575,7 +658,7 @@ def interpret_ecg(image_bytes: bytes, media_type: str, language: str = "English"
     )
     if not draft and magnified:
         image_content, magnified, views_note = _single_view_fallback(image_bytes, media_type)
-        draft = _call_claude(
+        draft, draft_truncated = _call_claude_meta(
             "ecg_interpretation",
             _ecg_draft_prompt(language, views_note),
             [*image_content, {"type": "text", "text": DRAFT_REQUEST_TEXT}],
@@ -590,7 +673,7 @@ def interpret_ecg(image_bytes: bytes, media_type: str, language: str = "English"
     # verify prompt below is exactly what it was before -- see ecg_reference.py.
     reference_block, reference_hits = ecg_reference.build_reference([draft, *_METHOD_QUERIES])
 
-    verified = _call_claude(
+    verified, verified_truncated = _call_claude_meta(
         "ecg_interpretation_verify",
         _ecg_verify_prompt(language, draft, reference_block, magnified),
         [*image_content, {"type": "text", "text": VERIFY_REQUEST_TEXT}],
@@ -609,7 +692,7 @@ def interpret_ecg(image_bytes: bytes, media_type: str, language: str = "English"
         # text the reader actually gets, and losing it silently means
         # losing the second look at the checklist.
         image_content, magnified, views_note = _single_view_fallback(image_bytes, media_type)
-        verified = _call_claude(
+        verified, verified_truncated = _call_claude_meta(
             "ecg_interpretation_verify",
             _ecg_verify_prompt(language, draft, reference_block, magnified),
             [*image_content, {"type": "text", "text": VERIFY_REQUEST_TEXT}],
@@ -623,8 +706,18 @@ def interpret_ecg(image_bytes: bytes, media_type: str, language: str = "English"
     # "no sources" line -- there is nothing to cite, and saying so every
     # time would just be noise on an otherwise unchanged read.
     sources = ecg_reference.format_sources(reference_hits)
+
+    # Which pass to show, and therefore which pass's measurements to trust
+    # -- the two have to be the same one. They were not: the text came from
+    # `verified or draft` while the QTc marker came from
+    # parse_marker(verified) or parse_marker(draft), so a verify pass that
+    # truncated before writing its marker put the draft's rate under the
+    # verify pass's text and printed two different rates in one read.
+    final, from_verify = _pick_read(verified, verified_truncated, draft, draft_truncated)
+    primary, secondary = (verified, draft) if from_verify else (draft, verified)
+
     interpretation = _require_text(
-        verified,
+        final,
         draft,
         "ECG interpretation",
         # Both passes came back empty, including the single-image retry, so
@@ -636,11 +729,11 @@ def interpret_ecg(image_bytes: bytes, media_type: str, language: str = "English"
     )
 
     # QTc is computed here, from the QT and rate the model measured, rather
-    # than by the model -- see ecg_qtc. The marker is taken from the verify
-    # pass where present (its measurements are the final ones), falling
-    # back to the draft's, and is always stripped so it never reaches the
-    # reader whether or not it parsed.
-    measurements = ecg_qtc.parse_marker(verified) or ecg_qtc.parse_marker(draft)
+    # than by the model -- see ecg_qtc. The marker comes from whichever pass
+    # supplied the text above, so the QT and rate under the read are the
+    # ones that read was written from; the other pass is only a fallback for
+    # when the chosen one never emitted a marker at all.
+    measurements = ecg_qtc.parse_marker(primary) or ecg_qtc.parse_marker(secondary)
     interpretation = ecg_qtc.strip_marker(interpretation)
     if measurements:
         # Drop any QTc the model wrote anyway, so the computed one below is
