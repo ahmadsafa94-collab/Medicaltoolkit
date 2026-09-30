@@ -47,6 +47,7 @@ import logging
 import cost_ledger
 import ecg_qtc
 import ecg_reference
+import ecg_tiles
 import glossary
 import ui_text
 from config import CLAUDE_MODEL
@@ -246,6 +247,60 @@ def _image_block(image_bytes: bytes, media_type: str) -> dict:
     }
 
 
+# Sent with the magnified views so the model knows what it is looking at.
+# Without it the obvious failure mode is treating five pictures of one
+# tracing as five tracings -- reporting the same finding four times, or
+# "comparing" quadrants as if they were serial ECGs.
+#
+# The last paragraph is the other half of the fix. With the pattern
+# checklist in place the model stopped skipping RBBB and started asserting
+# its absence instead ("no rSR' pattern in V1-V2") from a view where the
+# deflection is a handful of pixels wide. A confident wrong negative is
+# worse than an admitted limit, so an unresolvable feature has to be
+# reported as unresolvable.
+_MAGNIFIED_VIEWS_INSTRUCTION = (
+    "YOU ARE BEING SHOWN THE SAME TRACING SEVERAL TIMES. The first image is the complete sheet. "
+    "The images after it are overlapping MAGNIFIED QUADRANTS of that same sheet, each labelled "
+    "immediately above it. They are not different ECGs, not different patients and not serial "
+    "tracings: do not compare them against each other, and do not report a finding twice because it "
+    "appears in two overlapping views.\n"
+    "Use them for different jobs. The complete sheet is for the layout -- which lead sits where, the "
+    "rhythm strip, the calibration pulse, and the R-R spacing you count the rate from. The magnified "
+    "quadrants are where you actually READ the waveform: QRS width, the shape of the terminal part of "
+    "the QRS, notches, small Q waves, P-wave morphology, ST J-point deviation, T-wave polarity. Fine "
+    "detail is several times larger there, and a feature one small box wide (40 ms) is close to "
+    "invisible on the full sheet while being plainly legible in a quadrant.\n"
+    "So before you state that any fine-grained feature is ABSENT, go to the quadrant that magnifies "
+    "the lead in question and look there. This matters most for: the terminal portion of the QRS in "
+    "V1 and V2 (a second, late positive deflection there is right bundle branch block), an S wave in "
+    "I and aVL, a Q wave in III, and the true width of the widest QRS on the sheet. 'No rSR\' in V1' "
+    "asserted from the full-sheet view alone is not a finding -- at that scale the deflection is a "
+    "few pixels wide and absence cannot be established from it.\n"
+    "If, having looked at the magnified view, you still genuinely cannot resolve a feature, say that "
+    "it cannot be resolved on this image rather than reporting it as normal or absent. An honest "
+    "'cannot be assessed on this tracing' is useful to a student; a confident 'normal' that is wrong "
+    "teaches them the wrong thing."
+)
+
+
+def _ecg_image_content(image_bytes: bytes, media_type: str) -> tuple[list[dict], bool]:
+    """
+    (content blocks for one pass, whether magnified views were built).
+
+    Each quadrant is preceded by its own text label so the model can tell
+    the views apart; on the fallback path this is byte-for-byte the single
+    image block it always was.
+    """
+    views = ecg_tiles.build_views(image_bytes)
+    if not views:
+        return [_image_block(image_bytes, media_type)], False
+    blocks: list[dict] = []
+    for label, data, view_media_type in views:
+        blocks.append({"type": "text", "text": f"[{label}]"})
+        blocks.append(_image_block(data, view_media_type))
+    return blocks, True
+
+
 def _output_budget(language: str) -> int:
     """
     Token budget for one interpretation pass.
@@ -331,6 +386,12 @@ def interpret_ecg(image_bytes: bytes, media_type: str, language: str = "English"
     Two Claude calls: a draft read, then an independent verify pass over the
     same image (see module docstring) before the disclaimer is appended.
     """
+    # Built once and reused by both passes: cropping is cheap but not free,
+    # and the verify pass must see exactly the same views as the draft or it
+    # cannot check the draft's claims about them.
+    image_content, magnified = _ecg_image_content(image_bytes, media_type)
+    views_note = f"{_MAGNIFIED_VIEWS_INSTRUCTION}\n\n" if magnified else ""
+
     draft_system_prompt = (
         "You are helping a medical student practice ECG interpretation as a STUDY EXERCISE, not a clinical "
         "read for patient care. Look at the ECG image and describe what it shows using ALWAYS this exact "
@@ -347,6 +408,7 @@ def interpret_ecg(image_bytes: bytes, media_type: str, language: str = "English"
         "intervals' or 'ST elevation pattern in the anterior leads, commonly associated with anterior wall "
         "ischemia/infarction as a category' -- NEVER state or imply this specific image IS a diagnosis like "
         "'this is a STEMI' or 'this patient has X'.>\n\n"
+        f"{views_note}"
         f"{_MEASUREMENT_METHOD_INSTRUCTION}\n\n"
         f"{_PATTERN_CHECKLIST}\n\n"
         "Do the measuring silently. Output ONLY the six lines above -- no working, no box counts, no "
@@ -379,7 +441,7 @@ def interpret_ecg(image_bytes: bytes, media_type: str, language: str = "English"
         "ecg_interpretation",
         draft_system_prompt,
         [
-            _image_block(image_bytes, media_type),
+            *image_content,
             {"type": "text", "text": "Interpret this ECG tracing for study purposes."},
         ],
         max_tokens=_output_budget(language),
@@ -393,7 +455,10 @@ def interpret_ecg(image_bytes: bytes, media_type: str, language: str = "English"
     # verify prompt below is exactly what it was before -- see ecg_reference.py.
     reference_block, reference_hits = ecg_reference.build_reference([draft, *_METHOD_QUERIES])
 
-    instructions = [
+    instructions = []
+    if magnified:
+        instructions.append(_MAGNIFIED_VIEWS_INSTRUCTION)
+    instructions += [
         "Re-examine the image yourself and check the draft's Rate/Rhythm/Axis/Intervals/Notable morphology/"
         "Overall impression against what the image actually shows. Correct anything wrong; keep anything "
         "already correct.",
@@ -464,8 +529,14 @@ def interpret_ecg(image_bytes: bytes, media_type: str, language: str = "English"
         "ecg_interpretation_verify",
         verify_system_prompt,
         [
-            _image_block(image_bytes, media_type),
-            {"type": "text", "text": "Here is the same ECG image again. Verify/correct the draft per your instructions."},
+            *image_content,
+            {
+                "type": "text",
+                "text": (
+                    "Here is the same ECG again, in the same views the draft was written from. "
+                    "Verify/correct the draft per your instructions."
+                ),
+            },
         ],
         max_tokens=_output_budget(language),
     )

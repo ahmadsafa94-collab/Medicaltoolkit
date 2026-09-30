@@ -57,8 +57,18 @@ async def handle_study_ecg(callback: CallbackQuery, state: FSMContext):
         return
     await state.set_state(EcgLabStates.awaiting_ecg_image)
     await callback.message.answer(
-        "🫀 Send a photo of the ECG (as a photo or an image file). This is for study/pattern-recognition "
-        "practice only, not a diagnosis -- please use a de-identified or practice/textbook tracing."
+        # "Send it as a File" is not a nicety: Telegram re-compresses anything
+        # sent as a photo down to roughly 1280 px on the long edge, and across
+        # a 12-lead sheet that leaves about 6 pixels per small box. Features
+        # that are one small box wide -- the terminal R' of a right bundle
+        # branch block, a small Q in III -- are destroyed before the bot ever
+        # receives them, and no amount of processing on our side brings them
+        # back. Sent as a file the image arrives at full resolution.
+        "🫀 Send the ECG. For the most accurate read, send it as a FILE rather than as a photo: "
+        "Telegram shrinks photos, and fine detail like a bundle-branch pattern or a small Q wave can "
+        "be lost in the compression. A photo still works, just less reliably for fine morphology.\n\n"
+        "This is for study/pattern-recognition practice only, not a diagnosis -- please use a "
+        "de-identified or practice/textbook tracing."
     , reply_markup=cancel_kb())
 
 
