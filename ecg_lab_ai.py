@@ -93,7 +93,14 @@ _MEASUREMENT_METHOD_INSTRUCTION = (
     "INTERVALS: at 25 mm/s one small box = 0.04 s (40 ms), one large box = 0.20 s (200 ms). Measure "
     "in the lead where the onset and offset are clearest, then confirm in a second lead.\n"
     "- PR: start of P to start of QRS. Normal 120-200 ms (3-5 small boxes).\n"
-    "- QRS: onset to offset of QRS. Normal under 120 ms (under 3 small boxes).\n"
+    "- QRS: onset to offset of QRS. Normal under 120 ms (under 3 small boxes). Measure it in the "
+    "WIDEST lead on the tracing, not merely the clearest one -- QRS duration is defined by the "
+    "broadest complex, and a bundle branch block puts its extra width at the END of the complex in "
+    "one region only: the terminal R' of right bundle branch block lives in V1-V2 and can be "
+    "invisible in the limb leads, the slurred terminal S of left bundle branch block in I and "
+    "V5-V6. So scan all twelve leads, find the widest complex, measure from its earliest onset to "
+    "its latest offset, and report THAT number. A QRS measured only in lead II is the classic way a "
+    "bundle branch block gets called narrow and missed.\n"
     "- QT: measure it from the start of QRS to the end of T, in the lead where the T-wave end is "
     "clearest (often II or V5), and report it in ms on the Intervals line.\n"
     "  Do NOT compute QTc yourself and do NOT write a QTc value you worked out -- square roots and "
@@ -125,6 +132,73 @@ _MEASUREMENT_METHOD_INSTRUCTION = (
     "-- no '(printed)', '(printed header)', '(from the machine)' or similar."
 )
 
+# The "Notable morphology" line used to be specified as a short enumerated
+# list -- ST segment, T waves, Q waves, voltage -- and the model answered
+# exactly the question it was asked. A real tracing came back read as a
+# narrow-QRS sinus rhythm with "low limb-lead voltage, no pathologic Q
+# waves, ST at baseline, upright T waves" when it in fact showed right
+# bundle branch block and an S1Q3T3 pattern. Neither was an oversight of
+# vision: RBBB is a QRS-SHAPE finding and S1Q3T3 is a CROSS-LEAD one, and
+# neither category was on the list, so neither was ever looked for.
+#
+# Replacing the list with an open-ended "describe anything notable" does
+# not fix it either -- what counts as notable is exactly what a reader
+# working quickly does not yet know to look at. So the named patterns are
+# enumerated WITH the criteria that define them, and every line is worked
+# through on every read. The cross-lead group is separate because those
+# patterns are invisible to a lead-by-lead sweep: they only exist in the
+# comparison between leads.
+_PATTERN_CHECKLIST = (
+    "NAMED-PATTERN CHECKLIST -- work silently through every line below on this tracing BEFORE you "
+    "write the Notable morphology and Overall impression lines. Most entries will be absent, and "
+    "that is fine: state 'within normal limits' only for the standard categories (QRS shape and "
+    "conduction, ST segment, T waves, Q waves, voltage). Every other pattern here is mentioned ONLY "
+    "when the criteria given for it are actually met -- do not list the ones you ruled out.\n\n"
+    "CONDUCTION AND QRS SHAPE (check this group FIRST: a conduction abnormality changes how the ST "
+    "segments, T waves and axis must be read):\n"
+    "- Right bundle branch block: QRS 120 ms or wider WITH an rSR' / rsR' shape in V1-V2 (a second, "
+    "late positive deflection -- the 'M' or 'rabbit ears' -- where the terminal R' is as tall as or "
+    "taller than the initial r), plus a broad slurred S wave in I, aVL, V5-V6. Incomplete RBBB is "
+    "the same shape at 110-119 ms. Look at V1 deliberately on EVERY tracing: a second positive "
+    "deflection late in the QRS there is right bundle branch block and essentially nothing else.\n"
+    "- Left bundle branch block: QRS 120 ms or wider with a broad, often notched monophasic R in I, "
+    "aVL, V5-V6, a deep wide S or QS in V1-V2, and loss of the septal q in I/V5-V6. Incomplete LBBB "
+    "at 110-119 ms.\n"
+    "- Left anterior fascicular block: left axis deviation past -45 degrees with qR in I/aVL and rS "
+    "in II, III, aVF, QRS under 120 ms. Left posterior fascicular block: right axis deviation with "
+    "rS in I/aVL and qR in II, III, aVF.\n"
+    "- Nonspecific intraventricular conduction delay: QRS 110 ms or wider without either bundle "
+    "branch pattern.\n"
+    "- Pre-excitation (WPW pattern): PR under 120 ms with a slurred delta-wave upstroke and a wide "
+    "QRS.\n"
+    "- AV block: first degree (PR over 200 ms), second degree Mobitz I (progressive PR lengthening "
+    "then a dropped QRS) or Mobitz II (constant PR with a dropped QRS), third degree (P waves and "
+    "QRS complexes entirely independent).\n"
+    "- Paced beats; electrical alternans (QRS amplitude alternating beat to beat).\n\n"
+    "CROSS-LEAD PATTERNS -- these exist only in the comparison BETWEEN leads, so a lead-by-lead "
+    "sweep will not find them. Check each one across the leads named:\n"
+    "- S1Q3T3: a prominent S wave in lead I, a Q wave in lead III, and T-wave inversion in lead III. "
+    "When all three are present, name it. It is a pattern and nothing more -- neither sensitive nor "
+    "specific -- classically discussed in the context of acute right-heart strain.\n"
+    "- Right-heart strain pattern: right axis deviation, new complete or incomplete RBBB, T-wave "
+    "inversion across V1-V4 and sinus tachycardia appearing together.\n"
+    "- Right ventricular hypertrophy: dominant R in V1 with right axis deviation. Left ventricular "
+    "hypertrophy: S in V1 plus R in V5 or V6 over 35 mm, or R in aVL over 11 mm.\n"
+    "- Atrial enlargement from the P wave: over 2.5 mm tall in II (right atrial), or notched and "
+    "over 120 ms in II with a deep terminal negative component in V1 (left atrial).\n"
+    "- Ischemia or infarction BY TERRITORY, named by the leads involved: V1-V4 anterior, I/aVL/"
+    "V5-V6 lateral, II/III/aVF inferior, a tall R with ST depression in V1-V2 posterior. Check the "
+    "opposite territory for reciprocal change.\n"
+    "- Pericarditis pattern (widespread concave ST elevation with PR-segment depression), benign "
+    "early repolarization, Brugada pattern (coved ST elevation with an RBBB-like V1-V2 morphology), "
+    "Wellens pattern (biphasic or deeply inverted T in V2-V3), de Winter pattern, hyperkalemia "
+    "(peaked T waves with a flattened or absent P), hypokalemia (flat T with a U wave), digoxin "
+    "effect, low voltage, poor R-wave progression across V1-V3.\n\n"
+    "Anything on this list that IS present gets named in Notable morphology together with the leads "
+    "that show it, and carried into Overall impression. A pattern found and then left out of the "
+    "impression is the same as never having found it."
+)
+
 # Retrieved alongside the tracing's own findings so the books' METHOD for
 # each measured value is in front of the verify pass, not just passages
 # about whatever pattern this tracing happens to show. Separate queries
@@ -138,6 +212,13 @@ _METHOD_QUERIES = [
     "Bazett formula, normal interval values in milliseconds",
     "determining the QRS axis, quadrant method with leads I and aVF, left axis deviation, "
     "right axis deviation, normal axis range in degrees",
+    # Without this query the books' conduction chapters never reach the
+    # verify pass unless the DRAFT already mentioned a bundle branch block
+    # -- which is precisely the case where the draft is wrong, so the
+    # criteria that would have caught it are the criteria that go missing.
+    "bundle branch block criteria, right bundle branch block rSR prime in V1, left bundle branch "
+    "block, incomplete block, fascicular block, QRS morphology and width, named ECG patterns "
+    "including S1Q3T3 and right heart strain",
 ]
 
 # Shared across both ECG and lab-image verify prompts: the specific
@@ -258,14 +339,16 @@ def interpret_ecg(image_bytes: bytes, media_type: str, language: str = "English"
         "Rhythm: <regular/irregular; P-wave presence and morphology>\n"
         "Axis: <normal / left deviation / right deviation, estimated>\n"
         "Intervals: <PR, QRS, QT -- and QTc if a rate is determinable>\n"
-        "Notable morphology: <ST segment, T waves, Q waves, voltage -- each phrased as 'within normal limits' "
-        "or 'notable, commonly seen in ___', citing the general category of condition, never a specific "
-        "patient diagnosis>\n"
+        "Notable morphology: <QRS shape and conduction, ST segment, T waves, Q waves, voltage, and any "
+        "named pattern from the checklist below -- each phrased as 'within normal limits' or 'notable, "
+        "commonly seen in ___', citing the general category of condition, never a specific patient "
+        "diagnosis>\n"
         "Overall impression: <a plain-language summary of the PATTERN only, e.g. 'sinus rhythm with normal "
         "intervals' or 'ST elevation pattern in the anterior leads, commonly associated with anterior wall "
         "ischemia/infarction as a category' -- NEVER state or imply this specific image IS a diagnosis like "
         "'this is a STEMI' or 'this patient has X'.>\n\n"
         f"{_MEASUREMENT_METHOD_INSTRUCTION}\n\n"
+        f"{_PATTERN_CHECKLIST}\n\n"
         "Do the measuring silently. Output ONLY the six lines above -- no working, no box counts, no "
         "commentary before or after them. Never reply with nothing: if something genuinely cannot be "
         "measured, still emit all six lines and say so on the line it belongs to.\n"
@@ -324,6 +407,19 @@ def interpret_ecg(image_bytes: bytes, media_type: str, language: str = "English"
         "the draft: re-measure that one value and take whichever matches the waveform. If the draft "
         "quoted a value the tracing does not support -- or one that looks copied from the machine's "
         "printout rather than measured -- replace it with your own measurement.",
+        # The draft not mentioning a pattern is not evidence the pattern is
+        # absent -- it is the single most likely thing for a first read to
+        # have skipped. So the checklist is worked through again here from
+        # the image, deliberately without taking the draft's silence as an
+        # answer, which is the only way a missed RBBB or S1Q3T3 gets caught.
+        "Work through the NAMED-PATTERN CHECKLIST yourself, on the image, from the beginning. Do "
+        "NOT treat the draft's silence about a pattern as evidence that the pattern is absent -- an "
+        "omitted finding is the commonest error in a first read, and it looks identical to a "
+        "correctly negative one. Check lead V1 for a late second positive deflection (right bundle "
+        "branch block) and leads I and III together for S1Q3T3 explicitly, every time, whatever the "
+        "draft says. Add to Notable morphology and Overall impression any pattern whose criteria are "
+        "met, and remove any the draft claimed whose criteria are not:\n"
+        f"{_PATTERN_CHECKLIST}",
     ]
     if reference_block:
         instructions.append(
