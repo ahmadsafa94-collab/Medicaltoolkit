@@ -279,7 +279,13 @@ _MAGNIFIED_VIEWS_INSTRUCTION = (
     "If, having looked at the magnified view, you still genuinely cannot resolve a feature, say that "
     "it cannot be resolved on this image rather than reporting it as normal or absent. An honest "
     "'cannot be assessed on this tracing' is useful to a student; a confident 'normal' that is wrong "
-    "teaches them the wrong thing."
+    "teaches them the wrong thing.\n"
+    "One consequence of the magnification: a 12-lead sheet prints a header, and at this scale any "
+    "name, date of birth, record number or hospital detail in it may now be legible where it was not "
+    "on the full sheet. Ignore all of it. Do not read it, do not transcribe it, do not refer to it "
+    "and do not let it influence the read -- you are describing a waveform, and the six lines contain "
+    "no patient details of any kind. This is a study exercise on a tracing the user was asked to "
+    "de-identify; treat the header as if it were blank."
 )
 
 
@@ -312,8 +318,15 @@ def _output_budget(language: str) -> int:
     it cut a Persian ECG off mid-sentence, losing the QTc, the morphology
     line and the overall impression entirely, while looking like a
     complete answer.
+
+    Raised again when the read moved to five magnified views and a much
+    longer prompt (the named-pattern checklist and the views instruction):
+    more to work through before the first line is written makes a tight
+    ceiling likelier to bite, and the six lines this produces are short, so
+    the headroom costs little and only gets billed when it is used --
+    output tokens are charged on what is generated, not on the budget.
     """
-    return 2000 if language.strip().lower() == "english" else 4000
+    return 3000 if language.strip().lower() == "english" else 5000
 
 
 def _call_claude(feature: str, system_prompt: str, content, max_tokens: int = 1200) -> str:
@@ -361,7 +374,7 @@ def _call_claude(feature: str, system_prompt: str, content, max_tokens: int = 12
     return text
 
 
-def _require_text(verified: str, draft: str, what: str) -> str:
+def _require_text(verified: str, draft: str, what: str, hint: str = "") -> str:
     """
     The final interpretation, or a real error if both passes came back
     empty. Without this the caller would happily send a heading, the
@@ -373,26 +386,52 @@ def _require_text(verified: str, draft: str, what: str) -> str:
     text = verified or draft
     if not text.strip():
         raise InterpretationError(
-            f"The AI returned an empty {what}. This is usually temporary -- please try again, "
-            "and if it keeps happening send a clearer photo of the tracing."
+            f"The AI returned an empty {what}. This is usually temporary -- please try again."
+            + (f" {hint}" if hint else "")
         )
     return text
 
 
-def interpret_ecg(image_bytes: bytes, media_type: str, language: str = "English") -> str:
-    """
-    Synchronous -- run via asyncio.to_thread from an async handler.
-    image_bytes: raw bytes of a photographed/scanned ECG tracing.
-    Two Claude calls: a draft read, then an independent verify pass over the
-    same image (see module docstring) before the disclaimer is appended.
-    """
-    # Built once and reused by both passes: cropping is cheap but not free,
-    # and the verify pass must see exactly the same views as the draft or it
-    # cannot check the draft's claims about them.
-    image_content, magnified = _ecg_image_content(image_bytes, media_type)
-    views_note = f"{_MAGNIFIED_VIEWS_INSTRUCTION}\n\n" if magnified else ""
+# The two user-turn texts, named because the retry paths below have to send
+# exactly the same request the first attempt did.
+DRAFT_REQUEST_TEXT = "Interpret this ECG tracing for study purposes."
+VERIFY_REQUEST_TEXT = (
+    "Here is the same ECG again, in the same views the draft was written from. "
+    "Verify/correct the draft per your instructions."
+)
 
-    draft_system_prompt = (
+
+def _single_view_fallback(image_bytes: bytes, media_type: str):
+    """
+    (image_content, magnified, views_note) for one un-magnified image.
+
+    Used when a pass comes back with no text at all. Sending five views of
+    a tracing is a bigger, stranger request than sending one, and a model
+    that returns nothing is most likely objecting to something about the
+    request rather than about the ECG -- so the retry drops back to exactly
+    the request shape that worked before magnification existed, which is
+    both the most likely thing to succeed and a direct test of whether the
+    magnification is what broke it. The log line is the diagnosis: if these
+    retries start appearing, the multi-view request is the cause, and if
+    they do not, it is not.
+    """
+    logger.error(
+        "ECG pass returned no text with magnified views -- retrying with a single full-sheet image. "
+        "If this line is frequent, the multi-view request is the problem, not the tracing."
+    )
+    return [_image_block(image_bytes, media_type)], False, ""
+
+
+def _ecg_draft_prompt(language: str, views_note: str) -> str:
+    """
+    The first-pass prompt. A function rather than an inline string because
+    it has to be buildable twice: if a pass comes back with no text at all,
+    interpret_ecg retries it with a single un-magnified image, and the
+    views_note that describes the magnified quadrants has to come back out
+    of the prompt when the quadrants themselves do -- a prompt that talks
+    about five views while one image is attached is its own bug.
+    """
+    return (
         "You are helping a medical student practice ECG interpretation as a STUDY EXERCISE, not a clinical "
         "read for patient care. Look at the ECG image and describe what it shows using ALWAYS this exact "
         "structure, one line per item:\n"
@@ -434,27 +473,12 @@ def interpret_ecg(image_bytes: bytes, media_type: str, language: str = "English"
         "still readable and does NOT warrant that caveat. If it's truly unreadable, say plainly which parts "
         f"are unreadable instead of guessing at values you can't see. Respond in {language}."
     )
-    # Both passes get the same, language-aware budget (see _output_budget):
-    # a read truncated mid-structure is worse than a slightly costlier one,
-    # and the VERIFY pass is the one the user actually sees.
-    draft = _call_claude(
-        "ecg_interpretation",
-        draft_system_prompt,
-        [
-            *image_content,
-            {"type": "text", "text": "Interpret this ECG tracing for study purposes."},
-        ],
-        max_tokens=_output_budget(language),
-    )
 
-    # The draft's TEXT is the retrieval query for the admin's ECG textbooks:
-    # the image itself can't be embedded against text chunks, but the draft's
-    # structured read (rate/rhythm/axis/intervals/morphology) describes the
-    # tracing precisely enough to pull the passages that actually teach this
-    # pattern. Empty when no reference books are loaded, in which case the
-    # verify prompt below is exactly what it was before -- see ecg_reference.py.
-    reference_block, reference_hits = ecg_reference.build_reference([draft, *_METHOD_QUERIES])
 
+def _ecg_verify_prompt(language: str, draft: str, reference_block: str, magnified: bool) -> str:
+    """The second-pass prompt. A function for the same reason as
+    _ecg_draft_prompt above -- the retry has to rebuild it without the
+    magnified-views instruction."""
     instructions = []
     if magnified:
         instructions.append(_MAGNIFIED_VIEWS_INSTRUCTION)
@@ -517,7 +541,7 @@ def interpret_ecg(image_bytes: bytes, media_type: str, language: str = "English"
         f"describe the pattern. Respond in {language}.",
     ]
 
-    verify_system_prompt = (
+    return (
         "You are the SECOND, independent reviewer checking a draft ECG interpretation against the actual "
         "image, as a quality check before it's shown to a medical student. You will see the same ECG image "
         "plus the draft interpretation below. Your job:\n"
@@ -525,21 +549,72 @@ def interpret_ecg(image_bytes: bytes, media_type: str, language: str = "English"
         + (f"\n\nTEACHING REFERENCES:\n{reference_block}" if reference_block else "")
         + f"\n\nDRAFT INTERPRETATION TO CHECK:\n{draft}"
     )
-    verified = _call_claude(
-        "ecg_interpretation_verify",
-        verify_system_prompt,
-        [
-            *image_content,
-            {
-                "type": "text",
-                "text": (
-                    "Here is the same ECG again, in the same views the draft was written from. "
-                    "Verify/correct the draft per your instructions."
-                ),
-            },
-        ],
+
+
+def interpret_ecg(image_bytes: bytes, media_type: str, language: str = "English") -> str:
+    """
+    Synchronous -- run via asyncio.to_thread from an async handler.
+    image_bytes: raw bytes of a photographed/scanned ECG tracing.
+    Two Claude calls: a draft read, then an independent verify pass over the
+    same image (see module docstring) before the disclaimer is appended.
+    """
+    # Built once and reused by both passes: cropping is cheap but not free,
+    # and the verify pass must see exactly the same views as the draft or it
+    # cannot check the draft's claims about them.
+    image_content, magnified = _ecg_image_content(image_bytes, media_type)
+    views_note = f"{_MAGNIFIED_VIEWS_INSTRUCTION}\n\n" if magnified else ""
+
+    # Both passes get the same, language-aware budget (see _output_budget):
+    # a read truncated mid-structure is worse than a slightly costlier one,
+    # and the VERIFY pass is the one the user actually sees.
+    draft = _call_claude(
+        "ecg_interpretation",
+        _ecg_draft_prompt(language, views_note),
+        [*image_content, {"type": "text", "text": DRAFT_REQUEST_TEXT}],
         max_tokens=_output_budget(language),
     )
+    if not draft and magnified:
+        image_content, magnified, views_note = _single_view_fallback(image_bytes, media_type)
+        draft = _call_claude(
+            "ecg_interpretation",
+            _ecg_draft_prompt(language, views_note),
+            [*image_content, {"type": "text", "text": DRAFT_REQUEST_TEXT}],
+            max_tokens=_output_budget(language),
+        )
+
+    # The draft's TEXT is the retrieval query for the admin's ECG textbooks:
+    # the image itself can't be embedded against text chunks, but the draft's
+    # structured read (rate/rhythm/axis/intervals/morphology) describes the
+    # tracing precisely enough to pull the passages that actually teach this
+    # pattern. Empty when no reference books are loaded, in which case the
+    # verify prompt below is exactly what it was before -- see ecg_reference.py.
+    reference_block, reference_hits = ecg_reference.build_reference([draft, *_METHOD_QUERIES])
+
+    verified = _call_claude(
+        "ecg_interpretation_verify",
+        _ecg_verify_prompt(language, draft, reference_block, magnified),
+        [*image_content, {"type": "text", "text": VERIFY_REQUEST_TEXT}],
+        max_tokens=_output_budget(language),
+    )
+    if not verified and magnified:
+        # Only reached when the DRAFT succeeded on five views and the
+        # verify pass alone came back empty -- if the draft had already
+        # fallen back, `magnified` is False by now and the verify call
+        # above used the single view too, rather than re-sending a request
+        # shape that has just been shown not to work.
+        #
+        # The draft survives an empty verify pass (`verified or draft`
+        # below), so this retry is not load-bearing the way the draft's is.
+        # It is still worth one attempt: the verify pass is the one whose
+        # text the reader actually gets, and losing it silently means
+        # losing the second look at the checklist.
+        image_content, magnified, views_note = _single_view_fallback(image_bytes, media_type)
+        verified = _call_claude(
+            "ecg_interpretation_verify",
+            _ecg_verify_prompt(language, draft, reference_block, magnified),
+            [*image_content, {"type": "text", "text": VERIFY_REQUEST_TEXT}],
+            max_tokens=_output_budget(language),
+        )
 
     # Sources sit between the read and the disclaimer: the student can see
     # which book and page backs what they were just told (and go look it
@@ -548,7 +623,17 @@ def interpret_ecg(image_bytes: bytes, media_type: str, language: str = "English"
     # "no sources" line -- there is nothing to cite, and saying so every
     # time would just be noise on an otherwise unchanged read.
     sources = ecg_reference.format_sources(reference_hits)
-    interpretation = _require_text(verified, draft, "ECG interpretation")
+    interpretation = _require_text(
+        verified,
+        draft,
+        "ECG interpretation",
+        # Both passes came back empty, including the single-image retry, so
+        # the usual advice ("send a clearer photo") is not the issue and
+        # saying it just sends the user in circles. Point at the one thing
+        # that is actually likely to differ on a second attempt.
+        hint="If it happens again, try cropping the image to just the tracing, or send it as an "
+        "ordinary photo rather than a file.",
+    )
 
     # QTc is computed here, from the QT and rate the model measured, rather
     # than by the model -- see ecg_qtc. The marker is taken from the verify
