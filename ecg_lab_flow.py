@@ -21,6 +21,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, CallbackQuery
 
 import ecg_lab_ai
+import image_intake
 import subscriptions
 from keyboards import cancel_kb, lab_input_mode_kb
 from paths import user_dir
@@ -66,7 +67,9 @@ async def handle_study_ecg(callback: CallbackQuery, state: FSMContext):
         # back. Sent as a file the image arrives at full resolution.
         "🫀 Send the ECG. For the most accurate read, send it as a FILE rather than as a photo: "
         "Telegram shrinks photos, and fine detail like a bundle-branch pattern or a small Q wave can "
-        "be lost in the compression. A photo still works, just less reliably for fine morphology.\n\n"
+        "be lost in the compression. A photo still works, just less reliably for fine morphology.\n"
+        "Any common image format is fine as a file -- JPG, PNG, WebP, JPEG 2000 (.jp2/.jpf), TIFF, "
+        "BMP or HEIC.\n\n"
         "This is for study/pattern-recognition practice only, not a diagnosis -- please use a "
         "de-identified or practice/textbook tracing."
     , reply_markup=cancel_kb())
@@ -114,16 +117,29 @@ async def handle_cancel(message: Message, state: FSMContext):
 
 
 async def _download_image_bytes(bot, message: Message) -> tuple[bytes, str] | None:
-    """Returns (image_bytes, media_type), or None (and answers the user) if the message has no usable image."""
+    """
+    Returns (image_bytes, media_type), or None (and answers the user) if the
+    message has no usable image.
+
+    A document is accepted on the strength of whether it DECODES, not on the
+    MIME type attached to it: Telegram labels anything it does not recognise
+    application/octet-stream, so the previous mime_type.startswith("image/")
+    test rejected perfectly good uploads unread -- JPEG 2000 (.jpf/.jp2) off
+    a scanner, HEIC off an iPhone -- and did so precisely because the ECG
+    prompt now asks for a file rather than a compressed photo. image_intake
+    does the decoding and converts anything the vision API will not take.
+    """
     file_id = None
     media_type = "image/jpeg"
+    file_name = None
 
     if message.photo:
         file_id = message.photo[-1].file_id
         media_type = "image/jpeg"
-    elif message.document and (message.document.mime_type or "").startswith("image/"):
+    elif message.document:
         file_id = message.document.file_id
-        media_type = message.document.mime_type
+        media_type = message.document.mime_type or ""
+        file_name = message.document.file_name
 
     if not file_id:
         await message.answer("Please send an image (as a photo or an image file).")
@@ -135,7 +151,12 @@ async def _download_image_bytes(bot, message: Message) -> tuple[bytes, str] | No
         file = await bot.get_file(file_id)
         await bot.download_file(file.file_path, destination=tmp_path)
         with open(tmp_path, "rb") as f:
-            return f.read(), media_type
+            raw = f.read()
+        try:
+            return image_intake.normalize(raw, media_type, file_name)
+        except image_intake.UnsupportedImage as e:
+            await message.answer(str(e))
+            return None
     finally:
         try:
             os.remove(tmp_path)
@@ -143,6 +164,12 @@ async def _download_image_bytes(bot, message: Message) -> tuple[bytes, str] | No
             pass
 
 
+# The F.document half of this filter is unreachable in practice: bot.py
+# registers handle_ecg_document/handle_lab_document on `dp` itself, which
+# aiogram tries before descending into this router (that is the whole
+# reason they exist there -- see their docstrings). Kept anyway so these
+# handlers stay correct on their own terms if that registration ever moves,
+# and both paths run the same code either way.
 @router.message(EcgLabStates.awaiting_ecg_image, F.photo | F.document)
 async def handle_ecg_image(message: Message, state: FSMContext):
     from bot_instance import bot as tg_bot
@@ -213,6 +240,12 @@ async def handle_lab_text(message: Message, state: FSMContext):
         await message.answer("Couldn't send the interpretation (Telegram rejected the message).")
 
 
+# The F.document half of this filter is unreachable in practice: bot.py
+# registers handle_ecg_document/handle_lab_document on `dp` itself, which
+# aiogram tries before descending into this router (that is the whole
+# reason they exist there -- see their docstrings). Kept anyway so these
+# handlers stay correct on their own terms if that registration ever moves,
+# and both paths run the same code either way.
 @router.message(EcgLabStates.awaiting_lab_image, F.photo | F.document)
 async def handle_lab_image(message: Message, state: FSMContext):
     from bot_instance import bot as tg_bot

@@ -1186,6 +1186,37 @@ async def handle_pdf_split_only(message: Message, state: FSMContext):
         shutil.rmtree(output_dir, ignore_errors=True)
 
 
+@dp.message(F.document, ecg_lab_flow.EcgLabStates.awaiting_ecg_image)
+async def handle_ecg_document(message: Message, state: FSMContext):
+    """
+    An ECG sent as a FILE rather than a compressed photo.
+
+    Registered directly on `dp` and BEFORE the unconditional
+    @dp.message(F.document) handler below, for the same reason as
+    handle_book_delivery_document and handle_pdf_split_only above: aiogram
+    checks a Router's own handlers before descending into any included
+    sub-router, so ecg_lab_flow's own
+    @router.message(EcgLabStates.awaiting_ecg_image, F.photo | F.document)
+    never sees a document -- handle_pdf_upload below has no state filter and
+    swallows it first, answering "That doesn't look like a PDF."
+
+    That made the ECG flow's own advice impossible to follow: it asks for
+    the tracing as a file (Telegram's photo compression destroys the 1 mm
+    detail a bundle-branch pattern lives in -- see ecg_tiles), and anyone
+    who did as asked got told to send a PDF instead. Photos kept working,
+    which is exactly why it went unnoticed. Delegates to the same handler
+    the photo path uses so there is only one ECG read to maintain.
+    """
+    await ecg_lab_flow.handle_ecg_image(message, state)
+
+
+@dp.message(F.document, ecg_lab_flow.EcgLabStates.awaiting_lab_image)
+async def handle_lab_document(message: Message, state: FSMContext):
+    """A lab report sent as a file -- same shadowing problem and same fix as
+    handle_ecg_document above."""
+    await ecg_lab_flow.handle_lab_image(message, state)
+
+
 @dp.message(F.document)
 async def handle_pdf_upload(message: Message):
     """
