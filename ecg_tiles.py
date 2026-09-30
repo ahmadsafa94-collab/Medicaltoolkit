@@ -90,9 +90,20 @@ _QUADRANTS = [
 WHOLE_SHEET_LABEL = "the complete sheet"
 
 
-def _encode(img, quality: int = 90) -> bytes:
-    """JPEG at high quality: these are photographs of paper, so PNG would
-    multiply the payload for no visible gain on a continuous-tone image."""
+# Image tokens are computed from an image's DIMENSIONS, not its file size,
+# so quality above the default is free in tokens and costs only payload.
+# Worth spending on the quadrants: a QRS trace is a thin high-contrast line
+# and its terminal slur is exactly the low-amplitude edge detail JPEG
+# discards first -- and that slur is what decides whether a QRS measures
+# 100 ms or 120 ms. The full sheet stays lower: it is read for layout and
+# R-R spacing, neither of which turns on a sub-millimetre edge.
+_QUADRANT_QUALITY = 95
+_WHOLE_SHEET_QUALITY = 90
+
+
+def _encode(img, quality: int = _WHOLE_SHEET_QUALITY) -> bytes:
+    """JPEG: these are photographs of paper, so PNG would multiply the
+    payload for no visible gain on a continuous-tone image."""
     if img.mode not in ("RGB", "L"):
         img = img.convert("RGB")
     buf = io.BytesIO()
@@ -164,7 +175,9 @@ def build_views(image_bytes: bytes) -> list[tuple[str, bytes, str]]:
                 right = min(width, (col + 1) * width // 2 + pad_x)
                 bottom = min(height, (row + 1) * height // 2 + pad_y)
                 crop = src.crop((left, top, right, bottom))
-                views.append((label, _encode(_scale_to_cap(crop, upscale=True)), "image/jpeg"))
+                views.append(
+                    (label, _encode(_scale_to_cap(crop, upscale=True), _QUADRANT_QUALITY), "image/jpeg")
+                )
             return views
     except Image.UnidentifiedImageError:
         # A file the user sent that isn't really an image. Not a bug here,
