@@ -57,9 +57,32 @@ def _is_translatable(value: object) -> bool:
     return any(ch.isalpha() for ch in text)
 
 
+# An opt-in escape hatch for fixed messages that are NOT written at a call
+# site. The walk below finds strings handed straight to .answer()/
+# .edit_text() or to a button's text=, which covers nearly everything --
+# but a message held in a list and sent from a loop is invisible to it, and
+# so silently misses pre-translation and gets translated live instead. That
+# is the exact latency this module exists to remove. A module declaring
+# TRANSLATABLE_MESSAGES = ["...", "..."] gets those strings warmed too.
+#
+# The strings have to be literals in the list itself: this reads the source,
+# not the imported module, so an alias to another name is not resolvable.
+_OPT_IN_NAME = "TRANSLATABLE_MESSAGES"
+
+
 def _from_tree(tree: ast.AST) -> list[str]:
     found = []
     for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == _OPT_IN_NAME for t in node.targets
+        ):
+            if isinstance(node.value, (ast.List, ast.Tuple)):
+                found += [
+                    element.value.strip()
+                    for element in node.value.elts
+                    if isinstance(element, ast.Constant) and _is_translatable(element.value)
+                ]
+
         if not isinstance(node, ast.Call):
             continue
 

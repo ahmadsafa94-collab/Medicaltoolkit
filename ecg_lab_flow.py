@@ -36,6 +36,81 @@ router = Router(name="ecg_lab_flow")
 # every interpretation, so the old single-call budget is no longer enough.
 _GENERATION_TIMEOUT_SECONDS = 100
 
+# The ECG path needs far longer than the others and gets its own budget.
+# Each of its two passes now sends five images -- the full sheet plus four
+# magnified quadrants, so a bundle branch block is actually resolvable (see
+# ecg_tiles) -- against a much longer prompt, and the token ceiling was
+# raised because a pass was spending thousands of tokens before writing its
+# first visible line. All of that is time, and at 100 seconds the read was
+# timing out: the user got "Couldn't interpret that image:" with nothing
+# after the colon, because asyncio.TimeoutError stringifies to "".
+_ECG_TIMEOUT_SECONDS = 300
+_LAB_IMAGE_TIMEOUT_SECONDS = 180
+
+# Shown in rotation while an ECG read is in flight. A read can now run for
+# minutes, and a status line that has not changed for that long is
+# indistinguishable from a bot that has died.
+#
+# Declared under ui_strings' TRANSLATABLE_MESSAGES name so they are
+# pre-translated with every other fixed string. Without that they would be
+# translated live, one call per update, mid-read -- which would make the
+# progress display itself a source of the delay it is reporting on. The
+# literals live in this list rather than in an alias because ui_strings
+# reads the source, not the imported module.
+TRANSLATABLE_MESSAGES = [
+    "Reading the tracing...",
+    "Measuring rate, intervals and axis...",
+    "Checking the named-pattern list...",
+    "Double-checking the read against the ECG textbooks...",
+    "Still working -- nearly there...",
+]
+_ECG_PROGRESS_STEPS = TRANSLATABLE_MESSAGES
+_PROGRESS_INTERVAL_SECONDS = 25
+
+
+def _describe_error(exc: Exception) -> str:
+    """
+    A non-empty description of a failure, for a message the user reads.
+
+    Several exceptions worth reporting carry no message at all --
+    asyncio.TimeoutError is the one that bit here, and str() on it returns
+    the empty string -- so interpolating str(exc) straight into "Couldn't
+    interpret that image: {e}" produced a sentence that ended at the colon
+    and told the user (and me) nothing.
+    """
+    text = str(exc).strip()
+    if text:
+        return text
+    return f"the request failed with {type(exc).__name__} and no further detail"
+
+
+async def _run_with_progress(coro, timeout: float, status_msg, steps: list[str]):
+    """
+    Await `coro` while cycling `steps` through `status_msg`.
+
+    The ticker is a separate task so a slow read keeps showing signs of
+    life, and it is always cancelled before this returns -- including when
+    the work raises -- so it can never outlive the request and keep editing
+    a message about work that has already finished.
+    """
+
+    async def tick():
+        try:
+            for step in steps:
+                await asyncio.sleep(_PROGRESS_INTERVAL_SECONDS)
+                try:
+                    await status_msg.edit_text(step)
+                except Exception:
+                    pass  # edit rate-limited, or content unchanged -- cosmetic either way
+        except asyncio.CancelledError:
+            pass
+
+    ticker = asyncio.create_task(tick())
+    try:
+        return await asyncio.wait_for(coro, timeout=timeout)
+    finally:
+        ticker.cancel()
+
 
 class EcgLabStates(StatesGroup):
     awaiting_ecg_image = State()
@@ -190,13 +265,25 @@ async def handle_ecg_image(message: Message, state: FSMContext):
     status = await message.answer("Analyzing the ECG, then double-checking the read...")
     language = subscriptions.get_language(message.from_user.id)
     try:
-        result = await asyncio.wait_for(
+        result = await _run_with_progress(
             asyncio.to_thread(ecg_lab_ai.interpret_ecg, image_bytes, media_type, language),
-            timeout=_GENERATION_TIMEOUT_SECONDS,
+            _ECG_TIMEOUT_SECONDS,
+            status,
+            _ECG_PROGRESS_STEPS,
         )
+    except asyncio.TimeoutError:
+        # Its own branch because it is not an interpretation failure and the
+        # useful thing to say is entirely different: nothing was wrong with
+        # the tracing, the read simply ran out of time.
+        logger.error("ECG interpretation timed out after %ss", _ECG_TIMEOUT_SECONDS)
+        await status.edit_text(
+            "That ECG took too long to read and timed out. Please try again -- and if it keeps "
+            "happening, a tighter crop of just the tracing reads faster."
+        )
+        return
     except Exception as e:
         logger.exception("ECG interpretation failed")
-        await status.edit_text(f"Couldn't interpret that image: {e}")
+        await status.edit_text(f"Couldn't interpret that image: {_describe_error(e)}")
         return
 
     await status.edit_text("Done.")
@@ -228,9 +315,13 @@ async def handle_lab_text(message: Message, state: FSMContext):
             asyncio.to_thread(ecg_lab_ai.interpret_lab_text, message.text, language),
             timeout=_GENERATION_TIMEOUT_SECONDS,
         )
+    except asyncio.TimeoutError:
+        logger.error("Lab text interpretation timed out after %ss", _GENERATION_TIMEOUT_SECONDS)
+        await status.edit_text("That took too long to interpret and timed out. Please try again.")
+        return
     except Exception as e:
         logger.exception("Lab interpretation (text) failed")
-        await status.edit_text(f"Couldn't interpret that: {e}")
+        await status.edit_text(f"Couldn't interpret that: {_describe_error(e)}")
         return
 
     await status.edit_text("Done.")
@@ -268,11 +359,15 @@ async def handle_lab_image(message: Message, state: FSMContext):
     try:
         result = await asyncio.wait_for(
             asyncio.to_thread(ecg_lab_ai.interpret_lab_image, image_bytes, media_type, language),
-            timeout=_GENERATION_TIMEOUT_SECONDS,
+            timeout=_LAB_IMAGE_TIMEOUT_SECONDS,
         )
+    except asyncio.TimeoutError:
+        logger.error("Lab image interpretation timed out after %ss", _LAB_IMAGE_TIMEOUT_SECONDS)
+        await status.edit_text("That report took too long to read and timed out. Please try again.")
+        return
     except Exception as e:
         logger.exception("Lab interpretation (image) failed")
-        await status.edit_text(f"Couldn't interpret that image: {e}")
+        await status.edit_text(f"Couldn't interpret that image: {_describe_error(e)}")
         return
 
     await status.edit_text("Done.")

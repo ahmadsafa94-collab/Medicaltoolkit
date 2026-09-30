@@ -364,7 +364,10 @@ def _call_claude_meta(feature: str, system_prompt: str, content, max_tokens: int
             messages=[{"role": "user", "content": content}],
         )
     except Exception as e:
-        raise InterpretationError(f"The AI request failed: {e}")
+        # str() on an exception is not guaranteed to say anything -- some
+        # carry no message at all -- and "The AI request failed: " ending at
+        # the colon is worse than useless, so the type is the floor.
+        raise InterpretationError(f"The AI request failed: {e or type(e).__name__}")
 
     try:
         cost_ledger.record_claude_response(feature, response)
