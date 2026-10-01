@@ -50,9 +50,25 @@ def parse_marker(text: str) -> tuple[int, int] | None:
     return qt_ms, rate_bpm
 
 
+# A marker the model began and never finished. This is not hypothetical: a
+# reply truncated at its token ceiling ended "<<QTDATA qt_ms=" and that
+# fragment went out to a reader, because MARKER_RE only matches a complete
+# marker and so left the partial one untouched. Anything from the opening
+# "<<QTDATA" onwards is machinery either way, so a fragment is removed to
+# the end of the text.
+_PARTIAL_MARKER_RE = re.compile(r"[ \t]*<<\s*QTDATA\b.*$", re.IGNORECASE | re.DOTALL)
+
+
 def strip_marker(text: str) -> str:
-    """Remove the marker line from text shown to the user."""
-    return re.sub(r"[ \t]*" + MARKER_RE.pattern + r"[ \t]*", "", text or "", flags=re.IGNORECASE).strip()
+    """
+    Remove the marker from text shown to the user, complete or not.
+
+    Complete markers first, so a finished marker followed by real text
+    (which should not happen, but costs nothing to allow) does not take
+    that text with it. Only then is a dangling fragment cleared.
+    """
+    cleaned = re.sub(r"[ \t]*" + MARKER_RE.pattern + r"[ \t]*", "", text or "", flags=re.IGNORECASE)
+    return _PARTIAL_MARKER_RE.sub("", cleaned).strip()
 
 
 # A QTc the model wrote into its own prose: "QTc" (Latin in every language
