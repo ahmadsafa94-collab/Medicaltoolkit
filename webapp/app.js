@@ -2125,16 +2125,53 @@ function renderInteractionChips() {
   document.getElementById("interaction-clear").hidden = interactionDrugs.length === 0;
 }
 
-function addInteractionDrug(name) {
+// Each name is confirmed against openFDA as it is added, not when the
+// check runs. A typo is then a one-second "did you mean", instead of a
+// long multi-drug check that fails at the end on something that was
+// knowable immediately -- which is exactly what "Sertralin" did.
+async function addInteractionDrug(name) {
   const clean = (name || "").trim();
-  if (!clean) return;
+  if (!clean || drugsBusy) return;
   if (interactionDrugs.some((d) => d.toLowerCase() === clean.toLowerCase())) {
     alertMsg(`${clean} is already on the list.`);
     return;
   }
-  interactionDrugs.push(clean);
-  document.getElementById("interaction-input").value = "";
+
+  const input = document.getElementById("interaction-input");
+  const result = document.getElementById("interaction-result");
+  drugsBusy = true;
   renderInteractionChips();
+  input.disabled = true;
+  try {
+    const { name: resolved } = await api("/api/drugs/resolve", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: clean }),
+    });
+    // Guard again post-await: the label's own spelling may collide with a
+    // chip that is already there ("Coumadin" resolving onto "Warfarin").
+    if (interactionDrugs.some((d) => d.toLowerCase() === resolved.toLowerCase())) {
+      alertMsg(`${resolved} is already on the list.`);
+    } else {
+      interactionDrugs.push(resolved);
+    }
+    input.value = "";
+    result.hidden = true;
+  } catch (e) {
+    result.hidden = false;
+    if (e.status === 404) {
+      renderNameSuggestions(result, e, (picked) => {
+        result.hidden = true;
+        addInteractionDrug(picked);
+      });
+    } else {
+      result.innerHTML = `<p class="muted">${escapeHtml(e.message)}</p>`;
+    }
+  } finally {
+    input.disabled = false;
+    drugsBusy = false;
+    renderInteractionChips();
+  }
 }
 
 async function checkInteractions() {
@@ -2161,14 +2198,14 @@ async function checkInteractions() {
       `<div class="qa-msg a">${escapeHtml(answer)}</div>`;
   } catch (e) {
     if (e.status === 404) {
+      // Every chip was confirmed when it was added, so reaching here means
+      // a label that existed a moment ago no longer resolves. Drop the one
+      // that failed and let them re-add it, rather than guessing a fix.
+      const failed = interactionDrugs.find((d) => e.message.includes(d));
       renderNameSuggestions(result, e, (name) => {
-        // Replace whichever name failed with the one they picked. The
-        // server reports the failing name inside the message, so match on it.
-        const idx = interactionDrugs.findIndex((d) => e.message.includes(d));
-        if (idx >= 0) interactionDrugs[idx] = name;
-        else addInteractionDrug(name);
-        renderInteractionChips();
+        if (failed) interactionDrugs = interactionDrugs.filter((d) => d !== failed);
         result.hidden = true;
+        addInteractionDrug(name);
       });
     } else {
       result.innerHTML = `<p class="muted">${escapeHtml(e.message)}</p>`;
@@ -2207,15 +2244,38 @@ function renderLookupThread() {
   box.scrollTop = box.scrollHeight;
 }
 
-function setLookupDrug(name) {
+async function setLookupDrug(name) {
   const clean = (name || "").trim();
-  if (!clean) return;
-  // A different drug means a different label, so the thread cannot carry
-  // over -- its history would be answered against the wrong document.
-  if (lookupDrug && clean.toLowerCase() !== lookupDrug.toLowerCase()) lookupThread = [];
-  lookupDrug = clean;
-  document.getElementById("lookup-drug-input").value = clean;
-  renderLookupState();
+  if (!clean || drugsBusy) return;
+
+  const input = document.getElementById("lookup-drug-input");
+  const thread = document.getElementById("lookup-thread");
+  drugsBusy = true;
+  input.disabled = true;
+  try {
+    // Confirmed before the first question rather than on it, so a typo
+    // costs a second here instead of a full answer round-trip.
+    const { name: resolved } = await api("/api/drugs/resolve", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: clean }),
+    });
+    // A different drug means a different label, so the thread cannot carry
+    // over -- its history would be answered against the wrong document.
+    if (lookupDrug && resolved.toLowerCase() !== lookupDrug.toLowerCase()) lookupThread = [];
+    lookupDrug = resolved;
+    input.value = resolved;
+    renderLookupState();
+  } catch (e) {
+    if (e.status === 404) {
+      renderNameSuggestions(thread, e, (picked) => setLookupDrug(picked));
+    } else {
+      alertMsg(e.message);
+    }
+  } finally {
+    input.disabled = false;
+    drugsBusy = false;
+  }
 }
 
 async function askLookup() {

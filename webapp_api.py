@@ -1333,10 +1333,19 @@ _WEBAPP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webapp")
 # drug_qa.answer_question), so there is one implementation of each and the
 # answers cannot drift between the two surfaces.
 
-_DRUG_LOOKUP_TIMEOUT_SECONDS = 25
-_DRUG_ANSWER_TIMEOUT_SECONDS = 60
-_DRUG_RESOLVE_TIMEOUT_SECONDS = 20
+_DRUG_LOOKUP_TIMEOUT_SECONDS = 15   # openFDA is either quick or not coming back
+_DRUG_ANSWER_TIMEOUT_SECONDS = 55
+_DRUG_RESOLVE_TIMEOUT_SECONDS = 15
 _MAX_INTERACTION_DRUGS = 15  # mirrors interaction_flow.MAX_DRUGS
+
+# A ceiling on the whole interaction check, not just its parts. Fifteen
+# sequential lookups at 15s each plus a 55s answer is over four minutes in
+# the worst case, and nothing in front of this app is guaranteed to wait
+# that long: a proxy that gives up first replaces our JSON with its own
+# error page, which is how a failed check reached a user as a bare
+# "Request failed (502)" with nothing to act on. Failing ourselves, in
+# time, means the reason always comes from us.
+_DRUG_TOTAL_BUDGET_SECONDS = 110
 
 
 async def _json_body(request: Request) -> dict:
@@ -1377,6 +1386,17 @@ async def _fetch_label(name: str) -> dict:
         raise ApiError(status_code=429, detail="openFDA is rate-limiting us right now. Please try again shortly.")
     except asyncio.TimeoutError:
         raise ApiError(status_code=504, detail=f"Looking up \"{name}\" took too long. Please try again.")
+    except Exception:
+        # drug_lookup handles httpx.TimeoutException and ConnectError itself
+        # but nothing else, so a ProxyError, a read error or a malformed
+        # response comes straight through here. Uncaught, that leaves the
+        # request with no JSON body at all and the client showing a bare
+        # status code. Everything unexpected becomes one honest 502 instead.
+        logger.exception("openFDA lookup failed unexpectedly for %r", name)
+        raise ApiError(
+            status_code=502,
+            detail=f"Couldn't reach the FDA label database for \"{name}\". Please try again in a moment.",
+        )
 
 
 async def drug_search(request: Request):
@@ -1394,6 +1414,29 @@ async def drug_search(request: Request):
         logger.info("Drug name search failed for %r (non-fatal)", prefix)
         names = []
     return JSONResponse({"names": names})
+
+
+async def drug_resolve(request: Request):
+    """
+    Confirm one name against openFDA, at the moment it is added.
+
+    Checking each name as it goes in, rather than when the whole check
+    runs, is what keeps a typo cheap. Before this, adding "Sertralin"
+    succeeded silently and the mistake only surfaced after a two-drug
+    interaction check had been waited out -- a slow failure for something
+    knowable in a second, and the one path through this endpoint that was
+    both the slowest and the likeliest to be hit.
+
+    Returns the label's own spelling on success, or 404 with suggestions,
+    which is the same shape the other two endpoints use for a miss.
+    """
+    require_user(request)
+    body = await _json_body(request)
+    name = (body.get("name") or "").strip()
+    if not name:
+        raise ApiError(status_code=400, detail="Type a drug name first.")
+    sections = await _fetch_label(name)
+    return JSONResponse({"name": sections.get("_name") or name})
 
 
 async def drug_interactions(request: Request):
@@ -1425,28 +1468,37 @@ async def drug_interactions(request: Request):
     except subscriptions.QuotaExceeded as e:
         raise ApiError(status_code=402, detail=str(e))
 
-    # Sequentially rather than with gather: openFDA rate-limits, and a burst
-    # of 15 parallel lookups is the reliable way to get a 429 for the whole
-    # request instead of an answer.
-    drugs = []
-    for name in names:
-        sections = await _fetch_label(name)
-        drugs.append({"name": sections.get("_name") or name, "sections": sections})
+    async def run() -> tuple[str, list[str]]:
+        # Sequentially rather than with gather: openFDA rate-limits, and a
+        # burst of 15 parallel lookups is the reliable way to get a 429 for
+        # the whole request instead of an answer.
+        drugs = []
+        for name in names:
+            sections = await _fetch_label(name)
+            drugs.append({"name": sections.get("_name") or name, "sections": sections})
 
-    try:
         answer = await asyncio.wait_for(
             asyncio.to_thread(
                 interaction_ai.analyze_interactions, drugs, subscriptions.get_language(user["id"])
             ),
             timeout=_DRUG_ANSWER_TIMEOUT_SECONDS,
         )
+        return answer, [d["name"] for d in drugs]
+
+    try:
+        answer, resolved = await asyncio.wait_for(run(), timeout=_DRUG_TOTAL_BUDGET_SECONDS)
+    except ApiError:
+        raise  # a 404/429/502 from a lookup already says exactly what went wrong
     except asyncio.TimeoutError:
-        raise ApiError(status_code=504, detail="The interaction check took too long. Please try again.")
+        raise ApiError(
+            status_code=504,
+            detail=f"Checking {len(names)} drugs took too long. Try again, or with fewer drugs at once.",
+        )
     except Exception as e:
         logger.exception("Mini app interaction check failed")
         raise ApiError(status_code=500, detail=f"Couldn't check those interactions: {e or type(e).__name__}")
 
-    return JSONResponse({"answer": answer, "drugs": [d["name"] for d in drugs]})
+    return JSONResponse({"answer": answer, "drugs": resolved})
 
 
 async def drug_ask(request: Request):
@@ -1539,6 +1591,7 @@ routes = [
     Route("/api/books/{book_id}/notes/{note_id}", delete_note_endpoint, methods=["DELETE"]),
     Route("/api/request-book", request_book_endpoint, methods=["POST"]),
     Route("/api/drugs/search", drug_search, methods=["GET"]),
+    Route("/api/drugs/resolve", drug_resolve, methods=["POST"]),
     Route("/api/drugs/interactions", drug_interactions, methods=["POST"]),
     Route("/api/drugs/ask", drug_ask, methods=["POST"]),
     Mount("/webapp", app=StaticFiles(directory=_WEBAPP_DIR, html=True), name="webapp"),
