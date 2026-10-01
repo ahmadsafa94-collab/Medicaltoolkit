@@ -66,12 +66,13 @@ from keyboards import (
     recent_list_kb,
     make_searchable_kb,
     study_tools_kb,
-    clinical_tools_kb,
+    drugs_info_kb,
     BTN_SHELF,
     BTN_MY_PLAN,
     BTN_LANGUAGE,
     BTN_STUDY_TOOLS,
-    BTN_CLINICAL_TOOLS,
+    BTN_DRUGS_INFO,
+    BTN_CALCULATORS,
     BTN_ADMIN,
     BTN_FEEDBACK,
     BTN_SUPPORT,
@@ -151,12 +152,13 @@ admin_flow.register_admin_handlers(dp)
 # contact-admin flow, referrals, payment history, language -- see customer_flow.py.
 customer_flow.register_customer_handlers(dp)
 
-# Clinical Tools -> ECG / Lab interpretation (Premium, one free trial each,
-# unlimited for admins -- see subscriptions.is_premium()) -- see ecg_lab_flow.py.
+# ECG / Lab interpretation -- ADMIN ONLY now, reached from the admin panel
+# rather than a user menu while the accuracy of the reads is still being
+# worked on (see ecg_lab_flow's admin gate).
 ecg_lab_flow.register_ecg_lab_handlers(dp)
 
-# Clinical Tools -> Ask About Drugs (free-form Q&A grounded in a single drug's
-# FDA label -- also reachable straight from a /dose lookup's section menu)
+# Drugs Info -> Drug LookUp (free-form Q&A grounded in a single drug's FDA
+# label -- also reachable straight from a /dose lookup's section menu)
 # -- see drug_qa_flow.py.
 drug_qa_flow.register_drug_qa_handlers(dp)
 
@@ -313,8 +315,9 @@ async def cmd_help(message: Message):
         "/feedback - report a problem or give feedback; goes straight to the admin "
         "(same as the 🐞 Report a problem / Give Feedback button in the menu below).\n\n"
         "/support - get help directly from the admin (same as the 🆘 Support button in the menu below).\n\n"
-        "🩺 Clinical Tools (menu button) - ECG/lab interpretation, calculators, Ask About Drugs, "
-        "AI-checked drug interactions, and drug lookup.\n\n"
+        "💊 Drugs Info (menu button) - AI-checked drug interactions, and Drug LookUp for asking "
+        "anything about a drug, answered from its FDA label.\n\n"
+        "🧮 Calculators (menu button) - the clinical calculators.\n\n"
         "🧠 Study Tools (menu button) - flashcards, the PDF splitter (splits an "
         "uploaded PDF into one file per chapter without saving it or offering to index it -- sending "
         "a PDF directly to the chat still does the full save+index flow), notes, Ask My Books, and "
@@ -332,15 +335,25 @@ async def btn_language(message: Message):
     await customer_flow._prompt_language(message.answer)
 
 
-@dp.message(ButtonText(BTN_CLINICAL_TOOLS))
-async def btn_clinical_tools(message: Message):
+@dp.message(ButtonText(BTN_DRUGS_INFO))
+async def btn_drugs_info(message: Message):
     lang = subscriptions.get_language(message.from_user.id)
-    title = ui_text.t(lang, "🩺 Clinical Tools")
+    title = ui_text.t(lang, "💊 Drugs Info")
     await message.answer(
         f"*{title}*\n\n{ui_text.t(lang, 'Pick one:')}",
         parse_mode="Markdown",
-        reply_markup=clinical_tools_kb(lang),
+        reply_markup=drugs_info_kb(lang),
     )
+
+
+@dp.message(ButtonText(BTN_CALCULATORS))
+async def btn_calculators(message: Message):
+    """
+    Straight to the calculators, with no submenu in between: they were one
+    tap down inside "Clinical Tools" and are now a top-level button, so a
+    second menu here would just put back the tap that removing it saved.
+    """
+    await cmd_calculators(message)
 
 
 @dp.message(ButtonText(BTN_STUDY_TOOLS))

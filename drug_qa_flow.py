@@ -1,9 +1,19 @@
 """
-Chat flow for "Ask AI about a drug" -- free-form Q&A grounded in a single
-drug's real FDA label (see drug_qa.py for the grounding/answer logic).
+Chat flow for "Drug LookUp" -- free-form Q&A grounded in a single drug's
+real FDA label (see drug_qa.py for the grounding/answer logic).
+
+This is what "Drug LookUp" now means. There used to be two separate menu
+entries, "Ask About Drugs" (this flow) and "Drug Lookup" (an inline search
+that returned a menu of label sections to tap through), and the difference
+between them was invisible from the labels -- both promised information
+about a drug. They are one entry now, and it is this one: ask the question
+you actually have, in words, and get it answered from the label rather than
+navigating to the section that might contain it. The section-menu lookup is
+still there under /dose for anyone who prefers to browse, and its "🤖 Ask AI
+about this drug" button lands back here.
 
 Two entry points feed the same awaiting_question loop:
-  1. 🧠 Study Tools -> 💊 Ask About Drugs -- asks for a drug name first, a
+  1. 💊 Drugs Info -> 💊 Drug LookUp -- asks for a drug name first, a
      fresh lookup via the same lookup_drug() call /dose itself uses.
   2. The "🤖 Ask AI about this drug" button attached to a /dose lookup's
      section menu (see keyboards.py's drug_sections_kb) -- reuses that
@@ -202,7 +212,7 @@ async def handle_question(message: Message, state: FSMContext):
     history = data.get("history") or []
     if not drug_name or not sections:
         await state.clear()
-        await message.answer("This session expired. Start again from 🧠 Study Tools -> 💊 Ask About Drugs.")
+        await message.answer("This session expired. Start again from 💊 Drugs Info -> 💊 Drug LookUp.")
         return
 
     question = message.text.strip()

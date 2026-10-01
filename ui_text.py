@@ -51,20 +51,17 @@ _CACHE_DIR = os.path.join(STORAGE_DIR, "_admin", "ui_translations")
 UI_STRINGS = [
     # Main menu (reply keyboard) -- these double as handler filters, see canonical()
     "📚 BOOK SHELF",
-    "🩺 Clinical Tools",
+    "💊 Drugs Info",
+    "🧮 Calculators",
     "🧠 Study Tools",
     "⭐ My Plan",
     "🌐 Language",
     "🛠 Admin Panel",
     "🐞 Report a problem / Give Feedback",
     "🆘 Support",
-    # Clinical Tools submenu
-    "🫀 ECG Interpretation",
-    "🧪 Lab Interpretation",
-    "🧮 Calculators",
-    "💊 Ask About Drugs",
+    # Drugs Info submenu
     "🔀 Drug Interactions",
-    "💊 Drug Lookup",
+    "💊 Drug LookUp",
     # Study Tools submenu
     "🗂 Flashcards",
     "✂️ PDF Splitter",
@@ -72,7 +69,7 @@ UI_STRINGS = [
     "💬 Ask My Books",
     "🔖 Bookmarks",
     # Submenu headers
-    "🩺 Clinical Tools",
+    "💊 Drugs Info",
     "🧠 Study Tools",
     "Pick one:",
 ]

@@ -35,7 +35,8 @@ class ButtonText(Filter):
         return bool(message.text) and ui_text.canonical(message.text) == self.button
 
 BTN_SHELF = "📚 BOOK SHELF"
-BTN_CLINICAL_TOOLS = "🩺 Clinical Tools"
+BTN_DRUGS_INFO = "💊 Drugs Info"
+BTN_CALCULATORS = "🧮 Calculators"
 BTN_STUDY_TOOLS = "🧠 Study Tools"
 BTN_MY_PLAN = "⭐ My Plan"
 BTN_LANGUAGE = "🌐 Language"
@@ -54,11 +55,14 @@ def main_menu_kb(webapp_url: str = "", is_admin: bool = False, language: str | N
     now lives one tap deeper, under one of two inline submenus, so this top
     level stays scannable as more features get added:
 
-      - BTN_CLINICAL_TOOLS opens clinical_tools_kb() below: ECG/lab
-        interpretation, calculators, Ask About Drugs, drug interactions, and
-        drug lookup.
+      - BTN_DRUGS_INFO opens drugs_info_kb() below: drug interactions and
+        Drug LookUp.
       - BTN_STUDY_TOOLS opens study_tools_kb() below: flashcards, the PDF
         splitter, notes, Ask My Books, and bookmarks.
+
+    BTN_CALCULATORS has no submenu and goes straight to the calculator
+    list. ECG and lab interpretation are not here at all any more -- they
+    are in the admin panel while their accuracy is still being worked on.
 
     BTN_SHELF ("📚 BOOK SHELF") is deliberately first and alone on its own
     row -- the closest a plain-text ReplyKeyboardMarkup button (no bold/size
@@ -101,7 +105,8 @@ def main_menu_kb(webapp_url: str = "", is_admin: bool = False, language: str | N
     rows = []
     if webapp_url:
         rows.append([btn(BTN_SHELF)])
-    rows.append([btn(BTN_CLINICAL_TOOLS), btn(BTN_STUDY_TOOLS)])
+    rows.append([btn(BTN_DRUGS_INFO), btn(BTN_CALCULATORS)])
+    rows.append([btn(BTN_STUDY_TOOLS)])
     rows.append([btn(BTN_MY_PLAN), btn(BTN_LANGUAGE)])
     rows.append([btn(BTN_SUPPORT)])
     rows.append([btn(BTN_FEEDBACK)])
@@ -368,20 +373,32 @@ def drug_search_inline_kb(bot_username: str) -> InlineKeyboardMarkup:
 
 
 # ---------------------------------------------------------------------------
-# Clinical Tools (ECG/lab interpretation, calculators, drug lookup/interactions)
+# Drugs Info (drug interactions, drug lookup)
 # ---------------------------------------------------------------------------
 
-def clinical_tools_kb(language: str | None = None) -> InlineKeyboardMarkup:
-    # Inline buttons are matched by callback_data, not by their caption, so
-    # translating these is safe with no filter changes -- unlike the reply
-    # keyboard above, where the caption IS the routing key (see ButtonText).
+def drugs_info_kb(language: str | None = None) -> InlineKeyboardMarkup:
+    """
+    The two drug tools, which is all this menu is.
+
+    It replaces the old "Clinical Tools" submenu, which had grown into a
+    drawer of six unrelated things: ECG and lab interpretation, the
+    calculators, and three separate drug entries -- "Ask About Drugs",
+    "Drug Interactions" and "Drug Lookup". Three doors onto drug
+    information is two too many, and the distinction between asking about a
+    drug and looking one up was never visible from the labels. They are now
+    one door with two tabs: compare drugs, or ask about one.
+
+    The calculators moved out to the top level (BTN_CALCULATORS), and ECG
+    and lab interpretation moved to the admin panel, so nothing is left
+    that "Clinical Tools" was the heading for.
+
+    Inline buttons are matched by callback_data, not by their caption, so
+    translating these is safe with no filter changes -- unlike the reply
+    keyboard above, where the caption IS the routing key (see ButtonText).
+    """
     items = [
-        ("🫀 ECG Interpretation", "study:ecg"),
-        ("🧪 Lab Interpretation", "study:lab"),
-        ("🧮 Calculators", "clin:calc"),
-        ("💊 Ask About Drugs", "study:drugqa"),
         ("🔀 Drug Interactions", "clin:interactions"),
-        ("💊 Drug Lookup", "clin:dose"),
+        ("💊 Drug LookUp", "study:drugqa"),
     ]
     return InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text=ui_text.t(language, label), callback_data=cb)] for label, cb in items]
@@ -458,6 +475,13 @@ def admin_menu_kb() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="🤝 Top Referrers", callback_data="admin:referrals")],
             [InlineKeyboardButton(text="📚 Book Requests", callback_data="admin:bookrequests")],
             [InlineKeyboardButton(text="🫀 ECG Teaching Books", callback_data="admin:ecgref")],
+            # ECG and lab interpretation live here now rather than in the
+            # user menu: both are being worked on, and the admin needs to
+            # keep exercising them on real tracings and real reports to see
+            # where the reads are still wrong. Same handlers the user menu
+            # used, now admin-gated (see ecg_lab_flow).
+            [InlineKeyboardButton(text="🫀 ECG Interpretation", callback_data="study:ecg")],
+            [InlineKeyboardButton(text="🧪 Lab Interpretation", callback_data="study:lab")],
         ]
     )
 

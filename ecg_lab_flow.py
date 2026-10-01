@@ -118,6 +118,29 @@ class EcgLabStates(StatesGroup):
     awaiting_lab_image = State()
 
 
+# ECG and lab interpretation are no longer offered to users: the reads are
+# still being corrected (the rate came back 97 on a tracing running 83), and
+# a study tool that quietly reports the wrong number is worse than one that
+# is not there. They stay reachable from the admin panel so the admin can
+# keep testing real tracings and real reports against the fixes.
+#
+# A gate on the handlers rather than just removing the buttons, because the
+# buttons do not disappear from messages Telegram has already delivered: an
+# inline keyboard sits in the chat history and stays tappable indefinitely,
+# so anyone who opened the old menu once can still fire these callbacks.
+_ADMIN_ONLY_NOTICE = (
+    "ECG and lab interpretation are being reworked and aren't available at the moment. "
+    "Everything else in the menu is unaffected."
+)
+
+
+async def _require_admin(callback: CallbackQuery) -> bool:
+    if subscriptions.is_admin(callback.from_user.id):
+        return True
+    await callback.message.answer(_ADMIN_ONLY_NOTICE)
+    return False
+
+
 def _upgrade_message(feature_label: str) -> str:
     return (
         f"You've already used your one free {feature_label} trial. This is a Premium feature -- "
@@ -128,6 +151,8 @@ def _upgrade_message(feature_label: str) -> str:
 @router.callback_query(F.data == "study:ecg")
 async def handle_study_ecg(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
+    if not await _require_admin(callback):
+        return
     if not subscriptions.can_use_trial_or_premium(callback.from_user.id, "ecg"):
         await callback.message.answer(_upgrade_message("ECG interpretation"))
         return
@@ -153,6 +178,8 @@ async def handle_study_ecg(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "study:lab")
 async def handle_study_lab(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
+    if not await _require_admin(callback):
+        return
     if not subscriptions.can_use_trial_or_premium(callback.from_user.id, "lab"):
         await callback.message.answer(_upgrade_message("lab interpretation"))
         return
@@ -164,6 +191,8 @@ async def handle_study_lab(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "lab:mode:text")
 async def handle_lab_mode_text(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
+    if not await _require_admin(callback):
+        return
     if not subscriptions.can_use_trial_or_premium(callback.from_user.id, "lab"):
         await callback.message.answer(_upgrade_message("lab interpretation"))
         return
@@ -174,6 +203,8 @@ async def handle_lab_mode_text(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "lab:mode:photo")
 async def handle_lab_mode_photo(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
+    if not await _require_admin(callback):
+        return
     if not subscriptions.can_use_trial_or_premium(callback.from_user.id, "lab"):
         await callback.message.answer(_upgrade_message("lab interpretation"))
         return
