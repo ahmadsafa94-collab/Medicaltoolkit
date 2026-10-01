@@ -52,8 +52,19 @@ async function api(path, opts = {}) {
   let data = null;
   try { data = await res.json(); } catch (_) { /* no body */ }
   if (!res.ok) {
-    const message = (data && data.detail) || `Request failed (${res.status})`;
-    throw new Error(message);
+    // `detail` is usually a string, but the drug endpoints answer a name
+    // miss with {message, suggestions} so the client can offer the
+    // alternatives as buttons. Both shapes are handled here so no caller
+    // has to, and the raw detail is attached for the ones that want it.
+    const detail = data && data.detail;
+    const message =
+      (typeof detail === "string" && detail) ||
+      (detail && detail.message) ||
+      `Request failed (${res.status})`;
+    const err = new Error(message);
+    err.status = res.status;
+    err.detail = detail;
+    throw err;
   }
   return data;
 }
@@ -67,16 +78,40 @@ function alertMsg(msg) {
 // View switching
 // ---------------------------------------------------------------------
 
-const views = ["view-shelf", "view-bookmarks", "view-request-book", "view-upload", "view-book", "view-reader"];
+const views = [
+  "view-shelf", "view-drugs", "view-bookmarks", "view-request-book",
+  "view-upload", "view-book", "view-reader",
+];
+
+// The tab bar's destinations. A root view resets the navigation stack
+// rather than being pushed onto it, so the Telegram BackButton is hidden
+// there -- there is nothing above a tab to go back to, and switching tabs
+// is not a step you reverse.
+const ROOT_VIEWS = ["view-shelf", "view-drugs"];
 let viewStack = ["view-shelf"];
 
 function showView(id, { pushHistory = true } = {}) {
   views.forEach((v) => (document.getElementById(v).hidden = v !== id));
   if (pushHistory) {
-    if (id === "view-shelf") viewStack = ["view-shelf"];
+    if (ROOT_VIEWS.includes(id)) viewStack = [id];
     else viewStack.push(id);
   }
+  syncTabBar(id);
   updateBackButton();
+}
+
+// The bar is only up on the root views: anything you navigated INTO is
+// depth that the BackButton owns, and a sideways jump out of the reader
+// would both fight that and eat the bottom of the page being read.
+function syncTabBar(activeId) {
+  const bar = document.getElementById("tabbar");
+  if (!bar) return;
+  const isRoot = ROOT_VIEWS.includes(activeId);
+  bar.hidden = !isRoot;
+  document.body.classList.toggle("has-tabbar", isRoot);
+  bar.querySelectorAll(".tab").forEach((t) => {
+    t.classList.toggle("is-active", t.dataset.tab === activeId);
+  });
 }
 
 function goBack() {
@@ -1980,6 +2015,320 @@ async function rateFlashcard(card, quality) {
   renderFlashcardReview();
 }
 
+
+// ---------------------------------------------------------------------
+// Drugs tab: interactions + label Q&A
+// ---------------------------------------------------------------------
+//
+// Both tools exist in the bot's chat menu already. The point of having
+// them here is that neither is really a turn-by-turn conversation: an
+// interaction check is a SET of drugs you assemble and then run, which in
+// chat means typing one name per message and re-reading the list from
+// scrollback, and a drug Q&A is a thread against one label, which in chat
+// has no visible "which drug am I asking about" state. Chips you can
+// remove, and a thread with the drug pinned above it, are what those two
+// shapes actually want.
+//
+// Neither reimplements anything: both POST to endpoints that call the same
+// interaction_ai / drug_qa functions the chat flows call.
+
+const DRUG_SUGGEST_MIN_CHARS = 2;
+const DRUG_SUGGEST_DEBOUNCE_MS = 250;
+
+let interactionDrugs = [];
+let lookupDrug = null;
+let lookupThread = [];   // [{q, a}] -- sent back as history so follow-ups keep context
+let drugsBusy = false;
+
+function drugsTab(name) {
+  document.querySelectorAll("#view-drugs .subtab").forEach((t) => {
+    t.classList.toggle("is-active", t.dataset.drugtab === name);
+  });
+  document.getElementById("drugs-pane-interactions").hidden = name !== "interactions";
+  document.getElementById("drugs-pane-lookup").hidden = name !== "lookup";
+}
+
+// --- shared name autocomplete ----------------------------------------
+// One debounced fetch per input. Suggestions are a convenience, so a
+// failed or slow lookup just leaves the list closed rather than surfacing
+// an error over something the user is still typing.
+function wireDrugSuggest(inputId, boxId, onPick) {
+  const input = document.getElementById(inputId);
+  const box = document.getElementById(boxId);
+  let timer = null;
+  let seq = 0;
+
+  function close() {
+    box.hidden = true;
+    box.innerHTML = "";
+  }
+
+  input.addEventListener("input", () => {
+    clearTimeout(timer);
+    const q = input.value.trim();
+    if (q.length < DRUG_SUGGEST_MIN_CHARS) return close();
+    timer = setTimeout(async () => {
+      const mine = ++seq;
+      let names = [];
+      try {
+        ({ names } = await api(`/api/drugs/search?q=${encodeURIComponent(q)}`));
+      } catch (_) {
+        return close();
+      }
+      // A slower earlier request must not overwrite a newer one's results.
+      if (mine !== seq) return;
+      if (!names || !names.length) return close();
+      box.innerHTML = names
+        .map((n) => `<button class="suggestion" data-name="${escapeHtml(n)}">${escapeHtml(n)}</button>`)
+        .join("");
+      box.hidden = false;
+    }, DRUG_SUGGEST_DEBOUNCE_MS);
+  });
+
+  box.addEventListener("click", (e) => {
+    const btn = e.target.closest(".suggestion");
+    if (!btn) return;
+    input.value = btn.dataset.name;
+    close();
+    onPick(btn.dataset.name);
+  });
+
+  return { close };
+}
+
+// A name miss comes back as 404 + suggestions; offer them instead of
+// making the user guess the spelling again.
+function renderNameSuggestions(container, err, onPick) {
+  const suggestions = (err.detail && err.detail.suggestions) || [];
+  if (!suggestions.length) {
+    container.innerHTML = `<p class="muted">${escapeHtml(err.message)}</p>`;
+    return;
+  }
+  container.innerHTML =
+    `<p class="muted">${escapeHtml(err.message)} Did you mean:</p>` +
+    `<div class="suggestions is-inline">` +
+    suggestions.map((n) => `<button class="suggestion" data-name="${escapeHtml(n)}">${escapeHtml(n)}</button>`).join("") +
+    `</div>`;
+  container.querySelectorAll(".suggestion").forEach((b) => {
+    b.addEventListener("click", () => onPick(b.dataset.name));
+  });
+}
+
+// --- interactions -----------------------------------------------------
+
+function renderInteractionChips() {
+  const box = document.getElementById("interaction-chips");
+  box.innerHTML = interactionDrugs
+    .map((n, i) => `<span class="chip">${escapeHtml(n)}<button class="chip-x" data-i="${i}">×</button></span>`)
+    .join("");
+  document.getElementById("interaction-check").disabled = interactionDrugs.length < 2 || drugsBusy;
+  document.getElementById("interaction-clear").hidden = interactionDrugs.length === 0;
+}
+
+function addInteractionDrug(name) {
+  const clean = (name || "").trim();
+  if (!clean) return;
+  if (interactionDrugs.some((d) => d.toLowerCase() === clean.toLowerCase())) {
+    alertMsg(`${clean} is already on the list.`);
+    return;
+  }
+  interactionDrugs.push(clean);
+  document.getElementById("interaction-input").value = "";
+  renderInteractionChips();
+}
+
+async function checkInteractions() {
+  if (interactionDrugs.length < 2 || drugsBusy) return;
+  const result = document.getElementById("interaction-result");
+  drugsBusy = true;
+  renderInteractionChips();
+  result.hidden = false;
+  result.innerHTML = `<p class="muted">Checking ${interactionDrugs.length} drugs against each other's FDA labels…</p>`;
+  try {
+    const { answer, drugs } = await api("/api/drugs/interactions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ names: interactionDrugs }),
+    });
+    // The server resolves each name to the label's own spelling; show that
+    // back so it is clear which products were actually read.
+    if (Array.isArray(drugs) && drugs.length) {
+      interactionDrugs = drugs;
+      renderInteractionChips();
+    }
+    result.innerHTML =
+      `<p class="muted">${escapeHtml(interactionDrugs.join(" · "))}</p>` +
+      `<div class="qa-msg a">${escapeHtml(answer)}</div>`;
+  } catch (e) {
+    if (e.status === 404) {
+      renderNameSuggestions(result, e, (name) => {
+        // Replace whichever name failed with the one they picked. The
+        // server reports the failing name inside the message, so match on it.
+        const idx = interactionDrugs.findIndex((d) => e.message.includes(d));
+        if (idx >= 0) interactionDrugs[idx] = name;
+        else addInteractionDrug(name);
+        renderInteractionChips();
+        result.hidden = true;
+      });
+    } else {
+      result.innerHTML = `<p class="muted">${escapeHtml(e.message)}</p>`;
+    }
+  } finally {
+    drugsBusy = false;
+    renderInteractionChips();
+  }
+}
+
+// --- drug lookup (Q&A against one label) ------------------------------
+
+function renderLookupState() {
+  const label = document.getElementById("lookup-current");
+  const askPanel = document.getElementById("lookup-ask-panel");
+  if (lookupDrug) {
+    label.hidden = false;
+    label.textContent = `Asking about: ${lookupDrug}`;
+    askPanel.hidden = false;
+  } else {
+    label.hidden = true;
+    askPanel.hidden = true;
+  }
+  renderLookupThread();
+}
+
+function renderLookupThread() {
+  const box = document.getElementById("lookup-thread");
+  box.innerHTML = lookupThread
+    .map(
+      (t) =>
+        `<div class="qa-msg q">${escapeHtml(t.q)}</div>` +
+        `<div class="qa-msg a">${escapeHtml(t.a)}</div>`
+    )
+    .join("");
+  box.scrollTop = box.scrollHeight;
+}
+
+function setLookupDrug(name) {
+  const clean = (name || "").trim();
+  if (!clean) return;
+  // A different drug means a different label, so the thread cannot carry
+  // over -- its history would be answered against the wrong document.
+  if (lookupDrug && clean.toLowerCase() !== lookupDrug.toLowerCase()) lookupThread = [];
+  lookupDrug = clean;
+  document.getElementById("lookup-drug-input").value = clean;
+  renderLookupState();
+}
+
+async function askLookup() {
+  if (drugsBusy) return;
+  const input = document.getElementById("lookup-question");
+  const question = input.value.trim();
+  if (!lookupDrug) return alertMsg("Pick a drug first.");
+  if (!question) return;
+
+  drugsBusy = true;
+  const askBtn = document.getElementById("lookup-ask");
+  askBtn.disabled = true;
+  lookupThread.push({ q: question, a: "…reading the label…" });
+  input.value = "";
+  renderLookupThread();
+
+  try {
+    const { answer, drug } = await api("/api/drugs/ask", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        drug: lookupDrug,
+        question,
+        // Everything answered so far, minus the placeholder just pushed.
+        history: lookupThread.slice(0, -1).map((t) => ({ question: t.q, answer: t.a })),
+      }),
+    });
+    if (drug && drug !== lookupDrug) {
+      lookupDrug = drug;
+      renderLookupState();
+    }
+    lookupThread[lookupThread.length - 1].a = answer;
+  } catch (e) {
+    // The failed turn is dropped rather than left in the thread: it would
+    // otherwise be replayed as history on the next question, teaching the
+    // model that an error message is a valid answer.
+    lookupThread.pop();
+    if (e.status === 404) {
+      const panel = document.getElementById("lookup-thread");
+      renderNameSuggestions(panel, e, (name) => {
+        setLookupDrug(name);
+        document.getElementById("lookup-question").value = question;
+      });
+    } else {
+      alertMsg(e.message);
+    }
+  } finally {
+    drugsBusy = false;
+    askBtn.disabled = false;
+    renderLookupThread();
+  }
+}
+
+function wireDrugsTab() {
+  document.querySelectorAll("#tabbar .tab").forEach((t) => {
+    t.addEventListener("click", () => {
+      showView(t.dataset.tab);
+      if (t.dataset.tab === "view-shelf") loadShelf();
+    });
+  });
+  document.querySelectorAll("#view-drugs .subtab").forEach((t) => {
+    t.addEventListener("click", () => drugsTab(t.dataset.drugtab));
+  });
+
+  const interactionSuggest = wireDrugSuggest("interaction-input", "interaction-suggestions", addInteractionDrug);
+  document.getElementById("interaction-add").addEventListener("click", () => {
+    interactionSuggest.close();
+    addInteractionDrug(document.getElementById("interaction-input").value);
+  });
+  document.getElementById("interaction-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      interactionSuggest.close();
+      addInteractionDrug(e.target.value);
+    }
+  });
+  document.getElementById("interaction-chips").addEventListener("click", (e) => {
+    const x = e.target.closest(".chip-x");
+    if (!x) return;
+    interactionDrugs.splice(Number(x.dataset.i), 1);
+    renderInteractionChips();
+  });
+  document.getElementById("interaction-check").addEventListener("click", checkInteractions);
+  document.getElementById("interaction-clear").addEventListener("click", () => {
+    interactionDrugs = [];
+    document.getElementById("interaction-result").hidden = true;
+    renderInteractionChips();
+  });
+
+  const lookupSuggest = wireDrugSuggest("lookup-drug-input", "lookup-suggestions", setLookupDrug);
+  document.getElementById("lookup-drug-set").addEventListener("click", () => {
+    lookupSuggest.close();
+    setLookupDrug(document.getElementById("lookup-drug-input").value);
+  });
+  document.getElementById("lookup-drug-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      lookupSuggest.close();
+      setLookupDrug(e.target.value);
+    }
+  });
+  document.getElementById("lookup-ask").addEventListener("click", askLookup);
+  document.getElementById("lookup-reset").addEventListener("click", () => {
+    lookupDrug = null;
+    lookupThread = [];
+    document.getElementById("lookup-drug-input").value = "";
+    renderLookupState();
+  });
+
+  renderInteractionChips();
+  renderLookupState();
+}
+
 // ---------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------
@@ -1988,5 +2337,7 @@ async function rateFlashcard(card, quality) {
   if (!INIT_DATA) {
     INIT_DATA = await waitForInitData();
   }
+  wireDrugsTab();
+  syncTabBar("view-shelf");
   loadShelf();
 })();

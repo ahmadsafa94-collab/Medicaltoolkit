@@ -15,7 +15,7 @@
     changes style.css or app.js, or the fix for THIS bug silently stops
     covering your NEXT change.
   -->
-  <link rel="stylesheet" href="style.css?v=8" />
+  <link rel="stylesheet" href="style.css?v=9" />
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 </head>
@@ -35,6 +35,64 @@
     <div id="shelf-grid" class="shelf-grid"></div>
     <button id="btn-add-book" class="fab" title="Add a book">+</button>
     <input id="file-input" type="file" accept="application/pdf" hidden />
+  </section>
+
+  <!-- ============ DRUGS (root, second tab) ============ -->
+  <section id="view-drugs" class="view" hidden>
+    <header class="topbar"><h1>💊 Drugs Info</h1></header>
+
+    <div class="subtabs">
+      <button class="subtab is-active" data-drugtab="interactions">🔀 Interactions</button>
+      <button class="subtab" data-drugtab="lookup">💊 Drug LookUp</button>
+    </div>
+
+    <!-- ---- Interactions ---- -->
+    <div id="drugs-pane-interactions" class="drugs-pane">
+      <div class="panel">
+        <p class="muted">
+          Add two or more drugs. Each one's own FDA label is read, and only what those labels
+          actually say about the others is reported.
+        </p>
+        <div class="name-editor drug-add-row">
+          <input id="interaction-input" type="text" placeholder="Drug name, e.g. warfarin"
+                 autocomplete="off" enterkeyhint="done" />
+          <button id="interaction-add" class="btn">Add</button>
+        </div>
+        <div id="interaction-suggestions" class="suggestions" hidden></div>
+        <div id="interaction-chips" class="chips"></div>
+        <div class="flash-review-row" style="margin-top:12px;">
+          <button id="interaction-check" class="btn" disabled>Check interactions</button>
+          <button id="interaction-clear" class="btn secondary" hidden>Clear</button>
+        </div>
+      </div>
+      <div id="interaction-result" class="panel" hidden></div>
+    </div>
+
+    <!-- ---- Drug LookUp ---- -->
+    <div id="drugs-pane-lookup" class="drugs-pane" hidden>
+      <div class="panel">
+        <p class="muted">
+          Pick a drug, then ask anything about it in your own words. Answers come from that drug's
+          official FDA label, and follow-up questions keep the thread.
+        </p>
+        <div class="name-editor drug-add-row">
+          <input id="lookup-drug-input" type="text" placeholder="Drug name, e.g. metformin"
+                 autocomplete="off" enterkeyhint="done" />
+          <button id="lookup-drug-set" class="btn">Set</button>
+        </div>
+        <div id="lookup-suggestions" class="suggestions" hidden></div>
+        <p id="lookup-current" class="muted" hidden></p>
+      </div>
+      <div id="lookup-thread" class="qa-thread"></div>
+      <div class="panel" id="lookup-ask-panel" hidden>
+        <textarea id="lookup-question" rows="3"
+                  placeholder="e.g. Can it be used in renal impairment?"></textarea>
+        <div class="flash-review-row" style="margin-top:10px;">
+          <button id="lookup-ask" class="btn">Ask</button>
+          <button id="lookup-reset" class="btn secondary">New drug</button>
+        </div>
+      </div>
+    </div>
   </section>
 
   <!-- ============ BOOKMARKS ============ -->
@@ -146,6 +204,21 @@
     <div id="action-sheet" class="action-sheet"></div>
   </div>
 
-  <script src="app.js?v=8"></script>
+
+  <!-- ============ BOTTOM TAB BAR ============ -->
+  <!--
+    Only shown on the two ROOT views (shelf, drugs). Any view you navigated
+    INTO -- the reader, a book's detail, an upload -- hides it: those are
+    depth, and the Telegram BackButton is what gets you out of them. Leaving
+    the bar up inside the reader would offer a sideways jump out of a screen
+    the back button is already responsible for, and would eat the bottom of
+    a page being read.
+  -->
+  <nav id="tabbar" class="tabbar">
+    <button class="tab is-active" data-tab="view-shelf"><span>📚</span><small>Shelf</small></button>
+    <button class="tab" data-tab="view-drugs"><span>💊</span><small>Drugs</small></button>
+  </nav>
+
+  <script src="app.js?v=9"></script>
 </body>
 </html>

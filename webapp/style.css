@@ -397,3 +397,146 @@ body {
 .textLayer ::selection { background: rgba(38, 120, 182, 0.35); }
 
 .spinner-line { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--hint); }
+
+/* ---------------------------------------------------------------------
+   Drugs tab: bottom tab bar, sub-tabs, chips, name suggestions
+   ---------------------------------------------------------------------
+   Everything here is built from the --tg-theme-* tokens at the top of
+   this file, so it follows the user's own Telegram theme (light or dark)
+   rather than carrying a second palette of its own. */
+
+.tabbar {
+  position: fixed;
+  left: 0; right: 0; bottom: 0;
+  display: flex;
+  background: var(--secondary-bg);
+  border-top: 1px solid rgba(128, 128, 128, 0.22);
+  /* Clears the iPhone home-indicator strip, which otherwise sits on top
+     of the tab labels. */
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  z-index: 40;
+}
+
+.tabbar .tab {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 8px 0 7px;
+  border: 0;
+  background: none;
+  color: var(--hint);
+  font: inherit;
+  cursor: pointer;
+}
+
+.tabbar .tab span { font-size: 20px; line-height: 1; }
+.tabbar .tab small { font-size: 11px; }
+.tabbar .tab.is-active { color: var(--link); }
+
+/* Only applied while the bar is actually up (see app.js's syncTabBar), so
+   the reader and the other pushed views keep the full height. */
+body.has-tabbar { padding-bottom: 60px; }
+
+.subtabs {
+  display: flex;
+  gap: 8px;
+  padding: 0 14px 4px;
+}
+
+.subtabs .subtab {
+  flex: 1;
+  padding: 9px 6px;
+  border: 1px solid rgba(128, 128, 128, 0.28);
+  border-radius: 10px;
+  background: var(--secondary-bg);
+  color: var(--hint);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.subtabs .subtab.is-active {
+  background: var(--button);
+  border-color: var(--button);
+  color: var(--button-text);
+}
+
+.drug-add-row input { flex: 1; min-width: 0; }
+
+.chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px 6px 11px;
+  border-radius: 999px;
+  background: var(--bg);
+  border: 1px solid rgba(128, 128, 128, 0.28);
+  font-size: 13px;
+}
+
+.chip-x {
+  border: 0;
+  background: none;
+  color: var(--hint);
+  font-size: 16px;
+  line-height: 1;
+  padding: 0 2px;
+  cursor: pointer;
+}
+
+.suggestions {
+  display: flex;
+  flex-direction: column;
+  margin-top: 8px;
+  border: 1px solid rgba(128, 128, 128, 0.28);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+/* The same list rendered under an error message rather than under an
+   input -- it reads as a row of options there, not a dropdown. */
+.suggestions.is-inline {
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 8px;
+  border: 0;
+}
+
+.suggestions .suggestion {
+  padding: 10px 12px;
+  border: 0;
+  background: var(--secondary-bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.suggestions:not(.is-inline) .suggestion + .suggestion {
+  border-top: 1px solid rgba(128, 128, 128, 0.18);
+}
+
+.suggestions.is-inline .suggestion {
+  border: 1px solid rgba(128, 128, 128, 0.28);
+  border-radius: 999px;
+  padding: 7px 12px;
+}
+
+/* Matches the book Q&A log's column so an answer thread looks the same
+   wherever it appears in the app. */
+.qa-thread {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 14px;
+}
+
+.qa-thread:empty { display: none; }
+
+#lookup-thread .qa-msg { white-space: pre-wrap; }
+#interaction-result .qa-msg { white-space: pre-wrap; max-width: 100%; }

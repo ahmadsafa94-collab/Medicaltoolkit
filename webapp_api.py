@@ -56,6 +56,10 @@ import pdf_export
 import pdf_qa
 import quiz_ai
 import subscriptions
+import drug_lookup
+import drug_qa
+import interaction_ai
+import name_resolver
 from bot_instance import bot as tg_bot
 from chapter_flow import build_chapter_ai_kb
 from config import (
@@ -1316,6 +1320,192 @@ async def request_book_endpoint(request: Request):
 
 _WEBAPP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webapp")
 
+
+# ---------------------------------------------------------------------------
+# Drugs: interactions + label Q&A
+# ---------------------------------------------------------------------------
+#
+# The same two tools the bot's 💊 Drugs Info menu offers, exposed to the mini
+# app so they can be used interactively -- typing a name with live
+# suggestions, building up a drug list by tapping, asking follow-ups in a
+# thread -- instead of as a turn-by-turn chat exchange. Both call exactly the
+# functions the chat flows call (interaction_ai.analyze_interactions,
+# drug_qa.answer_question), so there is one implementation of each and the
+# answers cannot drift between the two surfaces.
+
+_DRUG_LOOKUP_TIMEOUT_SECONDS = 25
+_DRUG_ANSWER_TIMEOUT_SECONDS = 60
+_DRUG_RESOLVE_TIMEOUT_SECONDS = 20
+_MAX_INTERACTION_DRUGS = 15  # mirrors interaction_flow.MAX_DRUGS
+
+
+async def _json_body(request: Request) -> dict:
+    try:
+        body = await request.json()
+    except Exception:
+        raise ApiError(status_code=400, detail="Invalid JSON body.")
+    if not isinstance(body, dict):
+        raise ApiError(status_code=400, detail="Invalid JSON body.")
+    return body
+
+
+async def _fetch_label(name: str) -> dict:
+    """
+    One drug's FDA label, or an ApiError carrying suggestions.
+
+    A miss is answered with 404 plus the names Claude thinks were meant, so
+    the mini app can offer them as buttons rather than making the user guess
+    at the spelling again -- the same recovery the chat flow does with
+    name_resolver, just handed to the client to render.
+    """
+    try:
+        return await asyncio.wait_for(drug_lookup.lookup_drug(name), timeout=_DRUG_LOOKUP_TIMEOUT_SECONDS)
+    except drug_lookup.DrugNotFoundError:
+        try:
+            suggestions = await asyncio.wait_for(
+                asyncio.to_thread(name_resolver.resolve_drug_names, name),
+                timeout=_DRUG_RESOLVE_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            logger.exception("Drug name resolution failed for %r", name)
+            suggestions = []
+        raise ApiError(
+            status_code=404,
+            detail={"message": f"No FDA label found for \"{name}\".", "suggestions": suggestions},
+        )
+    except drug_lookup.DrugLookupRateLimitedError:
+        raise ApiError(status_code=429, detail="openFDA is rate-limiting us right now. Please try again shortly.")
+    except asyncio.TimeoutError:
+        raise ApiError(status_code=504, detail=f"Looking up \"{name}\" took too long. Please try again.")
+
+
+async def drug_search(request: Request):
+    """Live name suggestions for the two inputs. Never an error: an empty
+    list is a perfectly good answer to a half-typed word."""
+    require_user(request)
+    prefix = (request.query_params.get("q") or "").strip()
+    if len(prefix) < 2:
+        return JSONResponse({"names": []})
+    try:
+        names = await asyncio.wait_for(drug_lookup.search_drug_names(prefix), timeout=_DRUG_LOOKUP_TIMEOUT_SECONDS)
+    except Exception:
+        # Autocomplete is a convenience; a failed suggestion fetch must not
+        # look like a broken screen while the user is still typing.
+        logger.info("Drug name search failed for %r (non-fatal)", prefix)
+        names = []
+    return JSONResponse({"names": names})
+
+
+async def drug_interactions(request: Request):
+    user = require_user(request)
+    body = await _json_body(request)
+
+    raw_names = body.get("names")
+    if not isinstance(raw_names, list):
+        raise ApiError(status_code=400, detail="Invalid drug list.")
+    names, seen = [], set()
+    for raw in raw_names:
+        if not isinstance(raw, str):
+            raise ApiError(status_code=400, detail="Invalid drug list.")
+        name = raw.strip()
+        if name and name.lower() not in seen:
+            seen.add(name.lower())
+            names.append(name)
+    if len(names) < 2:
+        raise ApiError(status_code=400, detail="Add at least 2 drugs to check for interactions.")
+    if len(names) > _MAX_INTERACTION_DRUGS:
+        raise ApiError(
+            status_code=400,
+            detail=f"That's more than {_MAX_INTERACTION_DRUGS} drugs -- checking every pair beyond that "
+            "produces a wall of text nobody reads. Remove a few.",
+        )
+
+    try:
+        subscriptions.check_and_consume(user["id"], "questions")
+    except subscriptions.QuotaExceeded as e:
+        raise ApiError(status_code=402, detail=str(e))
+
+    # Sequentially rather than with gather: openFDA rate-limits, and a burst
+    # of 15 parallel lookups is the reliable way to get a 429 for the whole
+    # request instead of an answer.
+    drugs = []
+    for name in names:
+        sections = await _fetch_label(name)
+        drugs.append({"name": sections.get("_name") or name, "sections": sections})
+
+    try:
+        answer = await asyncio.wait_for(
+            asyncio.to_thread(
+                interaction_ai.analyze_interactions, drugs, subscriptions.get_language(user["id"])
+            ),
+            timeout=_DRUG_ANSWER_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        raise ApiError(status_code=504, detail="The interaction check took too long. Please try again.")
+    except Exception as e:
+        logger.exception("Mini app interaction check failed")
+        raise ApiError(status_code=500, detail=f"Couldn't check those interactions: {e or type(e).__name__}")
+
+    return JSONResponse({"answer": answer, "drugs": [d["name"] for d in drugs]})
+
+
+async def drug_ask(request: Request):
+    user = require_user(request)
+    body = await _json_body(request)
+
+    name = (body.get("drug") or "").strip()
+    question = (body.get("question") or "").strip()
+    if not name:
+        raise ApiError(status_code=400, detail="Which drug is the question about?")
+    if not question:
+        raise ApiError(status_code=400, detail="Question can't be empty.")
+
+    # Client-supplied conversation state for this drug, so a follow-up
+    # ("and in renal impairment?") does not have to repeat itself. Untrusted
+    # like any other body field, so it is validated shape-first.
+    raw_history = body.get("history") or []
+    if not isinstance(raw_history, list):
+        raise ApiError(status_code=400, detail="Invalid history.")
+    history = []
+    for turn in raw_history[-drug_qa.MAX_HISTORY_TURNS:]:
+        if not isinstance(turn, dict):
+            raise ApiError(status_code=400, detail="Invalid history entry.")
+        q, a = turn.get("question"), turn.get("answer")
+        if not isinstance(q, str) or not isinstance(a, str):
+            raise ApiError(status_code=400, detail="Invalid history entry.")
+        history.append({"question": q, "answer": a})
+
+    try:
+        subscriptions.check_and_consume(user["id"], "questions")
+    except subscriptions.QuotaExceeded as e:
+        raise ApiError(status_code=402, detail=str(e))
+
+    sections = await _fetch_label(name)
+    resolved = sections.get("_name") or name
+
+    try:
+        answer = await asyncio.wait_for(
+            asyncio.to_thread(
+                drug_qa.answer_question,
+                resolved,
+                sections,
+                question,
+                history,
+                subscriptions.get_language(user["id"]),
+            ),
+            timeout=_DRUG_ANSWER_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        raise ApiError(status_code=504, detail="That question took too long to answer. Please try again.")
+    except drug_qa.DrugQAError as e:
+        raise ApiError(status_code=409, detail=str(e))
+    except Exception as e:
+        logger.exception("Mini app drug Q&A failed for %r", resolved)
+        raise ApiError(status_code=500, detail=f"Couldn't answer that: {e or type(e).__name__}")
+
+    return JSONResponse({"answer": answer, "drug": resolved})
+
+
 routes = [
     Route("/api/books", list_books, methods=["GET"]),
     Route("/api/upload", upload_book, methods=["POST"]),
@@ -1348,6 +1538,9 @@ routes = [
     Route("/api/books/{book_id}/notes", add_note_endpoint, methods=["POST"]),
     Route("/api/books/{book_id}/notes/{note_id}", delete_note_endpoint, methods=["DELETE"]),
     Route("/api/request-book", request_book_endpoint, methods=["POST"]),
+    Route("/api/drugs/search", drug_search, methods=["GET"]),
+    Route("/api/drugs/interactions", drug_interactions, methods=["POST"]),
+    Route("/api/drugs/ask", drug_ask, methods=["POST"]),
     Mount("/webapp", app=StaticFiles(directory=_WEBAPP_DIR, html=True), name="webapp"),
 ]
 
