@@ -547,6 +547,58 @@ async def cmd_reply_user(message: Message):
         await message.answer(f"Couldn't reach user {target_id} (they may have blocked the bot).")
 
 
+@router.message(Command("lexitest"))
+async def cmd_lexitest(message: Message):
+    """
+    Calibrate the 📘 Lexicomp tab against the real VMOS phone.
+      /lexitest              -- is the phone reachable? what's on screen?
+      /lexitest packages     -- installed packages containing "lexi"
+      /lexitest <drug>       -- run a full fetch, bypassing the cache, and
+                                report each step plus the start of the text
+    """
+    if not await _require_admin_message(message):
+        return
+    import lexidrug
+    import vmos_client
+    from telegram_helpers import send_long_text
+
+    if not vmos_client.is_configured():
+        await message.answer("VMOS isn't configured. Set VMOS_ACCESS_KEY, VMOS_SECRET_KEY and VMOS_PAD_CODE.")
+        return
+
+    arg = (message.text or "").split(maxsplit=1)
+    arg = arg[1].strip() if len(arg) > 1 else ""
+    try:
+        if not arg:
+            status = await vmos_client.pad_status()
+            echo = await vmos_client.shell("echo ok; wm size")
+            nodes = await lexidrug._dump_screen()
+            screen = " | ".join(lexidrug._screen_lines(nodes)[:40])
+            await send_long_text(
+                message.answer,
+                f"Pad: {status}\nShell: {echo.strip()}\n\nOn screen now:\n{screen or '(no text)'}",
+            )
+        elif arg == "packages":
+            out = await vmos_client.shell("pm list packages | grep -i lexi")
+            await message.answer(out.strip() or "No package containing 'lexi' is installed.")
+        else:
+            await message.answer(f"Fetching {arg!r} from Lexidrug… (can take a minute)")
+            log: list[str] = []
+            started = time.monotonic()
+            try:
+                entry = await lexidrug.get_monograph(arg, log=log, refresh=True)
+            except lexidrug.LexidrugError as e:
+                await send_long_text(message.answer, f"❌ {e}\n\nSteps:\n" + "\n".join(log))
+                return
+            await send_long_text(
+                message.answer,
+                f"✅ {entry['title']} in {time.monotonic() - started:.0f}s, {len(entry['text'])} chars\n\n"
+                "Steps:\n" + "\n".join(log) + "\n\nStart of text:\n" + entry["text"][:2500],
+            )
+    except vmos_client.VmosError as e:
+        await message.answer(f"❌ VMOS API error: {e}")
+
+
 @router.message(Command("pricebook"))
 async def cmd_price_book(message: Message):
     """

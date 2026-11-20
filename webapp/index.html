@@ -15,7 +15,7 @@
     changes style.css or app.js, or the fix for THIS bug silently stops
     covering your NEXT change.
   -->
-  <link rel="stylesheet" href="style.css?v=10" />
+  <link rel="stylesheet" href="style.css?v=11" />
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 </head>
@@ -44,6 +44,7 @@
     <div class="subtabs">
       <button class="subtab is-active" data-drugtab="interactions">🔀 Interactions</button>
       <button class="subtab" data-drugtab="lookup">💊 Drug LookUp</button>
+      <button class="subtab" data-drugtab="lexi">📘 Lexicomp</button>
     </div>
 
     <!-- ---- Interactions ---- -->
@@ -90,6 +91,33 @@
         <div class="flash-review-row" style="margin-top:10px;">
           <button id="lookup-ask" class="btn">Ask</button>
           <button id="lookup-reset" class="btn secondary">New drug</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ---- Lexicomp / Lexidrug (read off the cloud phone) ---- -->
+    <div id="drugs-pane-lexi" class="drugs-pane" hidden>
+      <div class="panel">
+        <p class="muted">
+          Pick a drug, then ask about it. The monograph is opened in the Lexidrug app on our
+          cloud phone and read from there, so the first question on a new drug can take up to a
+          minute. Follow-ups are quick.
+        </p>
+        <p id="lexi-offline" class="muted" hidden>Lexicomp isn't connected right now.</p>
+        <div class="name-editor drug-add-row">
+          <input id="lexi-drug-input" type="text" placeholder="Drug name, e.g. vancomycin"
+                 autocomplete="off" enterkeyhint="done" />
+          <button id="lexi-drug-set" class="btn">Open</button>
+        </div>
+        <p id="lexi-current" class="muted" hidden></p>
+      </div>
+      <div id="lexi-thread" class="qa-thread"></div>
+      <div class="panel" id="lexi-ask-panel" hidden>
+        <textarea id="lexi-question" rows="3"
+                  placeholder="e.g. Dose adjustment for CrCl 30?"></textarea>
+        <div class="flash-review-row" style="margin-top:10px;">
+          <button id="lexi-ask" class="btn">Ask</button>
+          <button id="lexi-reset" class="btn secondary">New drug</button>
         </div>
       </div>
     </div>
@@ -219,6 +247,6 @@
     <button class="tab" data-tab="view-drugs"><span>💊</span><small>Drugs</small></button>
   </nav>
 
-  <script src="app.js?v=10"></script>
+  <script src="app.js?v=11"></script>
 </body>
 </html>

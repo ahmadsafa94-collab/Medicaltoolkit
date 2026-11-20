@@ -538,5 +538,5 @@ body.has-tabbar { padding-bottom: 60px; }
 
 .qa-thread:empty { display: none; }
 
-#lookup-thread .qa-msg { white-space: pre-wrap; }
+#lookup-thread .qa-msg, #lexi-thread .qa-msg { white-space: pre-wrap; }
 #interaction-result .qa-msg { white-space: pre-wrap; max-width: 100%; }

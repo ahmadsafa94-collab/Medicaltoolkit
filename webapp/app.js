@@ -2046,6 +2046,8 @@ function drugsTab(name) {
   });
   document.getElementById("drugs-pane-interactions").hidden = name !== "interactions";
   document.getElementById("drugs-pane-lookup").hidden = name !== "lookup";
+  document.getElementById("drugs-pane-lexi").hidden = name !== "lexi";
+  if (name === "lexi") checkLexiStatus();
 }
 
 // --- shared name autocomplete ----------------------------------------
@@ -2329,6 +2331,134 @@ async function askLookup() {
   }
 }
 
+// --- Lexicomp / Lexidrug (read off the cloud phone) -------------------
+//
+// Same thread shape as Drug LookUp, but the source document is the
+// Lexidrug monograph the server reads off the VMOS cloud phone rather than
+// an FDA label. Opening a drug is its own step because it is the slow one
+// (the phone has to search, open and scroll the monograph); the server
+// caches the result, so every question after that is a normal Claude call.
+// There is no autocomplete or "did you mean" here: the app's own search is
+// the authority on names, and the server reports back the title Lexidrug
+// actually opened so a wrong match is visible before anyone asks.
+
+let lexiDrug = null;
+let lexiThread = [];
+let lexiBusy = false;
+let lexiStatusChecked = false;
+
+async function checkLexiStatus() {
+  if (lexiStatusChecked) return;
+  lexiStatusChecked = true;
+  try {
+    const { enabled } = await api("/api/lexidrug/status");
+    document.getElementById("lexi-offline").hidden = !!enabled;
+  } catch (_) {
+    lexiStatusChecked = false; // try again next time the tab is opened
+  }
+}
+
+function renderLexiState() {
+  const label = document.getElementById("lexi-current");
+  if (lexiDrug) {
+    label.hidden = false;
+    label.textContent = `Lexidrug monograph: ${lexiDrug}`;
+  } else {
+    label.hidden = true;
+  }
+  document.getElementById("lexi-ask-panel").hidden = !lexiDrug;
+  const box = document.getElementById("lexi-thread");
+  box.innerHTML = lexiThread
+    .map((t) => `<div class="qa-msg q">${escapeHtml(t.q)}</div><div class="qa-msg a">${escapeHtml(t.a)}</div>`)
+    .join("");
+  box.scrollTop = box.scrollHeight;
+}
+
+async function openLexiDrug(name) {
+  const clean = (name || "").trim();
+  if (!clean || lexiBusy) return;
+  const input = document.getElementById("lexi-drug-input");
+  const setBtn = document.getElementById("lexi-drug-set");
+  const label = document.getElementById("lexi-current");
+  lexiBusy = true;
+  input.disabled = true;
+  setBtn.disabled = true;
+  label.hidden = false;
+  label.textContent = `Opening "${clean}" in Lexidrug on the cloud phone…`;
+  try {
+    const { drug } = await api("/api/lexidrug/open", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ drug: clean }),
+    });
+    if (!lexiDrug || drug.toLowerCase() !== lexiDrug.toLowerCase()) lexiThread = [];
+    lexiDrug = drug;
+    input.value = clean;
+  } catch (e) {
+    alertMsg(e.message);
+  } finally {
+    input.disabled = false;
+    setBtn.disabled = false;
+    lexiBusy = false;
+    renderLexiState();
+  }
+}
+
+async function askLexi() {
+  if (lexiBusy) return;
+  const input = document.getElementById("lexi-question");
+  const question = input.value.trim();
+  if (!lexiDrug) return alertMsg("Open a drug first.");
+  if (!question) return;
+
+  lexiBusy = true;
+  const askBtn = document.getElementById("lexi-ask");
+  askBtn.disabled = true;
+  lexiThread.push({ q: question, a: "…reading the Lexidrug monograph…" });
+  input.value = "";
+  renderLexiState();
+  try {
+    const { answer } = await api("/api/lexidrug/ask", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        drug: lexiDrug,
+        question,
+        history: lexiThread.slice(0, -1).map((t) => ({ question: t.q, answer: t.a })),
+      }),
+    });
+    lexiThread[lexiThread.length - 1].a = answer;
+  } catch (e) {
+    lexiThread.pop(); // never replay an error as history
+    input.value = question;
+    alertMsg(e.message);
+  } finally {
+    lexiBusy = false;
+    askBtn.disabled = false;
+    renderLexiState();
+  }
+}
+
+function wireLexiPane() {
+  document.getElementById("lexi-drug-set").addEventListener("click", () =>
+    openLexiDrug(document.getElementById("lexi-drug-input").value)
+  );
+  document.getElementById("lexi-drug-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      openLexiDrug(e.target.value);
+    }
+  });
+  document.getElementById("lexi-ask").addEventListener("click", askLexi);
+  document.getElementById("lexi-reset").addEventListener("click", () => {
+    lexiDrug = null;
+    lexiThread = [];
+    document.getElementById("lexi-drug-input").value = "";
+    renderLexiState();
+  });
+  renderLexiState();
+}
+
 function wireDrugsTab() {
   document.querySelectorAll("#tabbar .tab").forEach((t) => {
     t.addEventListener("click", () => {
@@ -2387,6 +2517,7 @@ function wireDrugsTab() {
 
   renderInteractionChips();
   renderLookupState();
+  wireLexiPane();
 }
 
 // ---------------------------------------------------------------------

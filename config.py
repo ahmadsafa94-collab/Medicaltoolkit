@@ -241,3 +241,26 @@ MAX_RECENT_ERRORS = 50
 # How many of the most recent 🐞 Report a problem submissions the admin
 # panel's "Reported problems" view keeps around (see admin_log.py).
 MAX_RECENT_REPORTS = 100
+
+
+# --- Lexicomp / Lexidrug via a VMOS Cloud phone -------------------------
+# The 📘 Lexicomp tab reads monographs off the Lexidrug app installed on a
+# VMOS Cloud phone (see lexidrug.py / vmos_client.py). Keys come from the
+# VMOS console: Developer -> API. The pad code is the phone's instance id
+# (e.g. AC32010601132). Leave the keys blank and the tab says it's offline.
+VMOS_ACCESS_KEY = os.environ.get("VMOS_ACCESS_KEY", "").strip()
+VMOS_SECRET_KEY = os.environ.get("VMOS_SECRET_KEY", "").strip()
+VMOS_PAD_CODE = os.environ.get("VMOS_PAD_CODE", "").strip()
+VMOS_API_BASE = os.environ.get("VMOS_API_BASE", "https://api.vmoscloud.com").strip()
+VMOS_CMD_MODE = os.environ.get("VMOS_CMD_MODE", "auto").strip().lower()  # auto | sync | async
+
+# Android package of the Lexidrug app on the phone. Find it with /lexitest
+# packages (lists installed packages matching "lexi").
+LEXIDRUG_PACKAGE = os.environ.get("LEXIDRUG_PACKAGE", "com.lexi.android.core").strip()
+# Optional resource-id (or its suffix, e.g. "search_src_text") of the app's
+# search box. Blank = use the first text field / "Search" element on screen.
+LEXIDRUG_SEARCH_ID = os.environ.get("LEXIDRUG_SEARCH_ID", "").strip()
+LEXIDRUG_LAUNCH_WAIT_SECONDS = float(os.environ.get("LEXIDRUG_LAUNCH_WAIT_SECONDS", "4"))
+LEXIDRUG_RESULT_WAIT_SECONDS = float(os.environ.get("LEXIDRUG_RESULT_WAIT_SECONDS", "2.5"))
+LEXIDRUG_MAX_SCROLLS = int(os.environ.get("LEXIDRUG_MAX_SCROLLS", "30"))
+LEXIDRUG_CACHE_TTL_SECONDS = int(os.environ.get("LEXIDRUG_CACHE_TTL_DAYS", "14")) * 86400

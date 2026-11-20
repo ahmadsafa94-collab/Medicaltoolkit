@@ -59,6 +59,7 @@ import subscriptions
 import drug_lookup
 import drug_qa
 import interaction_ai
+import lexidrug
 import name_resolver
 from bot_instance import bot as tg_bot
 from chapter_flow import build_chapter_ai_kb
@@ -1558,6 +1559,99 @@ async def drug_ask(request: Request):
     return JSONResponse({"answer": answer, "drug": resolved})
 
 
+# ---------------------------------------------------------------------
+# Lexicomp / Lexidrug (read off the VMOS cloud phone -- see lexidrug.py)
+# ---------------------------------------------------------------------
+# Opening a drug is the slow step (the phone searches, opens and scrolls
+# the monograph), so it is its own endpoint with its own budget, kept under
+# the ~110s a proxy in front of us is assumed to wait. Asking then reads the
+# cached monograph and is an ordinary Claude call.
+
+_LEXI_OPEN_BUDGET_SECONDS = 100
+
+
+async def lexidrug_status(request: Request):
+    require_user(request)
+    return JSONResponse({"enabled": lexidrug.is_enabled()})
+
+
+async def _lexi_monograph(drug: str) -> dict:
+    try:
+        return await asyncio.wait_for(lexidrug.get_monograph(drug), timeout=_LEXI_OPEN_BUDGET_SECONDS)
+    except lexidrug.LexidrugError as e:
+        raise ApiError(status_code=502, detail=str(e))
+    except asyncio.TimeoutError:
+        raise ApiError(
+            status_code=504,
+            detail="The cloud phone took too long to open that monograph. Please try again -- "
+            "it is often quicker the second time.",
+        )
+    except Exception:
+        logger.exception("Lexidrug fetch failed unexpectedly for %r", drug)
+        raise ApiError(status_code=502, detail="Couldn't read Lexidrug on the cloud phone. Please try again shortly.")
+
+
+async def lexidrug_open(request: Request):
+    require_user(request)
+    body = await _json_body(request)
+    drug = (body.get("drug") or "").strip()
+    if not drug:
+        raise ApiError(status_code=400, detail="Type a drug name first.")
+    if len(drug) > 80:
+        raise ApiError(status_code=400, detail="That drug name is too long.")
+    entry = await _lexi_monograph(drug)
+    return JSONResponse({"drug": entry["title"], "fetched_at": entry["fetched_at"]})
+
+
+async def lexidrug_ask(request: Request):
+    user = require_user(request)
+    body = await _json_body(request)
+    drug = (body.get("drug") or "").strip()
+    question = (body.get("question") or "").strip()
+    if not drug:
+        raise ApiError(status_code=400, detail="Which drug is the question about?")
+    if not question:
+        raise ApiError(status_code=400, detail="Question can't be empty.")
+
+    raw_history = body.get("history") or []
+    if not isinstance(raw_history, list):
+        raise ApiError(status_code=400, detail="Invalid history.")
+    history = []
+    for turn in raw_history[-lexidrug.MAX_HISTORY_TURNS:]:
+        if not isinstance(turn, dict) or not isinstance(turn.get("question"), str) or not isinstance(turn.get("answer"), str):
+            raise ApiError(status_code=400, detail="Invalid history entry.")
+        history.append({"question": turn["question"], "answer": turn["answer"]})
+
+    entry = await _lexi_monograph(drug)  # cached after /open, so normally instant
+
+    try:
+        subscriptions.check_and_consume(user["id"], "questions")
+    except subscriptions.QuotaExceeded as e:
+        raise ApiError(status_code=402, detail=str(e))
+
+    try:
+        answer = await asyncio.wait_for(
+            asyncio.to_thread(
+                lexidrug.answer_question,
+                entry["title"],
+                entry["text"],
+                question,
+                history,
+                subscriptions.get_language(user["id"]),
+            ),
+            timeout=_DRUG_ANSWER_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        raise ApiError(status_code=504, detail="That question took too long to answer. Please try again.")
+    except lexidrug.LexidrugError as e:
+        raise ApiError(status_code=502, detail=str(e))
+    except Exception as e:
+        logger.exception("Lexidrug Q&A failed for %r", drug)
+        raise ApiError(status_code=500, detail=f"Couldn't answer that: {e or type(e).__name__}")
+
+    return JSONResponse({"answer": answer, "drug": entry["title"]})
+
+
 routes = [
     Route("/api/books", list_books, methods=["GET"]),
     Route("/api/upload", upload_book, methods=["POST"]),
@@ -1594,6 +1688,9 @@ routes = [
     Route("/api/drugs/resolve", drug_resolve, methods=["POST"]),
     Route("/api/drugs/interactions", drug_interactions, methods=["POST"]),
     Route("/api/drugs/ask", drug_ask, methods=["POST"]),
+    Route("/api/lexidrug/status", lexidrug_status, methods=["GET"]),
+    Route("/api/lexidrug/open", lexidrug_open, methods=["POST"]),
+    Route("/api/lexidrug/ask", lexidrug_ask, methods=["POST"]),
     Mount("/webapp", app=StaticFiles(directory=_WEBAPP_DIR, html=True), name="webapp"),
 ]
 
