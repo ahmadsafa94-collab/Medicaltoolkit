@@ -21,6 +21,7 @@ import anthropic
 import pdfplumber
 from pypdf import PdfReader, PdfWriter
 
+import content_cache
 import cost_ledger
 from config import (
     ANTHROPIC_API_KEY,
@@ -314,7 +315,27 @@ def process_pdf(pdf_path: str, output_dir: str, progress_cb=None) -> tuple[list[
             "Split it into parts first and send those."
         )
 
-    previews = extract_page_previews(pdf_path, progress_cb=progress_cb)
-    chapters = detect_chapters(previews)
+    chapters = detect_chapters_cached(pdf_path, progress_cb)
     output_paths = split_pdf_by_chapters(pdf_path, chapters, output_dir)
     return chapters, output_paths
+
+
+def detect_chapters_cached(pdf_path: str, progress_cb=None) -> list[dict]:
+    """
+    detect_chapters for a file, reusing the result for a byte-identical file
+    seen before (content_cache.py) -- a repeat upload of the same textbook
+    then costs no AI call and skips the slow page-by-page read entirely.
+    """
+    digest = None
+    try:
+        digest = content_cache.file_sha256(pdf_path)
+        cached = content_cache.get_chapters(digest)
+        if cached:
+            logger.info("Reused cached chapters %s for %s", digest[:12], os.path.basename(pdf_path))
+            return cached
+    except Exception:
+        logger.exception("Chapter cache lookup failed (detecting normally)")
+    chapters = detect_chapters(extract_page_previews(pdf_path, progress_cb=progress_cb))
+    if digest:
+        content_cache.put_chapters(digest, chapters)
+    return chapters

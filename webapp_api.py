@@ -85,8 +85,7 @@ from pdf_processor import (
     ChapterDetectionError,
     compute_chapter_ranges,
     open_check,
-    detect_chapters,
-    extract_page_previews,
+    detect_chapters_cached,
     split_pdf_by_chapters,
 )
 from telegram_helpers import send_documents_by_chat_id
@@ -539,8 +538,7 @@ async def _run_chapter_division(user_id: int, book_id: str, pdf_path: str):
     page_count = await asyncio.to_thread(open_check, pdf_path)
     if page_count > MAX_BOOK_PAGES:
         raise ChapterDetectionError(f"This book has {page_count} pages, over the {MAX_BOOK_PAGES}-page limit.")
-    previews = await asyncio.to_thread(extract_page_previews, pdf_path, 350, progress)
-    chapters = await asyncio.to_thread(detect_chapters, previews)
+    chapters = await asyncio.to_thread(detect_chapters_cached, pdf_path, progress)
     ranges = compute_chapter_ranges(chapters, page_count)
     library.set_chapters(user_id, book_id, ranges)
     return ranges
@@ -844,7 +842,8 @@ async def ask_book(request: Request):
         with subscriptions.metered(user["id"], "questions"):
             result = await asyncio.wait_for(
                 pdf_qa.answer_question(
-                    book_id, question, history=history, language=subscriptions.get_language(user["id"])
+                    book_id, question, history=history, language=subscriptions.get_language(user["id"]),
+                    title=book["title"],
                 ),
                 timeout=ASK_TIMEOUT_SECONDS,
             )

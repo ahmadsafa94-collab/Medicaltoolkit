@@ -35,6 +35,7 @@ import numpy as np
 import pdfplumber
 import voyageai
 
+import content_cache
 import cost_ledger
 from config import (
     CLAUDE_MODEL,
@@ -155,7 +156,25 @@ async def build_index(pdf_path: str, book_id: str, title: str, progress_cb=None)
     progress_cb, if given, is an async callable(str) called with status
     updates (useful for editing a Telegram message during a long index build).
     Returns the number of chunks indexed.
+
+    A byte-identical file that was indexed before (by anyone) reuses that
+    index instead of being embedded again -- see content_cache.py. That is
+    the whole Voyage cost of a repeat upload, saved.
     """
+    meta_path, vectors_path = _index_paths(book_id)
+    digest = None
+    try:
+        digest = await asyncio.to_thread(content_cache.file_sha256, pdf_path)
+        if await asyncio.to_thread(content_cache.restore_index, digest, meta_path, vectors_path):
+            loaded = await asyncio.to_thread(load_index, book_id)
+            if loaded is not None:
+                logger.info("Reused cached index %s for book %s", digest[:12], book_id)
+                if progress_cb:
+                    await progress_cb("Done (this book was already indexed -- reused instantly).")
+                return len(loaded[0]["chunks"])
+    except Exception:
+        logger.exception("Index cache lookup failed for %s (building normally)", book_id)
+
     if progress_cb:
         await progress_cb("Reading pages...")
     loop = asyncio.get_running_loop()
@@ -192,8 +211,9 @@ async def build_index(pdf_path: str, book_id: str, title: str, progress_cb=None)
     # Normalize once at index time so search is a plain dot product (cosine similarity)
     vectors /= norms
 
-    meta_path, vectors_path = _index_paths(book_id)
     await asyncio.to_thread(_write_index_files, meta_path, vectors_path, {"title": title, "chunks": chunks}, vectors)
+    if digest:
+        await asyncio.to_thread(content_cache.store_index, digest, meta_path, vectors_path)
 
     if progress_cb:
         await progress_cb("Done.")
@@ -402,7 +422,7 @@ def _force_include_pages(meta: dict, page_numbers: list[int]) -> list[dict]:
 
 
 async def answer_question(
-    book_id: str, question: str, history: list[dict] | None = None, language: str = "English"
+    book_id: str, question: str, history: list[dict] | None = None, language: str = "English", title: str | None = None
 ) -> dict:
     """
     Full Q&A flow for a previously-indexed book: retrieve relevant passages,
@@ -482,7 +502,9 @@ async def answer_question(
     context = "\n\n".join(f"[{n}] (Page {m['page']})\n{m['text']}" for n, m in numbered)
 
     system_prompt = (
-        f"You are answering questions about the book '{meta['title']}' using ONLY the numbered "
+        # The caller's title wins: a reused index (content_cache) still
+        # carries the title whoever indexed that file first gave it.
+        f"You are answering questions about the book '{title or meta['title']}' using ONLY the numbered "
         "excerpts below. Follow these rules strictly:\n"
         "1. Answer using only information in the excerpts -- do not use outside knowledge, even if "
         "you know the topic.\n"

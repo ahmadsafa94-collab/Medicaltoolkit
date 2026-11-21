@@ -148,7 +148,7 @@ async def handle_book_question(message: Message, state: FSMContext):
     try:
         result = await asyncio.wait_for(
             pdf_qa.answer_question(
-                book_id, question, language=subscriptions.get_language(message.from_user.id)
+                book_id, question, language=subscriptions.get_language(message.from_user.id), title=title
             ),
             timeout=_QA_ANSWER_TIMEOUT_SECONDS,
         )
