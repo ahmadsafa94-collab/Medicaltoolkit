@@ -48,10 +48,21 @@ CLAUDE_MODEL = "claude-sonnet-5"
 # no gain in quality on a handful of button captions.
 TRANSLATION_MODEL = "claude-haiku-4-5-20251001"
 
-# Embedding model for "Ask my book" semantic search (voyage-4 is current as
-# of Sep 2026 -- verified against Voyage's own docs). voyage-4-lite is a
-# cheaper/faster alternative in the same embedding space if you want to swap.
-VOYAGE_MODEL = "voyage-4"
+# Embedding model for "Ask my book" semantic search. voyage-context-4
+# embeds each passage together with the text around it (pdf_qa sends a book
+# in sections), so a passage like "the usual dose is 300 mg twice daily"
+# still knows which drug it is about. Chosen over voyage-4-large on
+# 2026-11-21: same price ($0.12/M tokens), better fit for textbook prose.
+# Changing this makes every existing index stale: books then show as "not
+# searchable" again and must be re-indexed (see library.index_is_current).
+VOYAGE_MODEL = "voyage-context-4"
+
+# Second-stage ranking: the search pulls a wide set of candidate passages,
+# then this reranker reads the question against each one and keeps the
+# best. ~10k tokens per question at $0.05/M, i.e. ~$0.0005.
+VOYAGE_RERANK_MODEL = "rerank-2.5"
+QA_RERANK_CANDIDATES = 30        # candidates handed to the reranker for one book
+QA_MULTI_RERANK_CANDIDATES = 60  # ...and across all books of a multi-book question
 
 # Chapter detection reads a book in windows of this many pages, one AI
 # call per window (see pdf_processor.detect_chapters). It used to be a hard
@@ -103,7 +114,7 @@ VOYAGE_CLIENT_MAX_RETRIES = 2
 # want them on different storage.
 QA_INDEX_DIR = os.environ.get("QA_INDEX_DIR", os.path.join(STORAGE_DIR, "qa_indexes"))
 QA_CHUNK_SIZE_CHARS = 1200      # ~250-300 tokens per chunk
-QA_CHUNK_OVERLAP_CHARS = 200    # keeps sentences that straddle a chunk boundary searchable from both sides
+QA_CHUNK_OVERLAP_CHARS = 100    # small: contextual embeddings already carry the neighbouring text; this only keeps a split sentence whole for the answer
 QA_TOP_K = 6                    # how many chunks to feed Claude per question
 QA_EMBED_BATCH_SIZE = 100       # texts per Voyage API call (Voyage's own cap is 1000/request)
 # Overall cap on the indexing pipeline (extract -> chunk -> embed -> save).
@@ -231,7 +242,8 @@ REFERRAL_BONUS_DAYS = 30
 # Update these if Anthropic/Voyage change their published rates.
 CLAUDE_INPUT_PRICE_PER_MILLION_USD = 2.0
 CLAUDE_OUTPUT_PRICE_PER_MILLION_USD = 10.0
-VOYAGE_PRICE_PER_MILLION_USD = 0.06
+VOYAGE_PRICE_PER_MILLION_USD = 0.12         # voyage-context-4
+VOYAGE_RERANK_PRICE_PER_MILLION_USD = 0.05  # rerank-2.5
 
 # How many of the most recent server-side exceptions the admin panel's
 # "Recent errors" view keeps around (see bot.py's global_error_handler).

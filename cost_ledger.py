@@ -27,6 +27,7 @@ from config import (
     CLAUDE_INPUT_PRICE_PER_MILLION_USD,
     CLAUDE_OUTPUT_PRICE_PER_MILLION_USD,
     VOYAGE_PRICE_PER_MILLION_USD,
+    VOYAGE_RERANK_PRICE_PER_MILLION_USD,
 )
 
 logger = logging.getLogger(__name__)
@@ -74,11 +75,11 @@ def record_claude_response(feature: str, response, user_id: int | None = None) -
     return usd
 
 
-def record_voyage_tokens(feature: str, total_tokens: int, user_id: int | None = None) -> float:
-    """Log an estimated Voyage embedding cost -- Voyage's Python SDK doesn't return per-call token usage, so this is called with a caller-computed character/4 estimate rather than a real count."""
+def record_voyage_tokens(feature: str, total_tokens: int, user_id: int | None = None, rerank: bool = False) -> float:
+    """Log a Voyage cost from the token count Voyage reports (embedding, or reranking at its own price)."""
     if not isinstance(total_tokens, int) or total_tokens <= 0:
         return 0.0
-    usd = total_tokens / 1_000_000 * VOYAGE_PRICE_PER_MILLION_USD
+    usd = total_tokens / 1_000_000 * (VOYAGE_RERANK_PRICE_PER_MILLION_USD if rerank else VOYAGE_PRICE_PER_MILLION_USD)
     _append(
         {
             "ts": time.time(),

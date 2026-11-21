@@ -26,7 +26,7 @@ import threading
 import time
 import uuid
 
-from config import STORAGE_DIR
+from config import STORAGE_DIR, VOYAGE_MODEL
 
 SHARED_DIR = os.path.join(STORAGE_DIR, "_shared")
 BOOKS_DIR = os.path.join(SHARED_DIR, "books")
@@ -54,6 +54,9 @@ def _load() -> dict:
         data = {}
     data.setdefault("specialties", [])
     data.setdefault("books", {})
+    for b in data["books"].values():  # stale index = not searchable; see library.index_is_current
+        if b.get("qa_indexed") and b.get("index_model", "voyage-4") != VOYAGE_MODEL:
+            b["qa_indexed"] = False
     return data
 
 
@@ -164,7 +167,7 @@ def _update(book_id: str, **fields) -> bool:
 
 
 def mark_indexed(book_id: str, num_chunks: int) -> bool:
-    return _update(book_id, qa_indexed=True, num_chunks=num_chunks, index_error=None)
+    return _update(book_id, qa_indexed=True, num_chunks=num_chunks, index_error=None, index_model=VOYAGE_MODEL)
 
 
 def set_index_error(book_id: str, error: str) -> bool:

@@ -41,6 +41,9 @@ from config import (
     CLAUDE_MODEL,
     VOYAGE_API_KEY,
     VOYAGE_MODEL,
+    VOYAGE_RERANK_MODEL,
+    QA_RERANK_CANDIDATES,
+    QA_MULTI_RERANK_CANDIDATES,
     QA_INDEX_DIR,
     QA_CHUNK_SIZE_CHARS,
     QA_CHUNK_OVERLAP_CHARS,
@@ -115,32 +118,132 @@ def build_chunks(page_texts: list[str]) -> list[dict]:
     return chunks
 
 
+# voyage-context-4 embeds passages in "documents": every passage in one
+# document is embedded knowing the others. A whole textbook is far over the
+# model's per-document limit (32k tokens) and per-request limit (120k), so
+# a book goes in windows of consecutive pages, several windows per request.
+# Budgets are in characters and deliberately conservative (dense medical
+# text can run ~3.5 characters per token).
+_CONTEXT_WINDOW_CHARS = 60_000      # ~15-17k tokens: a solid stretch of a chapter
+_CONTEXT_REQUEST_CHARS = 180_000    # ~50k tokens per request, well under 120k
+_CONTEXT_WINDOW_MAX_CHUNKS = 500
+
+
+def _record_voyage(feature: str, tokens, rerank: bool = False) -> None:
+    try:
+        cost_ledger.record_voyage_tokens(feature, int(tokens or 0), rerank=rerank)
+    except Exception:
+        logger.exception("Cost ledger logging failed (non-fatal)")
+
+
+def _context_windows(chunks: list[dict]) -> list[list[int]]:
+    """Group chunk indexes into windows of consecutive pages under the budget, never splitting a page."""
+    windows, current, size = [], [], 0
+    i = 0
+    while i < len(chunks):
+        # Take one page's chunks as a unit, so a window boundary never falls mid-page.
+        page = chunks[i]["page"]
+        j = i
+        while j < len(chunks) and chunks[j]["page"] == page:
+            j += 1
+        page_idx = list(range(i, j))
+        page_size = sum(len(chunks[k]["text"]) for k in page_idx)
+        if current and (size + page_size > _CONTEXT_WINDOW_CHARS or len(current) + len(page_idx) > _CONTEXT_WINDOW_MAX_CHUNKS):
+            windows.append(current)
+            current, size = [], 0
+        current.extend(page_idx)
+        size += page_size
+        i = j
+    if current:
+        windows.append(current)
+    return windows
+
+
+async def embed_document_chunks(chunks: list[dict], on_batch=None) -> list[list[float]]:
+    """
+    Contextual embeddings for a book's chunks (in page order), one vector
+    per chunk, in the same order. Each chunk is embedded with the rest of
+    its window as context.
+    """
+    windows = _context_windows(chunks)
+    out: list = [None] * len(chunks)
+    done = 0
+    k = 0
+    while k < len(windows):
+        batch, chars = [], 0
+        while k < len(windows):
+            wsize = sum(len(chunks[x]["text"]) for x in windows[k])
+            if batch and chars + wsize > _CONTEXT_REQUEST_CHARS:
+                break
+            batch.append(windows[k])
+            chars += wsize
+            k += 1
+        result = await asyncio.to_thread(
+            voyage_client.contextualized_embed,
+            inputs=[[chunks[x]["text"] for x in w] for w in batch],
+            model=VOYAGE_MODEL,
+            input_type="document",
+        )
+        for w, res in zip(batch, result.results):
+            if len(res.embeddings) != len(w):
+                raise RuntimeError("Voyage returned a different number of embeddings than passages sent")
+            for x, emb in zip(w, res.embeddings):
+                out[x] = emb
+            done += len(w)
+        _record_voyage("book_indexing", result.total_tokens)
+        if on_batch:
+            await on_batch(done, len(chunks))
+    return out
+
+
 async def embed_texts(texts: list[str], input_type: str, on_batch=None) -> list[list[float]]:
     """
-    Embed a list of texts via Voyage AI, batching to stay under API limits.
-    input_type is "document" for indexing, "query" for a user's question --
-    Voyage's models are tuned differently for each, which meaningfully
-    improves retrieval quality over using the same embedding for both.
+    Embed standalone texts -- in practice, questions (input_type="query").
+    Each is sent as its own one-passage document: a question has no
+    surrounding text, and voyage-context-4 embeds queries this way into the
+    same space as the contextual passage vectors.
     """
     all_embeddings = []
     for i in range(0, len(texts), QA_EMBED_BATCH_SIZE):
         batch = texts[i:i + QA_EMBED_BATCH_SIZE]
         result = await asyncio.to_thread(
-            voyage_client.embed, batch, model=VOYAGE_MODEL, input_type=input_type
+            voyage_client.contextualized_embed,
+            inputs=[[t] for t in batch],
+            model=VOYAGE_MODEL,
+            input_type=input_type,
         )
-        all_embeddings.extend(result.embeddings)
+        all_embeddings.extend(res.embeddings[0] for res in result.results)
+        _record_voyage("query_embedding" if input_type == "query" else "book_indexing", result.total_tokens)
         if on_batch:
             await on_batch(len(all_embeddings), len(texts))
-        try:
-            # Voyage's Python SDK doesn't return per-call token usage, so this
-            # is a rough ~4-chars-per-token estimate, good enough for the
-            # admin cost dashboard (Voyage is already the cheapest line item
-            # by a wide margin -- see the delivered pricing roadmap).
-            approx_tokens = sum(len(t) for t in batch) // 4
-            cost_ledger.record_voyage_tokens("book_indexing", approx_tokens)
-        except Exception:
-            logger.exception("Cost ledger logging failed (non-fatal)")
     return all_embeddings
+
+
+async def rerank(query: str, candidates: list[dict], top_k: int) -> list[dict]:
+    """
+    Second-stage ranking with rerank-2.5: reads the question against each
+    candidate passage and keeps the best top_k, in order. The vector search
+    is fast but only approximate; this is where "mentions the same words"
+    gets separated from "actually answers the question".
+
+    Falls back to the vector order on any failure -- a reranker outage
+    should cost some precision, never the answer.
+    """
+    if len(candidates) <= 1:
+        return candidates[:top_k]
+    try:
+        result = await asyncio.to_thread(
+            voyage_client.rerank,
+            query,
+            [c["text"] for c in candidates],
+            model=VOYAGE_RERANK_MODEL,
+            top_k=top_k,
+        )
+    except Exception:
+        logger.exception("Rerank failed (non-fatal, using vector order)")
+        return sorted(candidates, key=lambda c: c.get("score") or 0, reverse=True)[:top_k]
+    _record_voyage("rerank", result.total_tokens, rerank=True)
+    return [dict(candidates[r.index], rerank_score=r.relevance_score) for r in result.results]
 
 
 def _index_paths(book_id: str) -> tuple[str, str]:
@@ -200,7 +303,7 @@ async def build_index(pdf_path: str, book_id: str, title: str, progress_cb=None)
             if progress_cb and total > QA_EMBED_BATCH_SIZE:
                 await progress_cb(f"Indexing passages... {done}/{total}")
 
-        embeddings = await embed_texts([c["text"] for c in chunks], input_type="document", on_batch=embed_progress)
+        embeddings = await embed_document_chunks(chunks, on_batch=embed_progress)
     except Exception as e:
         logger.warning("Voyage embedding request failed: %s", e)
         raise IndexingError("The search service didn't respond properly. Please try again in a moment.")
@@ -211,7 +314,7 @@ async def build_index(pdf_path: str, book_id: str, title: str, progress_cb=None)
     # Normalize once at index time so search is a plain dot product (cosine similarity)
     vectors /= norms
 
-    await asyncio.to_thread(_write_index_files, meta_path, vectors_path, {"title": title, "chunks": chunks}, vectors)
+    await asyncio.to_thread(_write_index_files, meta_path, vectors_path, {"title": title, "model": VOYAGE_MODEL, "chunks": chunks}, vectors)
     if digest:
         await asyncio.to_thread(content_cache.store_index, digest, meta_path, vectors_path)
 
@@ -281,6 +384,11 @@ def load_index(book_id: str) -> tuple[dict, np.ndarray] | None:
     except (OSError, ValueError):
         logger.exception("Q&A index for %s is unreadable", book_id)
         return None
+    if meta.get("model", "voyage-4") != VOYAGE_MODEL:
+        # Vectors from another embedding model can't be compared with a
+        # question embedded by this one -- the book must be re-indexed.
+        logger.info("Q&A index for %s was built with %s; needs re-indexing", book_id, meta.get("model", "voyage-4"))
+        return None
     if len(meta.get("chunks", [])) != len(vectors):
         logger.warning("Q&A index for %s is inconsistent (%d chunks, %d vectors)", book_id, len(meta.get("chunks", [])), len(vectors))
         return None
@@ -332,7 +440,7 @@ def _search_query_text(question: str, history: list[dict]) -> str:
     return f"{prior_questions} {question}"
 
 
-QA_CONTEXTUAL_TOP_K = 4  # extra history-aware matches folded in on top of the plain-question search
+QA_CONTEXTUAL_TOP_K = 10  # extra history-aware candidates folded in on top of the plain-question search
 
 
 async def translate_question_for_search(question: str, language: str) -> str:
@@ -466,7 +574,9 @@ async def answer_question(
     # signal and must never be diluted, since a self-contained follow-up
     # ("explain the techniques from the text") needs to match on its own
     # words exactly as well as it would as a fresh, first question.
-    matches = await search_index(meta, vectors, search_question)
+    # A WIDE candidate set first (vector search is fast but approximate),
+    # narrowed to the best QA_TOP_K by the reranker below.
+    matches = await search_index(meta, vectors, search_question, top_k=QA_RERANK_CANDIDATES)
     if history:
         # Additionally search with recent questions folded in, purely to
         # ADD candidates that help a pronoun-heavy follow-up ("what about
@@ -479,6 +589,11 @@ async def answer_question(
         )
         seen = {m["text"] for m in matches}
         matches += [m for m in contextual if m["text"] not in seen]
+
+    # The reranker sees the question with the recent ones folded in, so a
+    # follow-up like "and its side effects?" is judged against its subject.
+    rerank_query = _search_query_text(search_question, history) if history else search_question
+    matches = await rerank(rerank_query, matches, QA_TOP_K)
 
     # Page numbers are read off the TRANSLATED question: the translation
     # prompt rewrites non-ASCII digits as 0-9 and "صفحه ۱۱۰" comes back as
@@ -565,7 +680,7 @@ async def answer_question(
 # ---------------------------------------------------------------------------
 
 MAX_BOOKS_PER_QUESTION = 15
-_MULTI_PER_BOOK_CANDIDATES = 4   # best passages kept from each book before the global ranking
+_MULTI_PER_BOOK_CANDIDATES = 12  # best passages kept from each book (per query) before the global ranking
 _MULTI_MAX_PASSAGES = 12         # passages handed to Claude across all books
 
 
@@ -649,7 +764,13 @@ async def answer_question_multi(
         raise IndexingError("None of the selected books could be searched. Try re-indexing them.")
 
     forced = [c for c in candidates if c.get("forced")]
-    ranked = sorted((c for c in candidates if not c.get("forced")), key=lambda c: c["score"], reverse=True)
+    # Vector scores are comparable across books (one embedding model), so
+    # they pick a shortlist; the reranker then orders that shortlist by how
+    # well each passage answers the question, whichever book it came from.
+    shortlist = sorted((c for c in candidates if not c.get("forced")), key=lambda c: c["score"], reverse=True)
+    shortlist = shortlist[:QA_MULTI_RERANK_CANDIDATES]
+    rerank_query = _search_query_text(search_question, history) if history else search_question
+    ranked = await rerank(rerank_query, shortlist, _MULTI_MAX_PASSAGES)
     matches = (forced + ranked)[: max(QA_TOP_K, _MULTI_MAX_PASSAGES)]
 
     numbered = list(enumerate(matches, start=1))

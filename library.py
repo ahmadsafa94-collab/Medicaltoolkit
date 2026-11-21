@@ -31,11 +31,21 @@ import os
 import time
 import uuid
 
-from config import STORAGE_DIR
+from config import STORAGE_DIR, VOYAGE_MODEL
 
 
 def _registry_path(user_id: int) -> str:
     return os.path.join(STORAGE_DIR, str(user_id), "library.json")
+
+
+def index_is_current(entry: dict) -> bool:
+    """
+    An index is only usable if it was built with the CURRENT embedding model:
+    a question embedded by one model can't be compared with passages
+    embedded by another. Indexes from before the model was recorded were
+    built with voyage-4.
+    """
+    return entry.get("index_model", "voyage-4") == VOYAGE_MODEL
 
 
 def _load(user_id: int) -> dict:
@@ -44,9 +54,15 @@ def _load(user_id: int) -> dict:
         return {}
     try:
         with open(path) as f:
-            return json.load(f)
+            registry = json.load(f)
     except (json.JSONDecodeError, OSError):
         return {}
+    # A stale index reads as "not searchable", so every screen offers
+    # "Make searchable" again instead of failing at question time.
+    for entry in registry.values():
+        if entry.get("qa_indexed") and not index_is_current(entry):
+            entry["qa_indexed"] = False
+    return registry
 
 
 def _save(user_id: int, registry: dict):
@@ -133,7 +149,7 @@ def set_chapters_error(user_id: int, book_id: str, error: str) -> bool:
 
 
 def mark_indexed(user_id: int, book_id: str, num_chunks: int) -> bool:
-    return _update(user_id, book_id, qa_indexed=True, num_chunks=num_chunks)
+    return _update(user_id, book_id, qa_indexed=True, num_chunks=num_chunks, index_model=VOYAGE_MODEL)
 
 
 def rename_book(user_id: int, book_id: str, new_title: str) -> bool:

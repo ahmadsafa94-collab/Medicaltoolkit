@@ -30,7 +30,7 @@ import os
 import shutil
 import tempfile
 
-from config import STORAGE_DIR
+from config import STORAGE_DIR, VOYAGE_MODEL
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +106,9 @@ def put_chapters(digest: str, chapters: list[dict]) -> None:
 # --- Q&A index ---------------------------------------------------------
 
 def _index_files(digest: str) -> tuple[str, str]:
-    d = _entry_dir(digest)
+    # Keyed by model as well as content: an index from another embedding
+    # model is useless for questions embedded by the current one.
+    d = os.path.join(_entry_dir(digest), VOYAGE_MODEL)
     return os.path.join(d, "qa_meta.json"), os.path.join(d, "qa_vectors.npy")
 
 
