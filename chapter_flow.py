@@ -94,7 +94,7 @@ async def handle_chapter_summarize(callback: CallbackQuery):
         return
 
     try:
-        subscriptions.check_and_consume(callback.from_user.id, "summaries")
+        subscriptions.consume(callback.from_user.id, "summaries")
     except subscriptions.QuotaExceeded as e:
         await callback.answer()
         await callback.message.answer(str(e))
@@ -115,12 +115,15 @@ async def handle_chapter_summarize(callback: CallbackQuery):
             timeout=_GENERATION_TIMEOUT_SECONDS,
         )
     except asyncio.TimeoutError:
+        subscriptions.refund(callback.from_user.id, "summaries")
         await callback.message.answer("Generating that summary took too long. Please try again.")
         return
     except chapter_ai.ChapterAIError as e:
+        subscriptions.refund(callback.from_user.id, "summaries")
         await callback.message.answer(f"Couldn't generate a summary: {e}")
         return
     except Exception:
+        subscriptions.refund(callback.from_user.id, "summaries")
         logger.exception("Unexpected error summarizing chapter '%s'", title)
         await callback.message.answer("Something went wrong generating that summary. Please try again.")
         return
@@ -140,7 +143,7 @@ async def handle_chapter_quiz(callback: CallbackQuery):
         return
 
     try:
-        subscriptions.check_and_consume(callback.from_user.id, "quizzes")
+        subscriptions.consume(callback.from_user.id, "quizzes")
     except subscriptions.QuotaExceeded as e:
         await callback.answer()
         await callback.message.answer(str(e))
@@ -171,12 +174,15 @@ async def handle_chapter_quiz(callback: CallbackQuery):
             timeout=_GENERATION_TIMEOUT_SECONDS,
         )
     except asyncio.TimeoutError:
+        subscriptions.refund(callback.from_user.id, "quizzes")
         await callback.message.answer("Generating that quiz took too long. Please try again.")
         return
     except chapter_ai.ChapterAIError as e:
+        subscriptions.refund(callback.from_user.id, "quizzes")
         await callback.message.answer(f"Couldn't generate a quiz: {e}")
         return
     except Exception:
+        subscriptions.refund(callback.from_user.id, "quizzes")
         logger.exception("Unexpected error generating quiz for chapter '%s'", title)
         await callback.message.answer("Something went wrong generating that quiz. Please try again.")
         return
@@ -196,7 +202,7 @@ async def handle_chapter_mnemonics(callback: CallbackQuery):
         return
 
     try:
-        subscriptions.check_and_consume(callback.from_user.id, "summaries")
+        subscriptions.consume(callback.from_user.id, "summaries")
     except subscriptions.QuotaExceeded as e:
         await callback.answer()
         await callback.message.answer(str(e))
@@ -217,12 +223,15 @@ async def handle_chapter_mnemonics(callback: CallbackQuery):
             timeout=_GENERATION_TIMEOUT_SECONDS,
         )
     except asyncio.TimeoutError:
+        subscriptions.refund(callback.from_user.id, "summaries")
         await callback.message.answer("Generating mnemonics took too long. Please try again.")
         return
     except chapter_ai.ChapterAIError as e:
+        subscriptions.refund(callback.from_user.id, "summaries")
         await callback.message.answer(f"Couldn't generate mnemonics: {e}")
         return
     except Exception:
+        subscriptions.refund(callback.from_user.id, "summaries")
         logger.exception("Unexpected error generating mnemonics for chapter '%s'", title)
         await callback.message.answer("Something went wrong generating mnemonics. Please try again.")
         return

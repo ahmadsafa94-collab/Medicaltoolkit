@@ -232,7 +232,7 @@ async def _generate(answer_fn, user_id: int, book_id: str, chapter_indices: list
         return
 
     try:
-        subscriptions.check_and_consume(user_id, "summaries")
+        subscriptions.consume(user_id, "flashcards")
     except subscriptions.QuotaExceeded as e:
         await answer_fn(str(e))
         return
@@ -260,10 +260,15 @@ async def _generate(answer_fn, user_id: int, book_id: str, chapter_indices: list
         )
     except Exception as e:
         logger.exception("Flashcard generation failed for book=%s chapters=%s", book_id, chapter_indices)
+        subscriptions.refund(user_id, "flashcards")
+        # ChapterAIError carries a written explanation; anything else is an
+        # internal error whose raw text helps nobody.
+        reason = str(e) if isinstance(e, chapter_ai.ChapterAIError) else "please try again"
+        text = f"Couldn't generate flashcards ({reason}). Nothing was used from your allowance."
         try:
-            await status.edit_text(f"Couldn't generate flashcards: {e}")
+            await status.edit_text(text)
         except TelegramAPIError:
-            await answer_fn(f"Couldn't generate flashcards: {e}")
+            await answer_fn(text)
         return
 
     chapter_label = ", ".join(c["title"] for c in selected_chapters)[:200]

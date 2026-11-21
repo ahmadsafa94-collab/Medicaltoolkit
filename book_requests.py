@@ -13,7 +13,14 @@ which customer they belong to, and list every pending one.
 
 State machine (request["status"]):
     pending -> quoted -> paid -> delivered
-                  \-> declined
+                  `-> declined
+    paid | delivered -> refunded
+
+A paid (or delivered) request becomes "refunded" when the admin refunds
+its Stars payment with /refund (customer_flow.py). "charge_id" holds the
+telegram_payment_charge_id of the payment that moved it to "paid", which
+is what that refund needs and what makes a re-delivered successful_payment
+recognisable as the same payment.
 """
 
 import json
@@ -68,6 +75,7 @@ def create_request(user_id: int, who: str, url: str, note: str = "") -> dict:
         "quoted_at": None,
         "paid_at": None,
         "delivered_at": None,
+        "charge_id": None,
     }
     requests[request_id] = record
     _save(requests)
@@ -101,8 +109,17 @@ def set_declined(request_id: str) -> dict | None:
     return _update(request_id, status="declined")
 
 
-def set_paid(request_id: str) -> dict | None:
-    return _update(request_id, status="paid", paid_at=time.time())
+def set_paid(request_id: str, charge_id: str | None = None) -> dict | None:
+    return _update(request_id, status="paid", paid_at=time.time(), charge_id=charge_id)
+
+
+def set_refunded(request_id: str) -> dict | None:
+    """
+    Kept as its own state (not back to "quoted") so the request can't be
+    paid again from the old invoice and /deliverbook refuses it -- both
+    check for an exact status.
+    """
+    return _update(request_id, status="refunded", refunded_at=time.time())
 
 
 def set_delivered(request_id: str) -> dict | None:

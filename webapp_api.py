@@ -82,7 +82,7 @@ from paths import safe_pdf_filename, unique_path, user_dir
 from pdf_processor import (
     ChapterDetectionError,
     compute_chapter_ranges,
-    count_pages,
+    open_check,
     detect_chapters,
     extract_page_previews,
     split_pdf_by_chapters,
@@ -144,10 +144,62 @@ def start_job(book_id: str, job_type: str, coro) -> bool:
             _jobs[key] = {"status": "done", "result": result, "error": None, "progress": None}
         except Exception as e:
             logger.exception("Background job %s failed", key)
-            _jobs[key] = {"status": "error", "result": None, "error": str(e), "progress": None}
+            _jobs[key] = {"status": "error", "result": None, "error": _job_error_text(e), "progress": None}
 
-    asyncio.create_task(runner())
+    # Held in a set: asyncio keeps only a weak reference to a bare
+    # create_task(), so an unreferenced job could be garbage-collected
+    # mid-run and simply vanish, leaving the job "running" forever.
+    task = asyncio.create_task(runner())
+    _running_tasks.add(task)
+    task.add_done_callback(_running_tasks.discard)
     return True
+
+
+_running_tasks: set = set()
+
+
+def _job_error_text(e: Exception) -> str:
+    """
+    What a failed job shows the user. The errors this module raises on
+    purpose (RuntimeError / ChapterDetectionError with a written message)
+    pass through; anything else is an unexpected crash whose text -- a
+    Python or API error string -- means nothing to a student, so it is
+    logged (above) and replaced.
+    """
+    if isinstance(e, asyncio.TimeoutError):
+        return "That took too long and was stopped. Nothing was used from your allowance -- please try again."
+    if isinstance(e, (RuntimeError, ChapterDetectionError)) and str(e):
+        return str(e)
+    return "Something went wrong on our side. Nothing was used from your allowance -- please try again."
+
+
+def start_metered_job(book_id: str, job_type: str, coro, user_id: int, feature: str, units: int = 1) -> bool:
+    """
+    start_job() for a job that spends the user's daily allowance. The units
+    are taken up front (so a free user out of allowance gets a 402 now, not
+    a failed job later) and given back if the job fails, times out, or was
+    never started because the same job was already running -- a failed or
+    refused request must not cost anything.
+    """
+    try:
+        subscriptions.consume(user_id, feature, units)
+    except subscriptions.QuotaExceeded as e:
+        coro.close()
+        raise ApiError(status_code=402, detail=str(e))
+
+    async def refunding():
+        try:
+            return await coro
+        except BaseException:
+            subscriptions.refund(user_id, feature, units)
+            raise
+
+    wrapper = refunding()
+    started = start_job(book_id, job_type, wrapper)
+    if not started:
+        coro.close()
+        subscriptions.refund(user_id, feature, units)
+    return started
 
 
 def set_job_progress(book_id: str, job_type: str, progress) -> None:
@@ -290,17 +342,30 @@ async def upload_book(request: Request):
     # Free-plan shelf cap, before a byte of the body is read: app.js also
     # checks this before opening the file picker, but that's a convenience,
     # not the enforcement -- the client can't be trusted, and anyone can
-    # POST here directly.
+    # POST here directly. The slot is reserved for the whole upload, so
+    # several uploads started together can't all pass a check none of them
+    # has been counted in yet.
     try:
-        subscriptions.check_shelf_capacity(user_id, library.count_toward_shelf_limit(user_id))
+        slot = subscriptions.shelf_slot(user_id, library.count_toward_shelf_limit(user_id))
+        slot.__enter__()
     except subscriptions.ShelfLimitReached as e:
         raise ApiError(status_code=402, detail=str(e))
+    try:
+        return await _receive_upload(request, user_id)
+    finally:
+        slot.__exit__(None, None, None)
 
-    # Cheap early rejection when the client honestly reports Content-Length
-    # (defense in depth only -- a missing/spoofed header falls through to
-    # the chunked read-and-count loop below, which is the real guarantee).
+
+async def _receive_upload(request: Request, user_id: int):
+    # Content-Length is required, and checked before request.form() runs:
+    # Starlette spools the WHOLE multipart body to a temp file inside
+    # form(), so a body with no length header was written to disk in full
+    # before the size loop below ever saw it. Browsers (and Telegram's
+    # WebView) always send it for a FormData upload.
     content_length = request.headers.get("content-length")
-    if content_length and content_length.isdigit() and int(content_length) > MAX_SHELF_UPLOAD_BYTES + 1_000_000:
+    if not (content_length and content_length.isdigit()):
+        raise ApiError(status_code=411, detail="Upload rejected: missing file size. Please try again.")
+    if int(content_length) > MAX_SHELF_UPLOAD_BYTES + 1_000_000:
         raise ApiError(status_code=413, detail=f"That file is over the {MAX_SHELF_UPLOAD_BYTES // 1024 // 1024}MB limit.")
 
     form = await request.form()
@@ -330,19 +395,20 @@ async def upload_book(request: Request):
     except ApiError:
         _safe_remove(dest_path)
         raise
-    except Exception as e:
+    except Exception:
+        logger.exception("Mini app upload failed while receiving the file")
         _safe_remove(dest_path)
-        raise ApiError(status_code=400, detail=f"Upload failed: {e}")
+        raise ApiError(status_code=400, detail="The upload was interrupted. Please try again.")
 
     if total == 0:
         _safe_remove(dest_path)
         raise ApiError(status_code=400, detail="That file was empty.")
 
     try:
-        page_count = await asyncio.to_thread(count_pages, dest_path)
-    except Exception as e:
+        page_count = await asyncio.to_thread(open_check, dest_path)
+    except ChapterDetectionError as e:
         _safe_remove(dest_path)
-        raise ApiError(status_code=400, detail=f"Couldn't read this as a PDF: {e}")
+        raise ApiError(status_code=400, detail=str(e))
 
     if page_count > MAX_SHELF_UPLOAD_PAGES:
         _safe_remove(dest_path)
@@ -449,7 +515,7 @@ async def _run_chapter_division(user_id: int, book_id: str, pdf_path: str):
         # touch the Telegram API or any other coroutine-only object.
         set_job_progress(book_id, "chapters", f"Reading page {done}/{total}...")
 
-    page_count = await asyncio.to_thread(count_pages, pdf_path)
+    page_count = await asyncio.to_thread(open_check, pdf_path)
     if page_count > MAX_PAGES_PER_PASS:
         raise ChapterDetectionError(
             f"This book has {page_count} pages, over the {MAX_PAGES_PER_PASS}-page single-pass limit."
@@ -479,11 +545,13 @@ async def divide_into_chapters(request: Request):
         except ChapterDetectionError as e:
             library.set_chapters_error(user["id"], book_id, str(e))
             raise
-        except Exception as e:
-            library.set_chapters_error(user["id"], book_id, f"Unexpected error: {e}")
+        except Exception:
+            library.set_chapters_error(user["id"], book_id, "Something went wrong dividing this book. Please try again.")
             raise
 
-    started = start_job(book_id, "chapters", job())
+    # Metered: this is a full AI pass over up to 1,000 pages, and before it
+    # counted against nothing, so delete-and-re-divide was unlimited.
+    started = start_metered_job(book_id, "chapters", job(), user["id"], "books")
     return JSONResponse({"started": started})
 
 
@@ -518,8 +586,9 @@ async def send_chapter_files(request: Request):
                 output_paths = await asyncio.to_thread(
                     split_pdf_by_chapters, book["pdf_path"], chapters, output_dir
                 )
-            except Exception as e:
-                raise RuntimeError(f"Couldn't split this book into chapter files: {e}")
+            except Exception:
+                logger.exception("Splitting book %s into chapter files failed", book_id)
+                raise RuntimeError("Couldn't split this book into chapter files. Please try again.")
 
             sent, total = await asyncio.wait_for(
                 send_documents_by_chat_id(
@@ -625,12 +694,11 @@ async def summarize(request: Request):
 
         job_type = "summary:book"
 
-    try:
-        subscriptions.check_and_consume(user["id"], "summaries")
-    except subscriptions.QuotaExceeded as e:
-        raise ApiError(status_code=402, detail=str(e))
-
-    started = start_job(book_id, job_type, job())
+    # A whole-book summary is one AI pass per chapter (often 30-80 calls),
+    # so it costs one unit per chapter rather than one in total -- before,
+    # it was the cheapest way to spend the most.
+    units = len(chapters) if scope == "book" else 1
+    started = start_metered_job(book_id, job_type, job(), user["id"], "summaries", units)
     return JSONResponse({"started": started, "job_type": job_type})
 
 
@@ -736,11 +804,6 @@ async def ask_book(request: Request):
     if not question:
         raise ApiError(status_code=400, detail="Question can't be empty.")
 
-    try:
-        subscriptions.check_and_consume(user["id"], "questions")
-    except subscriptions.QuotaExceeded as e:
-        raise ApiError(status_code=402, detail=str(e))
-
     # history is only ever client-supplied conversation state for THIS
     # book/session (see app.js's "Conversational" mode) -- validated
     # defensively since it's untrusted input, same as any other body field.
@@ -755,22 +818,29 @@ async def ask_book(request: Request):
             raise ApiError(status_code=400, detail="Invalid history entry.")
         history.append({"question": q, "answer": a})
 
+    # Consumed only once the request is known to be valid, and refunded by
+    # the metered block on any failure below -- a timeout or an AI error
+    # used to cost the user one of their ten daily questions.
     try:
-        result = await asyncio.wait_for(
-            pdf_qa.answer_question(
-                book_id, question, history=history, language=subscriptions.get_language(user["id"])
-            ),
-            timeout=ASK_TIMEOUT_SECONDS,
-        )
+        with subscriptions.metered(user["id"], "questions"):
+            result = await asyncio.wait_for(
+                pdf_qa.answer_question(
+                    book_id, question, history=history, language=subscriptions.get_language(user["id"])
+                ),
+                timeout=ASK_TIMEOUT_SECONDS,
+            )
+    except subscriptions.QuotaExceeded as e:
+        raise ApiError(status_code=402, detail=str(e))
     except asyncio.TimeoutError:
-        raise ApiError(status_code=504, detail="That took too long. Please try again.")
-    except pdf_qa.IndexingError as e:
-        raise ApiError(status_code=409, detail=str(e))
+        raise ApiError(status_code=504, detail="That took too long and wasn't counted. Please try again.")
+    except pdf_qa.IndexingError:
+        logger.exception("Book Q&A could not use the index for book_id=%s", book_id)
+        raise ApiError(status_code=500, detail="Couldn't search this book just now (not counted). Please try again.")
     except ApiError:
         raise
     except Exception:
         logger.exception("Book Q&A failed for book_id=%s", book_id)
-        raise ApiError(status_code=500, detail="Something went wrong answering that. Please try again.")
+        raise ApiError(status_code=500, detail="Something went wrong answering that (not counted). Please try again.")
 
     # session_id is a client-generated thread id (see app.js's genId()) --
     # every question asked in the same Ask AI thread carries the same one,
@@ -922,11 +992,12 @@ async def create_quiz(request: Request):
         selected = [chapters[i] for i in chapter_indices]
     except (IndexError, TypeError):
         raise ApiError(status_code=400, detail="Invalid chapter_indices.")
-
-    try:
-        subscriptions.check_and_consume(user["id"], "quizzes")
-    except subscriptions.QuotaExceeded as e:
-        raise ApiError(status_code=402, detail=str(e))
+    # Validated here, before any allowance is taken, rather than only inside
+    # the job where a bad value surfaced as a failed (and charged) quiz.
+    if difficulty not in quiz_ai.VALID_DIFFICULTIES:
+        raise ApiError(status_code=400, detail="Pick a difficulty: easy, medium or difficult.")
+    if not isinstance(num_questions, int) or isinstance(num_questions, bool) or not (1 <= num_questions <= quiz_ai.MAX_QUESTIONS):
+        raise ApiError(status_code=400, detail=f"Number of questions must be between 1 and {quiz_ai.MAX_QUESTIONS}.")
 
     async def job():
         try:
@@ -945,7 +1016,7 @@ async def create_quiz(request: Request):
         except quiz_ai.QuizError as e:
             raise RuntimeError(str(e))
 
-    started = start_job(book_id, "quiz", job())
+    started = start_metered_job(book_id, "quiz", job(), user["id"], "quizzes")
     return JSONResponse({"started": started})
 
 
@@ -1094,11 +1165,6 @@ async def generate_flashcards_endpoint(request: Request):
     ):
         raise ApiError(status_code=400, detail=f"num_cards must be a whole number between 1 and {chapter_ai.MAX_CARDS_PER_GENERATION}.")
 
-    try:
-        subscriptions.check_and_consume(user["id"], "summaries")
-    except subscriptions.QuotaExceeded as e:
-        raise ApiError(status_code=402, detail=str(e))
-
     # Cards already generated from any of these same chapters -- told to
     # Claude below as "already covered" so a second generation round for
     # the same chapter(s) writes genuinely new cards instead of repeats
@@ -1125,7 +1191,7 @@ async def generate_flashcards_endpoint(request: Request):
         added = flashcards.add_cards(user["id"], book_id, book["title"], chapter_label, chapter_indices, raw_cards)
         return _flashcard_deck_summary(user["id"], book_id) | {"added_count": len(added)}
 
-    started = start_job(book_id, "flashcards", job())
+    started = start_metered_job(book_id, "flashcards", job(), user["id"], "flashcards")
     return JSONResponse({"started": started})
 
 
@@ -1464,11 +1530,6 @@ async def drug_interactions(request: Request):
             "produces a wall of text nobody reads. Remove a few.",
         )
 
-    try:
-        subscriptions.check_and_consume(user["id"], "questions")
-    except subscriptions.QuotaExceeded as e:
-        raise ApiError(status_code=402, detail=str(e))
-
     async def run() -> tuple[str, list[str]]:
         # Sequentially rather than with gather: openFDA rate-limits, and a
         # burst of 15 parallel lookups is the reliable way to get a 429 for
@@ -1478,16 +1539,21 @@ async def drug_interactions(request: Request):
             sections = await _fetch_label(name)
             drugs.append({"name": sections.get("_name") or name, "sections": sections})
 
-        answer = await asyncio.wait_for(
-            asyncio.to_thread(
-                interaction_ai.analyze_interactions, drugs, subscriptions.get_language(user["id"])
-            ),
-            timeout=_DRUG_ANSWER_TIMEOUT_SECONDS,
-        )
+        # Charged only here, once every label was found: a misspelled drug
+        # or an openFDA hiccup used to cost a question before any AI ran.
+        with subscriptions.metered(user["id"], "questions"):
+            answer = await asyncio.wait_for(
+                asyncio.to_thread(
+                    interaction_ai.analyze_interactions, drugs, subscriptions.get_language(user["id"])
+                ),
+                timeout=_DRUG_ANSWER_TIMEOUT_SECONDS,
+            )
         return answer, [d["name"] for d in drugs]
 
     try:
         answer, resolved = await asyncio.wait_for(run(), timeout=_DRUG_TOTAL_BUDGET_SECONDS)
+    except subscriptions.QuotaExceeded as e:
+        raise ApiError(status_code=402, detail=str(e))
     except ApiError:
         raise  # a 404/429/502 from a lookup already says exactly what went wrong
     except asyncio.TimeoutError:
@@ -1495,9 +1561,9 @@ async def drug_interactions(request: Request):
             status_code=504,
             detail=f"Checking {len(names)} drugs took too long. Try again, or with fewer drugs at once.",
         )
-    except Exception as e:
+    except Exception:
         logger.exception("Mini app interaction check failed")
-        raise ApiError(status_code=500, detail=f"Couldn't check those interactions: {e or type(e).__name__}")
+        raise ApiError(status_code=500, detail="Couldn't check those interactions just now (not counted). Please try again.")
 
     return JSONResponse({"answer": answer, "drugs": resolved})
 
@@ -1528,33 +1594,31 @@ async def drug_ask(request: Request):
             raise ApiError(status_code=400, detail="Invalid history entry.")
         history.append({"question": q, "answer": a})
 
-    try:
-        subscriptions.check_and_consume(user["id"], "questions")
-    except subscriptions.QuotaExceeded as e:
-        raise ApiError(status_code=402, detail=str(e))
-
     sections = await _fetch_label(name)
     resolved = sections.get("_name") or name
 
     try:
-        answer = await asyncio.wait_for(
-            asyncio.to_thread(
-                drug_qa.answer_question,
-                resolved,
-                sections,
-                question,
-                history,
-                subscriptions.get_language(user["id"]),
-            ),
-            timeout=_DRUG_ANSWER_TIMEOUT_SECONDS,
-        )
+        with subscriptions.metered(user["id"], "questions"):
+            answer = await asyncio.wait_for(
+                asyncio.to_thread(
+                    drug_qa.answer_question,
+                    resolved,
+                    sections,
+                    question,
+                    history,
+                    subscriptions.get_language(user["id"]),
+                ),
+                timeout=_DRUG_ANSWER_TIMEOUT_SECONDS,
+            )
+    except subscriptions.QuotaExceeded as e:
+        raise ApiError(status_code=402, detail=str(e))
     except asyncio.TimeoutError:
         raise ApiError(status_code=504, detail="That question took too long to answer. Please try again.")
     except drug_qa.DrugQAError as e:
         raise ApiError(status_code=409, detail=str(e))
-    except Exception as e:
+    except Exception:
         logger.exception("Mini app drug Q&A failed for %r", resolved)
-        raise ApiError(status_code=500, detail=f"Couldn't answer that: {e or type(e).__name__}")
+        raise ApiError(status_code=500, detail="Couldn't answer that just now (not counted). Please try again.")
 
     return JSONResponse({"answer": answer, "drug": resolved})
 
@@ -1625,29 +1689,27 @@ async def lexidrug_ask(request: Request):
     entry = await _lexi_monograph(drug)  # cached after /open, so normally instant
 
     try:
-        subscriptions.check_and_consume(user["id"], "questions")
+        with subscriptions.metered(user["id"], "questions"):
+            answer = await asyncio.wait_for(
+                asyncio.to_thread(
+                    lexidrug.answer_question,
+                    entry["title"],
+                    entry["text"],
+                    question,
+                    history,
+                    subscriptions.get_language(user["id"]),
+                ),
+                timeout=_DRUG_ANSWER_TIMEOUT_SECONDS,
+            )
     except subscriptions.QuotaExceeded as e:
         raise ApiError(status_code=402, detail=str(e))
-
-    try:
-        answer = await asyncio.wait_for(
-            asyncio.to_thread(
-                lexidrug.answer_question,
-                entry["title"],
-                entry["text"],
-                question,
-                history,
-                subscriptions.get_language(user["id"]),
-            ),
-            timeout=_DRUG_ANSWER_TIMEOUT_SECONDS,
-        )
     except asyncio.TimeoutError:
         raise ApiError(status_code=504, detail="That question took too long to answer. Please try again.")
     except lexidrug.LexidrugError as e:
         raise ApiError(status_code=502, detail=str(e))
-    except Exception as e:
+    except Exception:
         logger.exception("Lexidrug Q&A failed for %r", drug)
-        raise ApiError(status_code=500, detail=f"Couldn't answer that: {e or type(e).__name__}")
+        raise ApiError(status_code=500, detail="Couldn't answer that just now (not counted). Please try again.")
 
     return JSONResponse({"answer": answer, "drug": entry["title"]})
 

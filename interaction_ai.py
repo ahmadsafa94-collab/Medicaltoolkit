@@ -61,13 +61,21 @@ def _label_context(name: str, sections: dict) -> str:
     lines = [f"== {name} =="]
     found = False
     for label in _RELEVANT_FIELD_LABELS:
-        data = sections.get(label)
-        bullets = (data or {}).get("bullets") or []
-        if not bullets:
+        data = sections.get(label) or {}
+        bullets = data.get("bullets") or []
+        # Tables matter most here: many current labels put the actual
+        # interaction list ("Table 4: Clinically Significant Drug
+        # Interactions") in a table, and leaving them out made the model
+        # report "neither label mentions X" about drugs the table names.
+        tables = data.get("tables") or []
+        if not bullets and not tables:
             continue
         found = True
         lines.append(f"-- {label} --")
         lines.extend(bullets)
+        for i, block in enumerate(tables, 1):
+            lines.append(f"[Table {i} from this section, verbatim; columns may be misaligned]")
+            lines.append(block)
     if not found:
         lines.append("(No Drug Interactions or Contraindications section in this label.)")
     return "\n".join(lines)
@@ -113,8 +121,9 @@ def analyze_interactions(drugs: list[dict], language: str = "English") -> str:
             system=system_prompt,
             messages=[{"role": "user", "content": f"Analyze possible interactions among: {names}"}],
         )
-    except Exception as e:
-        raise InteractionAIError(f"The AI request failed: {e}")
+    except Exception:
+        logger.exception("AI request failed")
+        raise InteractionAIError("The AI service didn't respond properly. Please try again in a moment.")
 
     try:
         cost_ledger.record_claude_response("interaction_analysis", response)

@@ -36,12 +36,12 @@ class DrugQAError(Exception):
 def _label_context(sections: dict) -> str:
     """
     Flatten a drug_lookup.lookup_drug() result into one plain-text block,
-    grouped by section heading -- bullets only. Table blocks are skipped
-    here: they're raw, page-layout-alignment-dependent text pulled from the
-    original label (see drug_lookup._extract_structured_blocks), meant to be
-    rendered as a monospace image, not read as prose context by Claude --
-    /dose's own section view already surfaces them verbatim as images when
-    a user taps into a section that has one.
+    grouped by section heading, bullets AND tables. Tables used to be
+    skipped as layout-dependent text meant for image rendering, but labels
+    keep renal/hepatic/pediatric dosing and interaction lists in exactly
+    those tables -- without them the model answered "the label doesn't
+    say" about things the label does say. They go in verbatim, flagged as
+    possibly misaligned so the model reads them with care.
     """
     lines = []
     for _, field_label, _emoji, _keys in FIELDS:
@@ -49,10 +49,14 @@ def _label_context(sections: dict) -> str:
         if not data:
             continue
         bullets = data.get("bullets") or []
-        if not bullets:
+        tables = data.get("tables") or []
+        if not bullets and not tables:
             continue
         lines.append(f"== {field_label} ==")
         lines.extend(bullets)
+        for i, block in enumerate(tables, 1):
+            lines.append(f"[Table {i} from this section, verbatim; columns may be misaligned]")
+            lines.append(block)
         lines.append("")
     return "\n".join(lines).strip()
 
@@ -120,8 +124,9 @@ def answer_question(
             system=system_prompt,
             messages=messages,
         )
-    except Exception as e:
-        raise DrugQAError(f"The AI request failed: {e}")
+    except Exception:
+        logger.exception("AI request failed")
+        raise DrugQAError("The AI service didn't respond properly. Please try again in a moment.")
 
     try:
         cost_ledger.record_claude_response("drug_qa", response)

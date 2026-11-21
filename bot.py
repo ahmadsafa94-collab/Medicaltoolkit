@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import shutil
+import tempfile
 
 import uvicorn
 from aiogram import Dispatcher, F
@@ -1013,6 +1014,18 @@ async def handle_book_delivery_document(message: Message, state: FSMContext):
     await status.edit_text(f"✅ Delivered to user {customer_id} -- added to their Book Shelf and sent as a file.")
 
 
+def _pdf_failure_text(pdf_path: str) -> str:
+    """
+    What to tell a user when processing failed unexpectedly. The raw
+    exception used to be shown ("Something went wrong: <traceback text>"),
+    which helped nobody; the details are in the log and in 🪵 Recent errors.
+    """
+    return (
+        "Something went wrong reading this PDF. Nothing was used from your allowance -- please try "
+        "again in a minute. If it keeps failing, tap 🐞 Report a problem."
+    )
+
+
 @dp.message(F.document, SplitStates.awaiting_pdf)
 async def handle_pdf_split_only(message: Message, state: FSMContext):
     """
@@ -1046,21 +1059,32 @@ async def handle_pdf_split_only(message: Message, state: FSMContext):
 
     status_msg = await message.answer("Got it. Downloading...")
 
-    workdir = user_dir(message.from_user.id)
+    # One private folder per upload: two PDFs sent together used to share
+    # "chapters_split_only", so one upload's cleanup deleted the other's
+    # chapter files mid-send.
+    workdir = tempfile.mkdtemp(prefix="split-", dir=user_dir(message.from_user.id))
     local_pdf_path = os.path.join(workdir, safe_pdf_filename(file_name))
-    output_dir = os.path.join(workdir, "chapters_split_only")
+    output_dir = os.path.join(workdir, "chapters")
+
+    try:
+        subscriptions.consume(message.from_user.id, "books")
+    except subscriptions.QuotaExceeded as e:
+        shutil.rmtree(workdir, ignore_errors=True)
+        await status_msg.edit_text(str(e))
+        return
+    succeeded = False
 
     try:
         file = await bot.get_file(doc.file_id)
         await bot.download_file(file.file_path, destination=local_pdf_path)
-    except TelegramAPIError as e:
+    except TelegramAPIError:
         logger.exception("Failed to download uploaded PDF for split-only")
-        await status_msg.edit_text(f"Couldn't download that file from Telegram: {e}")
+        subscriptions.refund(message.from_user.id, "books")
+        shutil.rmtree(workdir, ignore_errors=True)
+        await status_msg.edit_text("Couldn't download that file from Telegram. Please send it again.")
         return
 
     await status_msg.edit_text("Downloaded. Reading pages and detecting chapters with AI...")
-
-    shutil.rmtree(output_dir, ignore_errors=True)
 
     loop = asyncio.get_running_loop()
 
@@ -1095,11 +1119,12 @@ async def handle_pdf_split_only(message: Message, state: FSMContext):
         except ChapterDetectionError as e:
             await status_msg.edit_text(f"Couldn't split this PDF: {e}")
             return
-        except Exception as e:
+        except Exception:
             logger.exception("Unexpected error splitting PDF (split-only)")
-            await status_msg.edit_text(f"Something went wrong: {e}")
+            await status_msg.edit_text(_pdf_failure_text(local_pdf_path))
             return
 
+        succeeded = True
         await status_msg.edit_text(f"Found {len(chapters)} chapter(s). Sending them now...")
 
         sent, total = await send_documents_safely(message, chapters, output_paths)
@@ -1112,11 +1137,9 @@ async def handle_pdf_split_only(message: Message, state: FSMContext):
         else:
             await message.answer("Done. Tap ✂️ PDF Splitter again anytime.")
     finally:
-        try:
-            os.remove(local_pdf_path)
-        except OSError:
-            pass
-        shutil.rmtree(output_dir, ignore_errors=True)
+        if not succeeded:
+            subscriptions.refund(message.from_user.id, "books")
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
 @dp.message(F.document)
@@ -1162,18 +1185,42 @@ async def handle_pdf_upload(message: Message):
     # further down -- otherwise a free user with a full shelf would sit
     # through the entire upload and processing run only to be told at the
     # very end that the book can't be kept.
+    #
+    # The slot is RESERVED for the whole run (shelf_slot), not just checked:
+    # a bare check let five PDFs sent together all pass a 2-book limit,
+    # since none of them was on the shelf yet when the others looked.
+    uid = message.from_user.id
     try:
-        subscriptions.check_shelf_capacity(
-            message.from_user.id, library.count_toward_shelf_limit(message.from_user.id)
-        )
+        slot = subscriptions.shelf_slot(uid, library.count_toward_shelf_limit(uid))
+        slot.__enter__()
     except subscriptions.ShelfLimitReached as e:
         await message.answer(str(e))
         return
+    try:
+        subscriptions.consume(uid, "books")
+    except subscriptions.QuotaExceeded as e:
+        slot.__exit__(None, None, None)
+        await message.answer(str(e))
+        return
 
+    try:
+        await _process_chat_upload(message, doc, file_name)
+    finally:
+        slot.__exit__(None, None, None)
+
+
+async def _process_chat_upload(message: Message, doc, file_name: str) -> None:
+    """The body of handle_pdf_upload, run while it holds a shelf slot and a "books" unit."""
+    uid = message.from_user.id
     status_msg = await message.answer("Got it. Downloading...")
+    succeeded = False
 
-    workdir = user_dir(message.from_user.id)
-    library_dir = os.path.join(workdir, "library")
+    library_dir = os.path.join(user_dir(uid), "library")
+    # One private folder per upload: every chat upload used to share
+    # STORAGE_DIR/<uid>/chapters, so two PDFs sent together deleted each
+    # other's chapter files mid-send, and a same-named pair overwrote each
+    # other's download.
+    workdir = tempfile.mkdtemp(prefix="upload-", dir=user_dir(uid))
 
     # Sanitize the filename Telegram gives us -- it's client-supplied and,
     # sent via the raw Bot API, could contain path-traversal sequences
@@ -1185,18 +1232,14 @@ async def handle_pdf_upload(message: Message):
     try:
         file = await bot.get_file(doc.file_id)
         await bot.download_file(file.file_path, destination=local_pdf_path)
-    except TelegramAPIError as e:
+    except TelegramAPIError:
         logger.exception("Failed to download uploaded PDF")
-        await status_msg.edit_text(f"Couldn't download that file from Telegram: {e}")
+        subscriptions.refund(uid, "books")
+        shutil.rmtree(workdir, ignore_errors=True)
+        await status_msg.edit_text("Couldn't download that file from Telegram. Please send it again.")
         return
 
     await status_msg.edit_text("Downloaded. Reading pages and detecting chapters with AI...")
-
-    # Clear out any chapter files left over from a previous upload by this
-    # user before writing new ones, so stale files don't pile up on disk
-    # indefinitely (they've already been delivered to the user via Telegram
-    # and serve no purpose sitting on the server).
-    shutil.rmtree(output_dir, ignore_errors=True)
 
     # process_pdf() runs pdfplumber extraction + Claude chapter-detection in
     # a worker thread (asyncio.to_thread). A plain SYNCHRONOUS progress_cb is
@@ -1245,11 +1288,12 @@ async def handle_pdf_upload(message: Message):
         except ChapterDetectionError as e:
             await status_msg.edit_text(f"Couldn't split this PDF: {e}")
             return
-        except Exception as e:
+        except Exception:
             logger.exception("Unexpected error processing PDF")
-            await status_msg.edit_text(f"Something went wrong: {e}")
+            await status_msg.edit_text(_pdf_failure_text(local_pdf_path))
             return
 
+        succeeded = True
         await status_msg.edit_text(
             f"Found {len(chapters)} chapter(s). Sending them now..."
         )
@@ -1290,8 +1334,8 @@ async def handle_pdf_upload(message: Message):
                 logger.exception("count_pages failed on a file process_pdf just read: %s", library_pdf_path)
                 page_count = len(chapters)
 
-            book_id = library.add_book(message.from_user.id, book_title, library_pdf_path, page_count, source="chat")
-            library.set_chapters(message.from_user.id, book_id, compute_chapter_ranges(chapters, page_count))
+            book_id = library.add_book(uid, book_title, library_pdf_path, page_count, source="chat")
+            library.set_chapters(uid, book_id, compute_chapter_ranges(chapters, page_count))
 
             pending_id = session_cache.put({"book_id": book_id})
             ask_kb = make_searchable_kb(pending_id)
@@ -1319,11 +1363,9 @@ async def handle_pdf_upload(message: Message):
         # at local_pdf_path and gets cleaned up here so a stream of failed
         # uploads can't fill the disk. Split chapter files have already been
         # delivered to the user (or failed permanently) either way.
-        try:
-            os.remove(local_pdf_path)
-        except OSError:
-            pass
-        shutil.rmtree(output_dir, ignore_errors=True)
+        if not succeeded:
+            subscriptions.refund(uid, "books")
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
 _REMINDER_CHECK_INTERVAL_SECONDS = 3600  # checked hourly; should_send_reminder_today enforces "at most once/day"

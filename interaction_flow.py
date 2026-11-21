@@ -137,6 +137,14 @@ async def handle_ix_check(callback: CallbackQuery, state: FSMContext):
         await callback.message.answer("Add at least 2 drugs before checking interactions.")
         return
 
+    # Metered like the mini app's check: it is a Claude call over several
+    # full label sections, and the chat version used to be free and uncapped.
+    try:
+        subscriptions.consume(callback.from_user.id, "questions")
+    except subscriptions.QuotaExceeded as e:
+        await callback.message.answer(str(e))
+        return
+
     status = await callback.message.answer("Processing...")
     try:
         text = await asyncio.wait_for(
@@ -146,15 +154,18 @@ async def handle_ix_check(callback: CallbackQuery, state: FSMContext):
             timeout=_ANALYZE_TIMEOUT_SECONDS,
         )
     except asyncio.TimeoutError:
-        await status.edit_text("That took too long. Please try again.")
+        subscriptions.refund(callback.from_user.id, "questions")
+        await status.edit_text("That took too long and wasn't counted. Please try again.")
         return
     except interaction_ai.InteractionAIError as e:
         logger.warning("Interaction analysis failed: %s", e)
+        subscriptions.refund(callback.from_user.id, "questions")
         await status.edit_text(f"Couldn't analyze interactions right now: {e}")
         return
     except Exception:
         logger.exception("Unexpected error analyzing interactions for %s", [d["name"] for d in drugs])
-        await status.edit_text("Something went wrong analyzing interactions. Please try again.")
+        subscriptions.refund(callback.from_user.id, "questions")
+        await status.edit_text("Something went wrong analyzing interactions (not counted). Please try again.")
         return
 
     try:

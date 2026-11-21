@@ -13,6 +13,7 @@ Flow:
 """
 
 import json
+import logging
 import os
 import re
 
@@ -29,6 +30,8 @@ from config import ANTHROPIC_API_KEY, CLAUDE_MODEL, MAX_PAGES_PER_PASS, ANTHROPI
 # is the overall asyncio.wait_for() around process_pdf() in bot.py.
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=ANTHROPIC_CLIENT_TIMEOUT_SECONDS)
 
+logger = logging.getLogger(__name__)
+
 
 class ChapterDetectionError(Exception):
     pass
@@ -37,6 +40,39 @@ class ChapterDetectionError(Exception):
 def count_pages(pdf_path: str) -> int:
     """Cheap page count via pypdf (no text extraction) for an early cap check."""
     return len(PdfReader(pdf_path).pages)
+
+
+def open_check(pdf_path: str) -> int:
+    """
+    Page count, or a ChapterDetectionError a user can act on. pypdf's own
+    errors for a password-protected or damaged file ("File has not been
+    decrypted", "EOF marker not found") used to reach users verbatim.
+    """
+    locked = ChapterDetectionError(
+        "This PDF is password-protected. Remove the password (e.g. print it to a new PDF) and send it again."
+    )
+    try:
+        reader = PdfReader(pdf_path)
+        if reader.is_encrypted:
+            # Many PDFs are "encrypted" with an empty password only to block
+            # editing; those open fine. A real password cannot be guessed.
+            try:
+                ok = reader.decrypt("")
+            except Exception:
+                raise locked
+            if not ok:
+                raise locked
+        return len(reader.pages)
+    except ChapterDetectionError:
+        raise
+    except Exception:
+        raise ChapterDetectionError("This file couldn't be opened as a PDF -- it may be damaged. Try exporting it again.")
+
+
+# A page "has text" with at least this many extracted characters. A scanned
+# book (photos of pages) extracts as empty or a few stray glyphs per page.
+_MIN_TEXT_CHARS_PER_PAGE = 40
+_MIN_TEXT_PAGE_FRACTION = 0.10
 
 
 def extract_page_previews(pdf_path: str, chars_per_page: int = 350, progress_cb=None) -> list[str]:
@@ -80,9 +116,18 @@ def detect_chapters(previews: list[str]) -> list[dict]:
     """
     if len(previews) > MAX_PAGES_PER_PASS:
         raise ChapterDetectionError(
-            f"PDF has {len(previews)} pages, which exceeds the "
-            f"{MAX_PAGES_PER_PASS}-page single-pass limit. Split the file "
-            f"manually first, or raise MAX_PAGES_PER_PASS in config.py."
+            f"This PDF has {len(previews)} pages; the limit is {MAX_PAGES_PER_PASS}. "
+            "Split it into parts first and send those."
+        )
+    with_text = sum(1 for p in previews if len(p) >= _MIN_TEXT_CHARS_PER_PAGE)
+    if previews and with_text < max(1, len(previews) * _MIN_TEXT_PAGE_FRACTION):
+        # Checked before the AI call: a scanned book has nothing to find
+        # chapters in, and sending hundreds of empty "[PAGE n]" lines to the
+        # model only produced a bogus one-chapter split at full cost.
+        raise ChapterDetectionError(
+            "This PDF looks like a scan (pictures of pages, no selectable text), so its text can't be "
+            "read. Run it through an OCR tool first (e.g. Adobe Scan, or \"Make searchable\" in most "
+            "PDF apps) and send the result."
         )
 
     numbered_text = "\n".join(
@@ -103,37 +148,46 @@ def detect_chapters(previews: list[str]) -> list[dict]:
         "at page 1."
     )
 
-    response = client.messages.create(
-        model=CLAUDE_MODEL,
-        max_tokens=4000,
-        system=system_prompt,
-        messages=[{"role": "user", "content": numbered_text}],
-    )
-    try:
-        cost_ledger.record_claude_response("chapter_split", response)
-    except Exception:
-        pass  # cost logging must never break chapter detection itself
+    # One retry: an unparseable reply is usually a one-off, and failing the
+    # whole upload over it is worse than a second call.
+    chapters = None
+    for attempt in range(2):
+        response = client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=8000,
+            thinking={"type": "disabled"},
+            system=system_prompt,
+            messages=[{"role": "user", "content": numbered_text}],
+        )
+        try:
+            cost_ledger.record_claude_response("chapter_split", response)
+        except Exception:
+            pass  # cost logging must never break chapter detection itself
 
-    raw = "".join(block.text for block in response.content if block.type == "text").strip()
-    raw = re.sub(r"^```json|```$", "", raw.strip(), flags=re.MULTILINE).strip()
-
-    try:
-        chapters = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise ChapterDetectionError(f"Could not read the AI's response: {e}\nRaw: {raw[:500]}")
+        raw = "".join(block.text for block in response.content if block.type == "text").strip()
+        raw = re.sub(r"^```json|```$", "", raw.strip(), flags=re.MULTILINE).strip()
+        try:
+            chapters = json.loads(raw)
+            break
+        except json.JSONDecodeError:
+            logger.warning(
+                "Chapter split reply was not JSON (attempt %d, stop=%s): %r", attempt + 1, response.stop_reason, raw[:500]
+            )
+    if chapters is None:
+        raise ChapterDetectionError("The AI's chapter list came back unreadable. Please send the PDF again.")
 
     if not isinstance(chapters, list) or not chapters:
         raise ChapterDetectionError("The AI returned no chapters.")
 
     for ch in chapters:
         if not isinstance(ch, dict) or "title" not in ch or "start_page" not in ch:
-            raise ChapterDetectionError(f"Malformed chapter entry: {ch}")
+            raise ChapterDetectionError("The AI's chapter list was malformed. Please send the PDF again.")
         # start_page must be a real page number, not a bool, string, float,
         # or anything else -- letting a bad type through here would only
         # surface later as a confusing TypeError from sort()/arithmetic in
         # split_pdf_by_chapters.
         if isinstance(ch["start_page"], bool) or not isinstance(ch["start_page"], int) or ch["start_page"] < 1:
-            raise ChapterDetectionError(f"Invalid start_page in chapter entry: {ch}")
+            raise ChapterDetectionError("The AI's chapter list was malformed. Please send the PDF again.")
         if ch["start_page"] > len(previews):
             raise ChapterDetectionError(
                 f"Chapter '{ch.get('title')}' has start_page {ch['start_page']}, "
@@ -219,12 +273,11 @@ def process_pdf(pdf_path: str, output_dir: str, progress_cb=None) -> tuple[list[
     # Check the page cap with a cheap pypdf page count BEFORE running the
     # much more expensive full-text extraction over every page -- no point
     # paying that cost on a PDF we're about to reject anyway.
-    page_count = count_pages(pdf_path)
+    page_count = open_check(pdf_path)
     if page_count > MAX_PAGES_PER_PASS:
         raise ChapterDetectionError(
-            f"PDF has {page_count} pages, which exceeds the "
-            f"{MAX_PAGES_PER_PASS}-page single-pass limit. Split the file "
-            f"manually first, or raise MAX_PAGES_PER_PASS in config.py."
+            f"This PDF has {page_count} pages; the limit is {MAX_PAGES_PER_PASS}. "
+            "Split it into parts first and send those."
         )
 
     previews = extract_page_previews(pdf_path, progress_cb=progress_cb)

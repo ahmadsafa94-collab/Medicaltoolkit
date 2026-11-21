@@ -47,6 +47,7 @@ class CustomerStates(StatesGroup):
     awaiting_contact_admin_message = State()
     awaiting_feedback_message = State()
     awaiting_support_message = State()
+    awaiting_paysupport_message = State()
 
 
 def _plan_summary_text(user_id: int) -> str:
@@ -131,34 +132,115 @@ async def _send_premium_invoice(message: Message, payload: str, title: str, star
         await message.answer("Couldn't start the payment right now. Please try again in a moment.")
 
 
+def _checkout_error(payload: str, user_id: int, currency: str, total_amount: int) -> str | None:
+    """
+    Why a pre-checkout query must be refused, as the message Telegram shows
+    the user, or None to approve it.
+
+    pre_checkout_query is the last point at which the bot can stop Telegram
+    from charging, and anything that reaches successful_payment has already
+    taken the user's Stars. So everything that would make the payment
+    un-honourable is checked here: an invoice for a plan that's since been
+    removed or repriced, or a 📚 book request that isn't this user's, isn't
+    awaiting payment any more (already paid from a second invoice, declined,
+    refunded) or whose invoice amount doesn't match the quote.
+    """
+    if currency != "XTR":
+        return "This invoice isn't in Telegram Stars -- please start the payment again from ⭐ My Plan."
+
+    if payload.startswith("bookreq_"):
+        request_id = payload[len("bookreq_"):]
+        record = book_requests.get_request(request_id)
+        if record is None or record.get("user_id") != user_id:
+            return "This book request isn't available anymore -- you haven't been charged."
+        if record.get("status") != "quoted" or record.get("paid_at") or record.get("charge_id"):
+            return (
+                f"This book request is '{record.get('status')}', not awaiting payment -- "
+                "you haven't been charged."
+            )
+        if total_amount != record.get("stars"):
+            return "This invoice doesn't match the current quote -- please use ✅ Accept & Pay on the quote again."
+        return None
+
+    plan = _PLANS_BY_PAYLOAD.get(payload)
+    if plan is None:
+        return "That plan isn't available anymore -- open ⭐ My Plan for the current options."
+    if total_amount != plan["stars"]:
+        return "This plan's price has changed since the invoice was sent -- open ⭐ My Plan for a new one."
+    return None
+
+
 @router.pre_checkout_query()
 async def handle_pre_checkout(pre_checkout_query: PreCheckoutQuery):
-    # No inventory/stock to check for a digital subscription -- always
-    # approve so Telegram proceeds to actually charge the user.
-    await pre_checkout_query.answer(ok=True)
+    """
+    Telegram needs an answer within 10 seconds, so an unexpected error in
+    the checks is turned into a refusal (no charge) rather than left to
+    time out -- which also refuses, but with no explanation for the user.
+    """
+    try:
+        error = _checkout_error(
+            pre_checkout_query.invoice_payload,
+            pre_checkout_query.from_user.id,
+            pre_checkout_query.currency,
+            pre_checkout_query.total_amount,
+        )
+    except Exception:
+        logger.exception("Pre-checkout validation failed for payload %s", pre_checkout_query.invoice_payload)
+        error = "Something went wrong checking this payment -- you haven't been charged. Please try again."
+
+    if error is None:
+        await pre_checkout_query.answer(ok=True)
+        return
+    logger.info(
+        "Refused pre-checkout from %s for %s: %s",
+        pre_checkout_query.from_user.id, pre_checkout_query.invoice_payload, error,
+    )
+    await pre_checkout_query.answer(ok=False, error_message=error)
 
 
 @router.message(F.successful_payment)
 async def handle_successful_payment(message: Message):
+    """
+    Grants what a Stars payment bought, once per telegram_payment_charge_id.
+
+    Telegram re-delivers this update if the bot didn't acknowledge it (e.g.
+    a restart mid-handler), so a charge id already in the user's payment
+    history is a re-delivery of a payment that's already been honoured: it's
+    acknowledged by simply returning, without granting again or messaging
+    the user a second "Thanks!". subscriptions.apply_payment() repeats the
+    check in the same write as the grant, so it holds even if two copies
+    arrive together.
+    """
     payment = message.successful_payment
+    user_id = message.from_user.id
+    charge_id = payment.telegram_payment_charge_id
+    if subscriptions.find_payment(user_id, charge_id) is not None:
+        logger.info("Ignoring re-delivered successful_payment %s for user %s", charge_id, user_id)
+        return
+
     if payment.invoice_payload.startswith("bookreq_"):
         await _handle_book_payment(message, payment)
         return
 
-    user_id = message.from_user.id
     plan = _PLANS_BY_PAYLOAD.get(payment.invoice_payload)
     days = plan["days"] if plan else None
     if days is None:
         logger.warning("Unknown invoice payload on successful_payment: %s", payment.invoice_payload)
+        # Still recorded (with its charge id) so the admin can see the
+        # money arrived and /refund it, and so a re-delivery stays quiet.
+        subscriptions.apply_payment(
+            user_id, charge_id, stars=payment.total_amount, days=0, source=f"unknown_{payment.invoice_payload}"
+        )
         await message.answer(
-            "Payment received, but I didn't recognize what it was for -- please contact the admin via "
-            "⭐ My Plan so this can be sorted out manually."
+            "Payment received, but I didn't recognize what it was for -- please use /paysupport so the "
+            "admin can sort this out manually."
         )
         return
 
     was_first_payment = not subscriptions.has_ever_paid(user_id)
-    subscriptions.grant_premium(user_id, days=days, source="stars")
-    subscriptions.record_payment(user_id, stars=payment.total_amount, days=days, source="stars")
+    if not subscriptions.apply_payment(user_id, charge_id, stars=payment.total_amount, days=days, source="stars"):
+        logger.info("Ignoring duplicate successful_payment %s for user %s", charge_id, user_id)
+        return
 
     referral_note = ""
     if was_first_payment:
@@ -188,21 +270,58 @@ async def _handle_book_payment(message: Message, payment) -> None:
     admin to deliver it via /deliverbook.
     """
     request_id = payment.invoice_payload[len("bookreq_"):]
+    user_id = message.from_user.id
+    charge_id = payment.telegram_payment_charge_id
+    source = f"bookreq_{request_id}"
     record = book_requests.get_request(request_id)
     if record is None:
         logger.warning("successful_payment for unknown book request %s", request_id)
+        subscriptions.apply_payment(user_id, charge_id, stars=payment.total_amount, days=0, source=source)
         await message.answer(
-            "Payment received, but I couldn't find that book request -- please contact the admin via "
-            "⭐ My Plan so this can be sorted out manually."
+            "Payment received, but I couldn't find that book request -- please use /paysupport so the "
+            "admin can sort this out manually."
         )
         return
 
-    book_requests.set_paid(request_id)
-    subscriptions.record_payment(message.from_user.id, stars=payment.total_amount, days=0, source=f"bookreq_{request_id}")
+    from bot_instance import bot as tg_bot
+
+    # The request is marked paid BEFORE the payment is recorded: if the bot
+    # dies between the two, the re-delivered update finds no payment entry
+    # (so isn't skipped as a duplicate) and this request already carrying
+    # its charge id, and just finishes the job below.
+    already_marked = record.get("charge_id") == charge_id
+    if not already_marked and record["status"] != "quoted":
+        # pre-checkout refuses this, but two invoices for the same request
+        # can both pass it before either completes. The money is taken
+        # either way, so record it and hand it to the admin to refund --
+        # the request itself stays with the payment that got there first.
+        if not subscriptions.apply_payment(user_id, charge_id, stars=payment.total_amount, days=0, source=source):
+            return
+        await message.answer(
+            "This book request was already paid, so this second payment will be refunded -- "
+            "the admin has been told. Use /paysupport if you have questions."
+        )
+        for admin_id in ADMIN_USER_IDS:
+            try:
+                await tg_bot.send_message(
+                    chat_id=admin_id,
+                    text=(
+                        f"⚠️ Book request {request_id} (status '{record['status']}') was paid AGAIN "
+                        f"({payment.total_amount} Stars) by {record['who']} (id {user_id}).\n\n"
+                        f"Refund it with: /refund {user_id} {charge_id}"
+                    ),
+                )
+            except TelegramAPIError:
+                logger.warning("Failed to notify admin %s of double payment on %s", admin_id, request_id)
+        return
+
+    if not already_marked:
+        book_requests.set_paid(request_id, charge_id=charge_id)
+    if not subscriptions.apply_payment(user_id, charge_id, stars=payment.total_amount, days=0, source=source):
+        logger.info("Ignoring duplicate successful_payment %s for book request %s", charge_id, request_id)
+        return
 
     await message.answer("✅ Paid! The admin will deliver your book here shortly.")
-
-    from bot_instance import bot as tg_bot
 
     for admin_id in ADMIN_USER_IDS:
         try:
@@ -438,6 +557,194 @@ async def handle_support_send(message: Message, state: FSMContext):
         await message.answer("Couldn't reach the admin right now -- please try again later.")
 
 
+# ---------------------------------------------------------------------------
+# Payment support, terms, refunds -- what Telegram's Stars rules require of a
+# bot that sells digital goods: a /paysupport command, a /terms command, and
+# the ability to refund (Bot API refundStarPayment).
+# ---------------------------------------------------------------------------
+
+TERMS_TEXT = (
+    "📄 Terms of Service\n\n"
+    "1. Premium is a digital subscription to this bot's features for the period you buy. It isn't "
+    "renewed automatically -- you buy each period yourself.\n"
+    "2. Payments are made in Telegram Stars through Telegram. This bot never sees your card or "
+    "payment details.\n"
+    "3. This bot is an AI study aid for medical students. Its summaries, quizzes, answers and "
+    "calculators can be wrong, and they are NOT medical advice -- never use them to diagnose or "
+    "treat a patient; check against authoritative sources and your supervisors.\n"
+    "4. 📚 Requested Books are priced individually and delivered by the admin after payment.\n"
+    "5. Refunds: if something went wrong with a purchase, ask through /paysupport within a "
+    "reasonable time (ideally within 14 days). Refunds are given at the admin's discretion and are "
+    "returned as Stars to your Telegram account; refunded Premium time is removed.\n"
+    "6. Access may be suspended for abuse of the service.\n\n"
+    "Questions about a payment? Use /paysupport."
+)
+
+
+@router.message(Command("terms"))
+async def cmd_terms(message: Message):
+    await message.answer(TERMS_TEXT)
+
+
+@router.message(Command("paysupport"))
+async def cmd_pay_support(message: Message, state: FSMContext):
+    """
+    Same shape as /support (one message, forwarded to every admin, answered
+    with /replyuser), but in its own state so the admin sees it's about a
+    payment and gets the user's recent charge ids ready to pass to /refund
+    -- the one thing they'd otherwise have to ask the user for.
+    """
+    if not ADMIN_USER_IDS:
+        await message.answer("This bot doesn't have an admin contact configured yet -- please try again later.")
+        return
+    await state.set_state(CustomerStates.awaiting_paysupport_message)
+    await message.answer(
+        "💳 Payment support\n\n"
+        "Describe the problem with your payment in one message -- what you bought, roughly when, and "
+        "what went wrong (e.g. paid but Premium didn't activate, charged twice, want a refund). "
+        "The admin will read it and reply to you here.\n\n"
+        "Refund rules are in /terms.",
+        reply_markup=cancel_kb(),
+    )
+
+
+@router.message(Command("cancel"), CustomerStates.awaiting_paysupport_message)
+async def handle_pay_support_cancel(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Cancelled.")
+
+
+def _recent_charges_text(user_id: int, limit: int = 5) -> str:
+    """The user's latest Stars payments with their charge ids, for the admin's /paysupport copy."""
+    payments = [
+        p for p in subscriptions.get_status(user_id).get("payments", [])
+        if p.get("charge_id") and p.get("source") != "refund"
+    ]
+    if not payments:
+        return "No Stars payments with a charge id on file."
+    lines = ["Recent payments:"]
+    for p in sorted(payments, key=lambda p: p["ts"], reverse=True)[:limit]:
+        when = time.strftime("%Y-%m-%d", time.gmtime(p["ts"]))
+        refunded = " [REFUNDED]" if p.get("refunded_at") else ""
+        lines.append(f"  {when} {p['stars']} Stars ({p.get('source', 'stars')}){refunded}\n    {p['charge_id']}")
+    return "\n".join(lines)
+
+
+@router.message(CustomerStates.awaiting_paysupport_message)
+async def handle_pay_support_send(message: Message, state: FSMContext):
+    await state.clear()
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer("Empty message -- not sent.")
+        return
+
+    from bot_instance import bot as tg_bot
+
+    user = message.from_user
+    who = f"@{user.username}" if getattr(user, "username", None) else f"id {user.id}"
+    sent_to_any = False
+    for admin_id in ADMIN_USER_IDS:
+        try:
+            await tg_bot.send_message(
+                chat_id=admin_id,
+                text=(
+                    f"💳 Payment support request from {who} (id {user.id}):\n\n{text}\n\n"
+                    f"{_recent_charges_text(user.id)}\n\n"
+                    f"Reply with: /replyuser {user.id} <your message>\n"
+                    f"Refund with: /refund {user.id} <charge_id>"
+                ),
+            )
+            sent_to_any = True
+        except TelegramAPIError:
+            logger.warning("Failed to forward payment-support message to admin %s", admin_id)
+
+    if sent_to_any:
+        await message.answer("Sent to the admin -- they'll message you here directly.")
+    else:
+        await message.answer("Couldn't reach the admin right now -- please try again later.")
+
+
+@router.message(Command("refund"))
+async def cmd_refund(message: Message):
+    """
+    /refund <user_id> <telegram_payment_charge_id> -- admin only. Refunds a
+    Stars payment through Telegram first, and only once Telegram confirms
+    takes back what it bought (subscriptions.record_refund: the Premium days
+    for a plan; a 📚 book request goes to "refunded"), so a refund Telegram
+    rejects (wrong id, already refunded) never costs the user anything.
+
+    A charge id that isn't in the user's history is still sent to Telegram
+    -- payments from before charge ids were stored aren't on file -- but
+    nothing can be taken back automatically then, and the reply says so.
+    """
+    if not subscriptions.is_admin(message.from_user.id):
+        await message.answer("This isn't available to you.")
+        return
+
+    parts = (message.text or "").split()
+    if len(parts) != 3:
+        await message.answer("Usage: /refund <user_id> <telegram_payment_charge_id>")
+        return
+    try:
+        user_id = int(parts[1])
+    except ValueError:
+        await message.answer("The user id must be a number. Usage: /refund <user_id> <telegram_payment_charge_id>")
+        return
+    charge_id = parts[2]
+
+    original = subscriptions.find_payment(user_id, charge_id)
+    if original is not None and original.get("refunded_at"):
+        when = time.strftime("%Y-%m-%d", time.gmtime(original["refunded_at"]))
+        await message.answer(f"That payment was already refunded on {when}.")
+        return
+
+    from bot_instance import bot as tg_bot
+
+    try:
+        await tg_bot.refund_star_payment(user_id=user_id, telegram_payment_charge_id=charge_id)
+    except TelegramAPIError as e:
+        logger.warning("refund_star_payment failed for user %s charge %s: %s", user_id, charge_id, e)
+        await message.answer(f"Telegram refused the refund: {e}\n\nNothing was changed on the user's plan.")
+        return
+
+    original = subscriptions.record_refund(user_id, charge_id)
+    if original is None:
+        summary = (
+            f"✅ Refunded charge {charge_id} for user {user_id}. That charge isn't in their payment "
+            "history, so nothing was revoked automatically -- adjust their plan by hand if needed."
+        )
+    else:
+        source = original.get("source", "")
+        summary = f"✅ Refunded {original.get('stars')} Stars to user {user_id}."
+        if source.startswith("bookreq_"):
+            request_id = source[len("bookreq_"):]
+            record = book_requests.get_request(request_id)
+            # Only the payment that actually moved the request to "paid"
+            # refunds the request; refunding an accidental second payment
+            # leaves the first one's paid/delivered status alone.
+            if record is not None and record.get("charge_id") == charge_id:
+                book_requests.set_refunded(request_id)
+                summary += f" Book request {request_id} is now marked refunded."
+                if record.get("status") == "delivered":
+                    summary += " (It was already delivered -- the PDF stays on their shelf.)"
+            else:
+                summary += f" Book request {request_id} was left as it was (this wasn't its paying charge)."
+        elif original.get("days", 0) > 0:
+            summary += f" Removed {original['days']} days of Premium."
+            if not subscriptions.is_premium(user_id):
+                summary += " They're now on the free plan."
+
+    await message.answer(summary)
+
+    try:
+        await tg_bot.send_message(
+            chat_id=user_id,
+            text="💳 Your payment has been refunded -- the Stars are back in your Telegram account.",
+        )
+    except TelegramAPIError:
+        logger.warning("Failed to notify user %s of their refund", user_id)
+
+
 @router.callback_query(F.data == "plan:referral")
 async def handle_referral(callback: CallbackQuery):
     await callback.answer()
@@ -475,7 +782,9 @@ async def handle_history(callback: CallbackQuery):
     for p in sorted(payments, key=lambda p: p["ts"], reverse=True)[:20]:
         when = time.strftime("%Y-%m-%d", time.gmtime(p["ts"]))
         source = p.get("source", "stars")
-        if source.startswith("bookreq_"):
+        if source == "refund":
+            lines.append(f"{when} -- refund of {-p['stars']} Stars")
+        elif source.startswith("bookreq_"):
             lines.append(f"{when} -- {p['stars']} Stars (requested book)")
         else:
             lines.append(f"{when} -- {p['stars']} Stars ({p['days']} days, {source})")

@@ -157,9 +157,11 @@ ADMIN_USER_IDS = {
 # username to link to.
 SUPPORT_ADMIN_USERNAME = os.environ.get("SUPPORT_ADMIN_USERNAME", "").lstrip("@").strip()
 
-# Free-tier monthly caps on the Claude-token-heavy features -- see
-# subscriptions.py. Everything else (dose lookup, interactions, calculators,
-# glossary) stays free and uncapped since it doesn't call Claude at all.
+# Free-tier DAILY caps on the AI-heavy features -- see subscriptions.py.
+# A request that fails is refunded, so these count only answers delivered.
+# Dose lookup, calculators and the glossary stay free and uncapped since
+# they don't call Claude. Drug interactions DO (one call over every drug's
+# label) and share the "questions" allowance in both chat and the mini app.
 # All three are per UTC DAY, not per month. A monthly bucket gets drained
 # in a single study session and then locks a free user out for weeks, which
 # makes the free tier feel broken rather than limited; a daily allowance
@@ -168,6 +170,14 @@ SUPPORT_ADMIN_USERNAME = os.environ.get("SUPPORT_ADMIN_USERNAME", "").lstrip("@"
 FREE_DAILY_SUMMARIES = 3
 FREE_DAILY_QUIZZES = 3
 FREE_DAILY_QUESTIONS = 10
+# Flashcard generation used to draw from the summaries allowance, which
+# confused users ("why did making cards use up a summary?").
+FREE_DAILY_FLASHCARD_SETS = 3
+# Uploading a PDF (or re-dividing one) runs an AI chapter split over up to
+# 1,000 pages -- the single most expensive thing a free user can trigger,
+# and repeatable by deleting and re-uploading. (Indexing for "Ask my book"
+# is not metered: Voyage embeddings cost cents even for a 1,000-page book.)
+FREE_DAILY_BOOK_PROCESSING = 3
 
 # How many books a FREE user may keep on their 📚 Book Shelf at once. Unlike
 # the monthly caps above this is a standing limit on stored books, not a

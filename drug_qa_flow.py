@@ -221,7 +221,7 @@ async def handle_question(message: Message, state: FSMContext):
         return
 
     try:
-        subscriptions.check_and_consume(message.from_user.id, "questions")
+        subscriptions.consume(message.from_user.id, "questions")
     except subscriptions.QuotaExceeded as e:
         await message.answer(str(e))
         return
@@ -234,14 +234,17 @@ async def handle_question(message: Message, state: FSMContext):
             timeout=_ANSWER_TIMEOUT_SECONDS,
         )
     except asyncio.TimeoutError:
-        await status.edit_text("That took too long. Please try again.")
+        subscriptions.refund(message.from_user.id, "questions")
+        await status.edit_text("That took too long and wasn't counted. Please try again.")
         return
     except drug_qa.DrugQAError as e:
+        subscriptions.refund(message.from_user.id, "questions")
         await status.edit_text(str(e))
         return
     except Exception:
         logger.exception("Drug Q&A failed for %s", drug_name)
-        await status.edit_text("Something went wrong answering that. Please try again.")
+        subscriptions.refund(message.from_user.id, "questions")
+        await status.edit_text("Something went wrong answering that (not counted). Please try again.")
         return
 
     try:

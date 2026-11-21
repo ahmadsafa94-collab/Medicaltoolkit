@@ -25,13 +25,16 @@ original, and keyboards.ButtonText() is the filter built on it -- so a
 Persian user tapping "🧠 ابزار مطالعه" reaches the same handler.
 """
 
+import collections
 import contextlib
 import contextvars
 import json
 import logging
 import os
 import re
+import tempfile
 import threading
+import unicodedata
 
 import cost_ledger
 import language
@@ -104,7 +107,45 @@ COMMON_MESSAGES = [
 _cache: dict[str, dict[str, str]] = {}
 # translated label -> english label, across ALL languages, for canonical()
 _reverse: dict[str, str] = {}
+# Guards every in-memory mutation of the caches above and below. Held only
+# for dict work, never across disk I/O or a Claude call: cached_message()
+# takes it on the event loop, so holding it while writing a file would
+# stall every user's updates.
 _lock = threading.Lock()
+# Serializes cache-file WRITES. Separate from _lock so the event loop never
+# waits on the disk, and held across snapshot-then-write so two writers
+# can't land out of order -- without it, a thread holding an older snapshot
+# could os.replace() it over a newer file and silently drop entries. Lock
+# order is always _write_lock, then _lock.
+_write_lock = threading.Lock()
+
+
+def _atomic_write_json(path: str, payload: str) -> None:
+    """
+    Replace `path` with `payload` so a reader sees the old file or the new
+    one, never half of either.
+
+    The temp file is unique per call (NamedTemporaryFile, same directory so
+    os.replace stays a same-filesystem rename). A fixed "<path>.tmp" was
+    shared by every worker thread translating at once: two of them would
+    write into the same file and one would rename the other's half-written
+    JSON into place.
+    """
+    directory = os.path.dirname(path)
+    os.makedirs(directory, exist_ok=True)
+    tmp = tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", dir=directory, prefix=os.path.basename(path) + ".", suffix=".tmp", delete=False
+    )
+    try:
+        with tmp as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp.name, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp.name)
+        raise
 
 
 def _safe_name(lang: str) -> str:
@@ -125,7 +166,17 @@ def _cache_path(lang: str) -> str:
 # the bot ever sends -- and accumulate as they're encountered. Mixing them
 # would put unbounded content into the set that button matching scans.
 _MSG_CACHE_DIR = os.path.join(STORAGE_DIR, "_admin", "ui_messages")
-_MAX_CACHED_MESSAGES = 4000    # per language; a ceiling on unbounded growth
+_MAX_CACHED_MESSAGES = 4000    # per language; least-recently-used entries are evicted past this
+# What is worth a cache slot. A message the bot built at runtime -- a
+# calculator result, "Found 12 chapters", a page count -- almost never
+# recurs byte-for-byte, so caching it only spends a slot. Before this rule
+# those filled the cap within weeks and the cache then refused everything
+# new, so every later message cost a Claude call forever. Fixed strings
+# found in the source (see _static_strings) are always cacheable whatever
+# they contain; anything else is cacheable only with no digits in it and
+# within this length.
+_MAX_UNLISTED_DIGITS = 0
+_MAX_CACHEABLE_CHARS = 1000
 # A backstop against pathological input, NOT the way AI content is
 # excluded -- that's what untranslated() below is for. It started as a
 # 700-char cutoff standing in for "this must be AI output", which was
@@ -193,8 +244,9 @@ def _msg_cache_path(lang: str) -> str:
 
 
 def _load_messages(lang: str) -> dict[str, str]:
-    if lang in _msg_cache:
-        return _msg_cache[lang]
+    cached = _msg_cache.get(lang)
+    if cached is not None:
+        return cached
     data = {}
     path = _msg_cache_path(lang)
     if os.path.exists(path):
@@ -206,25 +258,86 @@ def _load_messages(lang: str) -> dict[str, str]:
         except (json.JSONDecodeError, OSError):
             logger.exception("Unreadable message cache for %s -- treating as empty", lang)
     with _lock:
-        _msg_cache[lang] = data
-    return data
+        # setdefault, not assignment: two threads can both miss and both
+        # read the file. Whichever lands second must adopt the first one's
+        # dict, or entries the first thread already remembered would go
+        # into a dict nothing references any more.
+        return _msg_cache.setdefault(lang, data)
+
+
+_static: frozenset[str] | None = None
+
+
+def _static_strings() -> frozenset[str]:
+    """Every fixed string the bot can send, for _is_cacheable. Built once; the source can't change under us."""
+    global _static
+    if _static is None:
+        # A benign race: two threads may both build it, and both get the same set.
+        _static = frozenset(UI_STRINGS) | frozenset(COMMON_MESSAGES) | frozenset(ui_strings.extract_static_messages())
+    return _static
+
+
+def _is_cacheable(text: str) -> bool:
+    """Whether `text` deserves a cache slot -- see _MAX_UNLISTED_DIGITS above for why most dynamic text doesn't."""
+    if text in _static_strings():
+        return True
+    if sum(ch.isdigit() for ch in text) > _MAX_UNLISTED_DIGITS:
+        return False
+    return len(text) <= _MAX_CACHEABLE_CHARS
+
+
+def _worth_translating(text: str) -> bool:
+    """
+    False for text that is mostly numbers -- "✅ 12/40", "120/80", a bare
+    result. There are no words in it to translate, and every one of them
+    would otherwise be a Claude call (uncacheable, see _is_cacheable) whose
+    best possible outcome is the same string back.
+    """
+    letters = sum(ch.isalpha() for ch in text)
+    return letters >= 2 and letters > sum(ch.isdigit() for ch in text)
+
+
+def _persist_messages(lang: str) -> None:
+    """Write the language's message cache to disk. Safe to call from any number of threads at once."""
+    path = _msg_cache_path(lang)
+    with _write_lock:
+        with _lock:
+            data = _msg_cache.get(lang)
+            if data is None:
+                return
+            # Copy under the lock, serialize outside it: json.dump straight
+            # from the live dict raced worker threads adding to it ("dict
+            # changed size during iteration"), and serializing a 4000-entry
+            # dict while holding _lock would block the event loop on it.
+            snapshot = dict(data)
+        try:
+            _atomic_write_json(path, json.dumps(snapshot, ensure_ascii=False))
+        except OSError:
+            logger.exception("Could not persist message cache for %s (kept in memory)", lang)
+
+
+def _remember_messages(lang: str, translations: dict[str, str]) -> None:
+    """Cache a batch of fresh translations and write the file once for the batch, not once per string."""
+    keep = {english: value for english, value in translations.items() if _is_cacheable(english)}
+    if not keep:
+        return
+    data = _load_messages(lang)
+    with _lock:
+        for english, value in keep.items():
+            # Re-insert at the end: dict order is the recency order the
+            # eviction below relies on.
+            data.pop(english, None)
+            data[english] = value
+        # At the cap, evict the least recently used rather than refusing
+        # new entries -- refusing meant a full cache froze in whatever it
+        # happened to hold, and every newer message cost a call forever.
+        while len(data) > _MAX_CACHED_MESSAGES:
+            del data[next(iter(data))]
+    _persist_messages(lang)
 
 
 def _remember_message(lang: str, english: str, translated: str) -> None:
-    data = _load_messages(lang)
-    if len(data) >= _MAX_CACHED_MESSAGES:
-        return  # keep serving from what's cached; just stop growing the file
-    with _lock:
-        data[english] = translated
-    os.makedirs(_MSG_CACHE_DIR, exist_ok=True)
-    path = _msg_cache_path(lang)
-    tmp = path + ".tmp"
-    try:
-        with open(tmp, "w") as f:
-            json.dump(data, f, ensure_ascii=False)
-        os.replace(tmp, path)
-    except OSError:
-        logger.exception("Could not persist message cache for %s (kept in memory)", lang)
+    _remember_messages(lang, {english: translated})
 
 
 def cached_message(language: str | None, text: str) -> str | None:
@@ -235,7 +348,17 @@ def cached_message(language: str | None, text: str) -> str | None:
     """
     if is_english(language) or not text:
         return None
-    return _load_messages(language).get(text)
+    data = _load_messages(language)
+    value = data.get(text)
+    if value is not None:
+        with _lock:
+            # Mark it recently used, so eviction takes the strings nobody
+            # sees rather than the ones everybody does. Only reordered in
+            # memory; the file picks the order up on its next write, which
+            # is close enough for a cache.
+            if text in data:
+                data[text] = data.pop(text)
+    return value
 
 
 def translate_message(language: str | None, text: str) -> str | None:
@@ -254,7 +377,7 @@ def translate_message(language: str | None, text: str) -> str | None:
     """
     if is_english(language) or not text or not text.strip():
         return None
-    if len(text) > MAX_TRANSLATABLE_CHARS:
+    if len(text) > MAX_TRANSLATABLE_CHARS or not _worth_translating(text):
         return None
 
     cached = cached_message(language, text)
@@ -288,7 +411,7 @@ def translate_batch(language: str | None, texts: list[str]) -> dict[str, str]:
     out: dict[str, str] = {}
     missing: list[str] = []
     for text in dict.fromkeys(texts):
-        if not text or not text.strip() or len(text) > MAX_TRANSLATABLE_CHARS:
+        if not text or not text.strip() or len(text) > MAX_TRANSLATABLE_CHARS or not _worth_translating(text):
             continue
         cached = cached_message(language, text)
         if cached:
@@ -302,9 +425,10 @@ def translate_batch(language: str | None, texts: list[str]) -> dict[str, str]:
         except Exception:
             logger.exception("Batch translation failed for %s -- those strings stay English", language)
             fresh = {}
-        for english, value in fresh.items():
-            _remember_message(language, english, value)
-            out[english] = value
+        # Dynamic strings are still translated for this send, just not
+        # cached -- _remember_messages decides which are worth keeping.
+        _remember_messages(language, fresh)
+        out.update(fresh)
     return out
 
 
@@ -327,19 +451,19 @@ def _load(lang: str) -> dict[str, str]:
         except (json.JSONDecodeError, OSError):
             logger.exception("Unreadable UI translation cache for %s -- treating as empty", lang)
     with _lock:
-        _cache[lang] = data
+        # As in _load_messages: a concurrent loader (or _save) may have got
+        # here first, and its dict is the one to keep.
+        data = _cache.setdefault(lang, data)
         for english, translated in data.items():
             _reverse.setdefault(translated, english)
     return data
 
 
 def _save(lang: str, data: dict[str, str]) -> None:
-    os.makedirs(_CACHE_DIR, exist_ok=True)
-    path = _cache_path(lang)
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(data, f, ensure_ascii=False)
-    os.replace(tmp, path)
+    # Two users picking the same language at once both reach here from
+    # their own threads -- hence the unique temp file and the write lock.
+    with _write_lock:
+        _atomic_write_json(_cache_path(lang), json.dumps(data, ensure_ascii=False))
     with _lock:
         _cache[lang] = data
         for english, translated in data.items():
@@ -410,7 +534,10 @@ def ensure_language(language: str) -> bool:
     return True
 
 
-WARM_BATCH_SIZE = 40  # strings per translation call when pre-warming
+# Strings per commit when pre-warming. _translate splits each batch further
+# by size (_CHUNK_MAX_STRINGS / _CHUNK_MAX_CHARS), so this only decides how
+# much is kept if the warm is interrupted, not how big one Claude call is.
+WARM_BATCH_SIZE = 40
 
 
 def warm_all_messages(language: str) -> int:
@@ -446,9 +573,8 @@ def warm_all_messages(language: str) -> int:
         except Exception:
             logger.exception("Pre-warm batch failed for %s -- those strings translate on demand instead", language)
             continue
-        for english, value in translated.items():
-            _remember_message(language, english, value)
-            added += 1
+        _remember_messages(language, translated)
+        added += len(translated)
     logger.info("Pre-translated %d/%d fixed strings into %s", added, len(missing), language)
     return added
 
@@ -464,24 +590,25 @@ def _prune_implausible(lang: str) -> None:
     was cached and shipped inside an ECG read. The path that allowed it is
     fixed, but a cache written before the fix still holds the damage, and
     nothing else would ever evict it.
+
+    The same goes for two kinds of entry written before their rules
+    existed: translations whose numbers don't match the English (see
+    _numbers_match), and dynamic one-off strings (see _is_cacheable) that
+    filled older caches to the cap.
     """
     cached = _load_messages(lang)
-    bad = [k for k, v in cached.items() if len(v) > max(80, len(k) * 6)]
-    if not bad:
-        return
-    logger.warning("Dropping %d implausible cached translation(s) for %s: %s", len(bad), lang, bad[:5])
+    _static_strings()  # build it (parses the source) BEFORE taking _lock, which the event loop also needs
     with _lock:
+        bad = [
+            k for k, v in cached.items()
+            if len(v) > max(80, len(k) * 6) or not _numbers_match(k, v) or not _is_cacheable(k)
+        ]
         for key in bad:
             cached.pop(key, None)
-    os.makedirs(_MSG_CACHE_DIR, exist_ok=True)
-    path = _msg_cache_path(lang)
-    tmp = path + ".tmp"
-    try:
-        with open(tmp, "w") as f:
-            json.dump(cached, f, ensure_ascii=False)
-        os.replace(tmp, path)
-    except OSError:
-        logger.exception("Could not rewrite the pruned message cache for %s", lang)
+    if not bad:
+        return
+    logger.warning("Dropping %d implausible or uncacheable cached translation(s) for %s: %s", len(bad), lang, bad[:5])
+    _persist_messages(lang)
 
 
 def warm_known_languages() -> None:
@@ -529,12 +656,93 @@ def _warm_common_messages(language: str) -> None:
     except Exception:
         logger.exception("Could not pre-warm common messages for %s (they'll translate on demand)", language)
         return
-    for english, value in translated.items():
-        _remember_message(language, english, value)
+    _remember_messages(language, translated)
+
+
+# A number in the text: 5, 12.50, 1,000, 1.73. Separators are part of the
+# token, so "1.5" coming back as "1,5" (or "15") counts as a change.
+_NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)?")
+
+
+def _numbers(text: str) -> collections.Counter:
+    # \d also matches other scripts' decimal digits (Persian ۱۲, Devanagari
+    # १२). Those are mapped to ASCII before comparing: "۱۲" is the same
+    # number as "12", written the way that language writes it. Only the
+    # digit glyphs are normalized -- separators are compared as written.
+    return collections.Counter(
+        "".join(str(unicodedata.decimal(ch)) if ch.isdigit() else ch for ch in token)
+        for token in _NUMBER_RE.findall(text)
+    )
+
+
+def _numbers_match(english: str, translated: str) -> bool:
+    """
+    Whether the translation carries exactly the English text's numbers.
+
+    These strings include calculator results, doses and lab thresholds, and
+    the translation is an LLM rewrite: a dropped digit, a rounded value or a
+    swapped decimal separator would be a wrong dose shown with full
+    confidence. Any difference in the multiset of numbers rejects the
+    translation and that string is shown in English instead -- a mismatch
+    costs readability, a wrong number could cost far more.
+    """
+    return _numbers(english) == _numbers(translated)
+
+
+# Output budget per call. The reply repeats every English key alongside its
+# translation, and non-Latin scripts take several tokens per word, so the
+# old 2000 cut long messages and 40-string batches off mid-JSON -- which
+# failed to parse, and those strings silently stayed English.
+_MAX_TOKENS = 8000
+# Per-call input limits, chosen so a reply comfortably fits _MAX_TOKENS
+# even in a token-hungry script. A single string longer than this (up to
+# MAX_TRANSLATABLE_CHARS) still goes, alone.
+_CHUNK_MAX_STRINGS = 25
+_CHUNK_MAX_CHARS = 4000
+
+
+def _chunks(strings: list[str]) -> list[list[str]]:
+    out: list[list[str]] = []
+    current: list[str] = []
+    size = 0
+    for s in strings:
+        if current and (len(current) >= _CHUNK_MAX_STRINGS or size + len(s) > _CHUNK_MAX_CHARS):
+            out.append(current)
+            current, size = [], 0
+        current.append(s)
+        size += len(s)
+    if current:
+        out.append(current)
+    return out
 
 
 def _translate(language: str, strings: list[str]) -> dict[str, str]:
-    """One Claude call for the whole batch; returns {english: translated} for what came back usable."""
+    """
+    Translate `strings` in as few Claude calls as fit the output budget;
+    returns {english: translated} for what came back usable.
+
+    One failing chunk doesn't discard the others' results. If nothing at
+    all came back and a call raised, that error is re-raised, so callers
+    still see -- and log -- a real outage the way they always have.
+    """
+    chunks = _chunks(strings)
+    if len(chunks) == 1:
+        return _translate_chunk(language, chunks[0])  # callers log its failure; no need to here too
+    out: dict[str, str] = {}
+    error: Exception | None = None
+    for chunk in chunks:
+        try:
+            out.update(_translate_chunk(language, chunk))
+        except Exception as e:
+            logger.exception("Translation call for %d string(s) into %s failed", len(chunk), language)
+            error = e
+    if not out and error is not None:
+        raise error
+    return out
+
+
+def _translate_chunk(language: str, strings: list[str]) -> dict[str, str]:
+    """One Claude call for the chunk; returns {english: translated} for what came back usable."""
     system_prompt = (
         f"Translate each UI label of a medical study app from English into {language}.\n\n"
         "Rules:\n"
@@ -544,11 +752,13 @@ def _translate(language: str, strings: list[str]) -> dict[str, str]:
         "- These are BUTTON labels: keep them short, ideally no longer than the English.\n"
         "- Use the wording a clinician or medical student actually uses in that language for medical "
         "terms (ECG, lab, dose); do not invent literal word-for-word translations of technical terms.\n"
-        "- If a term is normally left in English in that language, leave it in English."
+        "- If a term is normally left in English in that language, leave it in English.\n"
+        "- Copy every number exactly as written: the same digits, decimal separator and thousands "
+        "separator, nothing added, dropped, rounded or converted. These include doses and lab values."
     )
     response = client.messages.create(
         model=TRANSLATION_MODEL,
-        max_tokens=2000,
+        max_tokens=_MAX_TOKENS,
         system=system_prompt,
         messages=[{"role": "user", "content": json.dumps(strings, ensure_ascii=False)}],
     )
@@ -556,6 +766,22 @@ def _translate(language: str, strings: list[str]) -> dict[str, str]:
         cost_ledger.record_claude_response("ui_translation", response)
     except Exception:
         logger.exception("Cost ledger logging failed (non-fatal)")
+
+    if getattr(response, "stop_reason", None) == "max_tokens":
+        # The reply was cut off, so its JSON is unterminated. Never try to
+        # parse or salvage half an object -- the last value in it may be a
+        # truncated translation. Split and retry the halves instead: each
+        # needs about half the output, and a single string that still
+        # doesn't fit just stays English.
+        if len(strings) > 1:
+            logger.warning(
+                "UI translation into %s hit max_tokens for %d strings -- retrying in halves", language, len(strings)
+            )
+            mid = len(strings) // 2
+            return {**_translate_chunk(language, strings[:mid]), **_translate_chunk(language, strings[mid:])}
+        logger.warning("UI translation into %s hit max_tokens for one %d-char string -- left in English",
+                       language, len(strings[0]))
+        return {}
 
     text = "".join(b.text for b in response.content if b.type == "text").strip()
     text = re.sub(r"^```(?:json)?|```$", "", text, flags=re.MULTILINE).strip()
@@ -584,6 +810,10 @@ def _translate(language: str, strings: list[str]) -> dict[str, str]:
         # false reject is one string staying English.
         if len(value) > max(80, len(k) * 6):
             logger.warning("Discarding implausible translation for %r into %s: %r", k[:40], language, value[:60])
+            continue
+        if not _numbers_match(k, value):
+            logger.warning("Discarding translation for %r into %s: its numbers differ from the English (%r)",
+                           k[:40], language, value[:60])
             continue
         kept[k] = value
     return kept

@@ -344,8 +344,9 @@ def answer_question(
         response = client.messages.create(
             model=CLAUDE_MODEL, max_tokens=1200, system=system_prompt, messages=messages
         )
-    except Exception as e:
-        raise LexidrugError(f"The AI request failed: {e}")
+    except Exception:
+        logger.exception("AI request failed")
+        raise LexidrugError("The AI service didn't respond properly. Please try again in a moment.")
     try:
         cost_ledger.record_claude_response("lexidrug_qa", response)
     except Exception:

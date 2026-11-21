@@ -25,6 +25,8 @@ import json
 import language
 import logging
 import os
+import tempfile
+import threading
 import time
 
 from config import (
@@ -33,6 +35,8 @@ from config import (
     FREE_DAILY_SUMMARIES,
     FREE_DAILY_QUIZZES,
     FREE_DAILY_QUESTIONS,
+    FREE_DAILY_BOOK_PROCESSING,
+    FREE_DAILY_FLASHCARD_SETS,
     FREE_SHELF_BOOKS,
     REFERRAL_BONUS_DAYS,
 )
@@ -51,24 +55,39 @@ FREE_LIMITS = {
     "summaries": FREE_DAILY_SUMMARIES,
     "quizzes": FREE_DAILY_QUIZZES,
     "questions": FREE_DAILY_QUESTIONS,
+    "books": FREE_DAILY_BOOK_PROCESSING,
+    "flashcards": FREE_DAILY_FLASHCARD_SETS,
 }
 FEATURE_LABELS = {
     "summaries": "AI chapter summaries",
     "quizzes": "quizzes",
     "questions": "Ask-AI questions",
+    "books": "book uploads/chapter splits",
+    "flashcards": "flashcard sets",
 }
 
 
 class QuotaExceeded(Exception):
     """Raised when a FREE user has hit their cap on a Claude-token-heavy feature."""
 
-    def __init__(self, feature: str):
+    def __init__(self, feature: str, needed: int = 1, remaining: int = 0):
         self.feature = feature
-        super().__init__(
-            f"You've used all {FREE_LIMITS.get(feature, '?')} free "
-            f"{FEATURE_LABELS.get(feature, feature)} today. Upgrade to Premium (⭐ My Plan) for "
-            "unlimited access, or come back tomorrow."
-        )
+        label = FEATURE_LABELS.get(feature, feature)
+        if needed > 1 and remaining > 0:
+            # A multi-unit request (a whole-book summary is one unit per
+            # chapter) can fail with allowance left -- say so, rather than
+            # claiming it's all used up.
+            msg = (
+                f"That needs {needed} of your free {label} for today, and you have {remaining} left. "
+                "Try a single chapter instead, upgrade to Premium (⭐ My Plan) for unlimited access, "
+                "or come back tomorrow."
+            )
+        else:
+            msg = (
+                f"You've used all {FREE_LIMITS.get(feature, '?')} free {label} today. Upgrade to "
+                "Premium (⭐ My Plan) for unlimited access, or come back tomorrow."
+            )
+        super().__init__(msg)
 
 
 class ShelfLimitReached(Exception):
@@ -113,7 +132,7 @@ def _default_sub(user_id: int) -> dict:
         "premium_until": None,
         "premium_source": None,
         "usage_day": _day_key(),
-        "usage": {"summaries": 0, "quizzes": 0, "questions": 0},
+        "usage": {"summaries": 0, "quizzes": 0, "questions": 0, "books": 0, "flashcards": 0},
         "trial_used": {"ecg": False, "lab": False},
         "language": "English",
         "referred_by": None,
@@ -163,10 +182,21 @@ def _load(user_id: int) -> dict:
 def _save(user_id: int, data: dict) -> None:
     path = _sub_path(user_id)
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp_path = path + ".tmp"
-    with open(tmp_path, "w") as f:
-        json.dump(data, f)
-    os.replace(tmp_path, path)
+    # A unique temp name per write: two threads saving the same user at
+    # once (a worker thread recording a payment while the loop consumes a
+    # quota unit) used to share one ".tmp" path and could replace the real
+    # file with the other's half-written JSON.
+    fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".sub-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f)
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
     # Every write to a user's subscription record means the global admin
     # index needs to know they exist too -- otherwise anything that only
     # ever calls record_payment()/grant_premium() etc. (never the standalone
@@ -339,17 +369,103 @@ def check_and_consume(user_id: int, feature: str) -> None:
     dashboards, just never enforced). Free users get FREE_LIMITS[feature]
     uses per UTC day; raises QuotaExceeded once that's used up.
     """
-    sub = _load(user_id)
-    premium = is_premium(user_id)
-    if premium:
-        sub = _load(user_id)  # is_premium() may have just auto-downgraded/saved -- reload to stay consistent
+    consume(user_id, feature, 1)
 
-    used = sub["usage"].get(feature, 0)
-    if not premium and used >= FREE_LIMITS[feature]:
-        raise QuotaExceeded(feature)
 
-    sub["usage"][feature] = used + 1
-    _save(user_id, sub)
+# Guards every read-modify-write of a usage counter. Quota calls come from
+# the event loop AND from worker threads (jobs), so without it two
+# concurrent consumes can both read "2 used" and both write "3".
+_usage_lock = threading.RLock()
+
+
+def consume(user_id: int, feature: str, units: int = 1) -> None:
+    """
+    Take `units` from today's allowance for `feature`, or raise
+    QuotaExceeded if a free user doesn't have that many left. A whole-book
+    summary costs one unit per chapter, not one in total -- it is that many
+    AI calls. Pair every consume with refund() on the failure path, so a
+    request that fails (timeout, not found, AI error) costs the user nothing.
+    """
+    units = max(1, int(units))
+    with _usage_lock:
+        premium = is_premium(user_id)
+        sub = _load(user_id)  # after is_premium(), which may have auto-downgraded and saved
+        used = sub["usage"].get(feature, 0)
+        if not premium and used + units > FREE_LIMITS[feature]:
+            raise QuotaExceeded(feature, needed=units, remaining=max(0, FREE_LIMITS[feature] - used))
+        sub["usage"][feature] = used + units
+        _save(user_id, sub)
+
+
+def refund(user_id: int, feature: str, units: int = 1) -> None:
+    """Give back units taken by consume() for a request that then failed. Never goes below zero."""
+    units = max(1, int(units))
+    try:
+        with _usage_lock:
+            sub = _load(user_id)
+            sub["usage"][feature] = max(0, sub["usage"].get(feature, 0) - units)
+            _save(user_id, sub)
+    except Exception:
+        # A refund that fails must not turn the user's original error into
+        # a different one -- they already have a failure to read.
+        logger.exception("Quota refund failed for user %s (%s x%s)", user_id, feature, units)
+
+
+class metered:
+    """
+    `with subscriptions.metered(uid, "questions"): ...` -- consumes on
+    entry, refunds automatically if the block raises (including a timeout
+    or cancellation). Call .keep() never; success is simply not raising.
+    """
+
+    def __init__(self, user_id: int, feature: str, units: int = 1):
+        self.user_id, self.feature, self.units = user_id, feature, units
+
+    def __enter__(self):
+        consume(self.user_id, self.feature, self.units)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if exc_type is not None:
+            refund(self.user_id, self.feature, self.units)
+        return False
+
+
+# Shelf slots promised to uploads still in progress, per user. The capacity
+# check used to run before a minutes-long download+split and the book was
+# only added at the end, so five PDFs sent at once all passed a 2-book
+# limit. In-process is enough: the bot and the mini app API share one
+# process and one event loop.
+_pending_shelf: dict[int, int] = {}
+_pending_lock = threading.Lock()
+
+
+class shelf_slot:
+    """
+    Reserve one shelf slot for an upload: `with subscriptions.shelf_slot(uid,
+    current_count):` raises ShelfLimitReached if the shelf plus uploads
+    already in flight is full, and releases the reservation on exit
+    (the finished book then counts through current_count instead).
+    """
+
+    def __init__(self, user_id: int, current_count: int):
+        self.user_id, self.current_count = user_id, current_count
+
+    def __enter__(self):
+        with _pending_lock:
+            pending = _pending_shelf.get(self.user_id, 0)
+            check_shelf_capacity(self.user_id, self.current_count + pending)
+            _pending_shelf[self.user_id] = pending + 1
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        with _pending_lock:
+            left = _pending_shelf.get(self.user_id, 1) - 1
+            if left > 0:
+                _pending_shelf[self.user_id] = left
+            else:
+                _pending_shelf.pop(self.user_id, None)
+        return False
 
 
 def shelf_limit(user_id: int) -> int | None:
@@ -390,10 +506,125 @@ def usage_summary(user_id: int) -> dict:
 # Payments (Telegram Stars)
 # ---------------------------------------------------------------------------
 
-def record_payment(user_id: int, stars: int, days: int, source: str = "stars") -> None:
+def record_payment(user_id: int, stars: int, days: int, source: str = "stars", charge_id: str | None = None) -> None:
+    """
+    Append a payment to the user's history WITHOUT granting anything or
+    checking for duplicates. Telegram Stars payments go through
+    apply_payment() instead, which does both; this stays for callers that
+    log a payment taken some other way.
+    """
     sub = _load(user_id)
-    sub["payments"].append({"stars": stars, "days": days, "source": source, "ts": time.time()})
+    entry = {"stars": stars, "days": days, "source": source, "ts": time.time()}
+    if charge_id:
+        entry["charge_id"] = charge_id
+    sub["payments"].append(entry)
     _save(user_id, sub)
+
+
+def find_payment(user_id: int, charge_id: str) -> dict | None:
+    """
+    The payment (not refund) entry recorded for this
+    telegram_payment_charge_id, or None. Payments recorded before charge ids
+    were stored have no "charge_id" and are never matched.
+    """
+    if not charge_id:
+        return None
+    for p in _load(user_id).get("payments", []):
+        if p.get("charge_id") == charge_id and p.get("source") != "refund":
+            return p
+    return None
+
+
+def apply_payment(user_id: int, charge_id: str, stars: int, days: int, source: str) -> bool:
+    """
+    Record a Telegram Stars payment and grant the Premium days it bought,
+    exactly once per telegram_payment_charge_id. Returns False (changing
+    nothing) when that charge is already on file.
+
+    Why this exists rather than grant_premium() + record_payment(): Telegram
+    re-delivers a successful_payment update if the bot didn't acknowledge
+    it (a crash or restart mid-handler), and each delivery used to grant
+    Premium again. The duplicate check, the premium extension and the
+    history entry happen here in ONE load/save, so there's no point at
+    which the grant has landed but the charge id that guards it hasn't.
+    The extension rule is grant_premium()'s: on top of unexpired Premium,
+    otherwise from now. `days` may be 0 (a 📚 Requested Book payment).
+
+    Held under _usage_lock because quota consumes in worker threads
+    read-modify-write this same file; without it a consume() that loaded
+    before this save would write back a record missing the payment.
+    """
+    with _usage_lock:
+        sub = _load(user_id)
+        for p in sub["payments"]:
+            if p.get("charge_id") == charge_id and p.get("source") != "refund":
+                return False
+        now = time.time()
+        if days > 0:
+            active = sub["plan"] == "premium" and sub["premium_until"] and sub["premium_until"] > now
+            base = sub["premium_until"] if active else now
+            sub["plan"] = "premium"
+            sub["premium_until"] = base + days * 86400
+            sub["premium_source"] = "stars"
+        sub["payments"].append(
+            {"stars": stars, "days": days, "source": source, "charge_id": charge_id, "ts": now}
+        )
+        _save(user_id, sub)
+        return True
+
+
+def record_refund(user_id: int, charge_id: str) -> dict | None:
+    """
+    Book-keeping for a Stars payment the admin has just refunded through
+    Telegram (customer_flow.py's /refund): marks the original payment
+    refunded, takes back the Premium days it bought, and appends a refund
+    entry with NEGATIVE stars/days so get_revenue_stats() nets it out and
+    the 🧾 history shows it.
+
+    Premium is shortened by the refunded days rather than revoked outright
+    (revoke_premium()), because the same expiry may also carry other paid
+    renewals, referral bonuses or admin grants that this refund didn't
+    pay for. If what's left is already in the past, the user drops to free.
+
+    Returns a copy of the original payment entry, or None if no payment
+    with that charge id is on file (the refund entry is still written, with
+    0 stars, so the refund itself is never lost from the record).
+    """
+    with _usage_lock:
+        sub = _load(user_id)
+        original = None
+        for p in sub["payments"]:
+            if p.get("charge_id") == charge_id and p.get("source") != "refund":
+                original = p
+                break
+
+        now = time.time()
+        stars = days = 0
+        if original is not None:
+            original["refunded_at"] = now
+            stars = original.get("stars", 0)
+            days = original.get("days", 0)
+            if days > 0 and sub["plan"] == "premium" and sub["premium_until"]:
+                new_until = sub["premium_until"] - days * 86400
+                if new_until <= now:
+                    sub["plan"] = "free"
+                    sub["premium_until"] = None
+                    sub["premium_source"] = None
+                else:
+                    sub["premium_until"] = new_until
+
+        sub["payments"].append(
+            {
+                "stars": -stars,
+                "days": -days,
+                "source": "refund",
+                "charge_id": charge_id,
+                "refund_of": original.get("source") if original else None,
+                "ts": now,
+            }
+        )
+        _save(user_id, sub)
+        return dict(original) if original is not None else None
 
 
 def has_ever_paid(user_id: int) -> bool:

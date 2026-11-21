@@ -127,7 +127,7 @@ async def handle_book_question(message: Message, state: FSMContext):
         return
 
     try:
-        subscriptions.check_and_consume(message.from_user.id, "questions")
+        subscriptions.consume(message.from_user.id, "questions")
     except subscriptions.QuotaExceeded as e:
         await message.answer(str(e))
         return
@@ -142,14 +142,18 @@ async def handle_book_question(message: Message, state: FSMContext):
             timeout=_QA_ANSWER_TIMEOUT_SECONDS,
         )
     except asyncio.TimeoutError:
-        await status_msg.edit_text("That took too long. Please try again.")
+        subscriptions.refund(message.from_user.id, "questions")
+        await status_msg.edit_text("That took too long and wasn't counted. Please try again.")
         return
-    except pdf_qa.IndexingError as e:
-        await status_msg.edit_text(str(e))
+    except pdf_qa.IndexingError:
+        logger.exception("Book Q&A could not use the index for book_id=%s", book_id)
+        subscriptions.refund(message.from_user.id, "questions")
+        await status_msg.edit_text("Couldn't search this book just now (not counted). Please try again.")
         return
     except Exception:
         logger.exception("Book Q&A failed for book_id=%s", book_id)
-        await status_msg.edit_text("Something went wrong answering that. Please try again.")
+        subscriptions.refund(message.from_user.id, "questions")
+        await status_msg.edit_text("Something went wrong answering that (not counted). Please try again.")
         return
 
     try:
