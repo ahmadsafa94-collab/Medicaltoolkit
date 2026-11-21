@@ -25,6 +25,7 @@ timeout and NO retries at all, confirmed against Voyage's docs).
 """
 
 import asyncio
+import shutil
 import json
 import logging
 import os
@@ -62,13 +63,27 @@ class IndexingError(Exception):
     pass
 
 
-def extract_full_page_text(pdf_path: str) -> list[str]:
-    """Return full text of every page (unlike pdf_processor's short previews)."""
+def extract_full_page_text(pdf_path: str, progress=None) -> list[str]:
+    """
+    Return full text of every page (unlike pdf_processor's short previews).
+    progress, if given, is a plain synchronous callable(done, total) -- this
+    runs in a worker thread, and on a several-thousand-page book it is the
+    longest silent stretch of indexing.
+    """
     pages = []
     with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages:
+        total = len(pdf.pages)
+        for i, page in enumerate(pdf.pages):
             text = page.extract_text() or ""
             pages.append(re.sub(r"\s+", " ", text).strip())
+            # pdfplumber keeps every parsed page's objects alive until the
+            # file closes; over thousands of pages that is gigabytes.
+            page.close()
+            if progress and (i % 25 == 0 or i == total - 1):
+                try:
+                    progress(i + 1, total)
+                except Exception:
+                    pass
     return pages
 
 
@@ -99,7 +114,7 @@ def build_chunks(page_texts: list[str]) -> list[dict]:
     return chunks
 
 
-async def embed_texts(texts: list[str], input_type: str) -> list[list[float]]:
+async def embed_texts(texts: list[str], input_type: str, on_batch=None) -> list[list[float]]:
     """
     Embed a list of texts via Voyage AI, batching to stay under API limits.
     input_type is "document" for indexing, "query" for a user's question --
@@ -113,6 +128,8 @@ async def embed_texts(texts: list[str], input_type: str) -> list[list[float]]:
             voyage_client.embed, batch, model=VOYAGE_MODEL, input_type=input_type
         )
         all_embeddings.extend(result.embeddings)
+        if on_batch:
+            await on_batch(len(all_embeddings), len(texts))
         try:
             # Voyage's Python SDK doesn't return per-call token usage, so this
             # is a rough ~4-chars-per-token estimate, good enough for the
@@ -141,8 +158,14 @@ async def build_index(pdf_path: str, book_id: str, title: str, progress_cb=None)
     """
     if progress_cb:
         await progress_cb("Reading pages...")
+    loop = asyncio.get_running_loop()
+
+    def read_progress(done: int, total: int) -> None:
+        if progress_cb:
+            asyncio.run_coroutine_threadsafe(progress_cb(f"Reading pages... {done}/{total}"), loop)
+
     try:
-        page_texts = await asyncio.to_thread(extract_full_page_text, pdf_path)
+        page_texts = await asyncio.to_thread(extract_full_page_text, pdf_path, read_progress)
     except Exception as e:
         logger.warning("PDF text extraction failed: %s", e)
         raise IndexingError("Couldn't read this PDF's text. The file may be damaged or scanned.")
@@ -154,7 +177,11 @@ async def build_index(pdf_path: str, book_id: str, title: str, progress_cb=None)
     if progress_cb:
         await progress_cb(f"Embedding {len(chunks)} passages ({VOYAGE_MODEL})...")
     try:
-        embeddings = await embed_texts([c["text"] for c in chunks], input_type="document")
+        async def embed_progress(done: int, total: int) -> None:
+            if progress_cb and total > QA_EMBED_BATCH_SIZE:
+                await progress_cb(f"Indexing passages... {done}/{total}")
+
+        embeddings = await embed_texts([c["text"] for c in chunks], input_type="document", on_batch=embed_progress)
     except Exception as e:
         logger.warning("Voyage embedding request failed: %s", e)
         raise IndexingError("The search service didn't respond properly. Please try again in a moment.")
@@ -181,6 +208,19 @@ def delete_index(book_id: str) -> None:
             os.remove(path)
         except OSError:
             pass
+
+
+def copy_index(src_book_id: str, dst_book_id: str) -> bool:
+    """Duplicate a finished index under another book id (publishing a shelf book to a specialty library)."""
+    src_meta, src_vec = _index_paths(src_book_id)
+    dst_meta, dst_vec = _index_paths(dst_book_id)
+    if not (os.path.exists(src_meta) and os.path.exists(src_vec)):
+        return False
+    for src, dst in ((src_vec, dst_vec), (src_meta, dst_meta)):
+        tmp = dst + ".copy.tmp"
+        shutil.copyfile(src, tmp)
+        os.replace(tmp, dst)
+    return True
 
 
 def _write_index_files(meta_path: str, vectors_path: str, meta: dict, vectors: np.ndarray) -> None:
@@ -495,4 +535,160 @@ async def answer_question(
     return {
         "answer": answer_text,
         "sources": [{"n": n, "page": m["page"], "text": m["text"][:150]} for n, m in numbered],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Asking several books at once
+# ---------------------------------------------------------------------------
+
+MAX_BOOKS_PER_QUESTION = 15
+_MULTI_PER_BOOK_CANDIDATES = 4   # best passages kept from each book before the global ranking
+_MULTI_MAX_PASSAGES = 12         # passages handed to Claude across all books
+
+
+def _top_matches(meta: dict, vectors: np.ndarray, query_vec: np.ndarray, top_k: int) -> list[dict]:
+    scores = vectors @ query_vec
+    top_k = min(top_k, len(scores))
+    return [
+        {"text": meta["chunks"][i]["text"], "page": meta["chunks"][i]["page"], "score": float(scores[i])}
+        for i in np.argsort(scores)[::-1][:top_k]
+    ]
+
+
+async def answer_question_multi(
+    books: list[dict], question: str, history: list[dict] | None = None, language: str = "English"
+) -> dict:
+    """
+    One question answered from SEVERAL indexed books (a user's own and/or
+    shared specialty books -- the caller decides which ids this user may
+    read; nothing here checks ownership).
+
+    books: [{"book_id": str, "title": str}, ...], 1 to MAX_BOOKS_PER_QUESTION.
+
+    The question is embedded once and scored against every book. Each book
+    contributes its best few passages, and those are then ranked together,
+    so the answer draws on whichever books actually cover the topic rather
+    than taking an equal slice of each -- while no single long book can
+    crowd the others out of the candidate pool.
+
+    Returns {"answer", "sources": [{"n", "page", "text", "book_id", "title"}], "skipped": [titles]}.
+    "skipped" lists books whose index could not be read, so the caller can
+    tell the user instead of silently answering from fewer books.
+    """
+    if not question.strip():
+        raise IndexingError("Please send your question as text.")
+    if not books:
+        raise IndexingError("Tick at least one book to ask.")
+    books = books[:MAX_BOOKS_PER_QUESTION]
+    history = (history or [])[-MAX_HISTORY_TURNS:]
+
+    search_question = question
+    if language and language.strip().lower() != "english":
+        search_question = await translate_question_for_search(question, language)
+
+    queries = [search_question]
+    if history:
+        queries.append(_search_query_text(search_question, history))
+    try:
+        embedded = await embed_texts(queries, input_type="query")
+    except Exception as e:
+        logger.warning("Voyage query embedding failed: %s", e)
+        raise IndexingError("The search service didn't respond properly. Please try again in a moment.")
+    query_vecs = []
+    for emb in embedded:
+        vec = np.array(emb, dtype=np.float32)
+        norm = np.linalg.norm(vec)
+        query_vecs.append(vec / norm if norm > 0 else vec)
+
+    page_numbers = _explicit_page_numbers(search_question) if len(books) == 1 else []
+
+    candidates, skipped = [], []
+    for book in books:
+        # One at a time, and released before the next: ten textbooks' vectors
+        # held together would be hundreds of MB.
+        loaded = await asyncio.to_thread(load_index, book["book_id"])
+        if loaded is None:
+            skipped.append(book["title"])
+            continue
+        meta, vectors = loaded
+        found = [dict(m, forced=True) for m in _force_include_pages(meta, page_numbers)]
+        for vec in query_vecs:
+            found += await asyncio.to_thread(_top_matches, meta, vectors, vec, _MULTI_PER_BOOK_CANDIDATES)
+        seen = set()
+        for m in found:
+            if m["text"] in seen:
+                continue
+            seen.add(m["text"])
+            candidates.append(dict(m, book_id=book["book_id"], title=book["title"]))
+        del meta, vectors, loaded
+
+    if not candidates:
+        raise IndexingError("None of the selected books could be searched. Try re-indexing them.")
+
+    forced = [c for c in candidates if c.get("forced")]
+    ranked = sorted((c for c in candidates if not c.get("forced")), key=lambda c: c["score"], reverse=True)
+    matches = (forced + ranked)[: max(QA_TOP_K, _MULTI_MAX_PASSAGES)]
+
+    numbered = list(enumerate(matches, start=1))
+    context = "\n\n".join(f"[{n}] (Book: \"{m['title']}\", page {m['page']})\n{m['text']}" for n, m in numbered)
+    titles = "; ".join(f"\"{b['title']}\"" for b in books if b["title"] not in skipped)
+
+    system_prompt = (
+        f"You are answering a question using ONLY the numbered excerpts below, taken from these books: "
+        f"{titles}. Follow these rules strictly:\n"
+        "1. Answer using only information in the excerpts -- do not use outside knowledge, even if "
+        "you know the topic.\n"
+        "2. Every factual claim must end with a bracketed citation number matching the excerpt it "
+        "came from, like this: \"The heart has four chambers [1].\" If several excerpts support one "
+        "claim, cite all of them: \"...four chambers [1][2].\" Cite the excerpt NUMBER shown below, "
+        "never the page number.\n"
+        "3. The excerpts come from different books. Where the books agree, give one combined answer. "
+        "Where they differ (a different dose, criterion, or recommendation), say so plainly and name "
+        "which book says what -- never blend two books' numbers into one.\n"
+        "4. If the excerpts don't contain enough information to answer, say so clearly instead of "
+        "guessing.\n"
+        "5. Be concise and direct -- this will be read on a phone screen.\n"
+        + (
+            "6. This is one turn in an ongoing conversation -- answer the CURRENT question so it flows "
+            "from the earlier turns, but the citation numbers below apply ONLY to this question's "
+            "excerpts. Do not reuse citation numbers from earlier turns.\n"
+            if history else ""
+        )
+        + f"7. Respond in {language}.\n"
+        + f"\nEXCERPTS:\n{context}"
+    )
+
+    messages = []
+    for turn in history:
+        messages.append({"role": "user", "content": turn["question"]})
+        messages.append({"role": "assistant", "content": turn["answer"]})
+    messages.append({"role": "user", "content": question})
+
+    try:
+        response = await asyncio.to_thread(
+            claude_client.messages.create,
+            model=CLAUDE_MODEL,
+            thinking={"type": "disabled"},  # thinking tokens would count against max_tokens
+            max_tokens=2000,
+            system=system_prompt,
+            messages=messages,
+        )
+    except Exception as e:
+        logger.warning("AI request failed: %s", e)
+        raise IndexingError("The AI service didn't respond properly. Please try again in a moment.")
+
+    try:
+        cost_ledger.record_claude_response("ask_ai_multi", response)
+    except Exception:
+        logger.exception("Cost ledger logging failed (non-fatal)")
+
+    answer_text = "".join(block.text for block in response.content if block.type == "text").strip()
+    return {
+        "answer": answer_text,
+        "sources": [
+            {"n": n, "page": m["page"], "text": m["text"][:150], "book_id": m["book_id"], "title": m["title"]}
+            for n, m in numbered
+        ],
+        "skipped": skipped,
     }

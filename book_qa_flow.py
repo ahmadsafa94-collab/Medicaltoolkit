@@ -41,7 +41,7 @@ import library
 import pdf_qa
 import session_cache
 import subscriptions
-from config import QA_INDEXING_TIMEOUT_SECONDS
+from config import QA_INDEXING_TIMEOUT_SECONDS, WEBAPP_URL, scaled_timeout
 from keyboards import cancel_kb, book_picker_kb
 from telegram_helpers import md_bold, send_long_text
 
@@ -74,14 +74,25 @@ async def show_book_picker(answer_fn, user_id: int) -> None:
     # app needs the FULL list (including not-yet-indexed books) from that
     # same function.
     books = {bid: info for bid, info in all_books.items() if info.get("qa_indexed")}
+    # Asking several books at once, and the specialty libraries, live in the
+    # mini app's 💬 Ask tab: a checklist of books is a screen, not a chat
+    # exchange. This button opens that tab directly.
+    multi_url = f"{WEBAPP_URL}?tab=ask" if WEBAPP_URL else None
     if not books:
-        await answer_fn(
-            "You don't have any searchable books yet. Open 📚 Book Shelf, pick a book, and tap "
+        text = (
+            "You don't have any searchable books of your own yet. Open 📚 Book Shelf, pick a book, and tap "
             "'Ask questions using AI' to index it -- or upload one via chat and tap "
             "'🔍 Make this book searchable' on the result."
         )
+        if multi_url:
+            text += "\n\nYou can still ask the specialty libraries:"
+        await answer_fn(text, reply_markup=book_picker_kb({}, multi_url) if multi_url else None)
         return
-    await answer_fn("Which book do you want to ask about?", reply_markup=book_picker_kb(books))
+    await answer_fn(
+        "Which book do you want to ask about? One book here, or tap the last button to tick several "
+        "books (and specialty libraries) and ask them together.",
+        reply_markup=book_picker_kb(books, multi_url),
+    )
 
 
 @router.message(Command("ask"))
@@ -201,7 +212,7 @@ async def handle_index_request(callback: CallbackQuery):
     try:
         num_chunks = await asyncio.wait_for(
             pdf_qa.build_index(book["pdf_path"], book_id, book["title"], progress_cb=progress),
-            timeout=QA_INDEXING_TIMEOUT_SECONDS,
+            timeout=scaled_timeout(QA_INDEXING_TIMEOUT_SECONDS, book.get("page_count") or 0),
         )
     except asyncio.TimeoutError:
         await status_msg.edit_text("Indexing took too long and timed out. Try again, or use a shorter book.")

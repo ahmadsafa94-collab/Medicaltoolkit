@@ -55,6 +55,7 @@ import notes
 import pdf_export
 import pdf_qa
 import quiz_ai
+import shared_library
 import subscriptions
 import drug_lookup
 import drug_qa
@@ -71,10 +72,11 @@ from config import (
     CHAPTER_DIVISION_TIMEOUT_SECONDS,
     CHAPTER_SUMMARY_TIMEOUT_SECONDS,
     FLASHCARD_GENERATION_TIMEOUT_SECONDS,
-    MAX_PAGES_PER_PASS,
+    MAX_BOOK_PAGES,
     MAX_SHELF_UPLOAD_BYTES,
     MAX_SHELF_UPLOAD_PAGES,
     QA_INDEXING_TIMEOUT_SECONDS,
+    scaled_timeout,
     QUIZ_GENERATION_TIMEOUT_SECONDS,
     SEND_CHAPTER_FILES_TIMEOUT_SECONDS,
 )
@@ -250,6 +252,9 @@ async def list_books(request: Request):
             "books": [_public_book(bid, b) for bid, b in books.items()],
             "shelf_limit": subscriptions.shelf_limit(user["id"]),
             "shelf_used": library.count_toward_shelf_limit(user["id"]),
+            # Sent so the client's own pre-upload check can never drift
+            # from the server's (it used to hardcode 200MB).
+            "max_upload_mb": MAX_SHELF_UPLOAD_BYTES // 1024 // 1024,
         }
     )
 
@@ -362,26 +367,41 @@ async def upload_book(request: Request):
 
 
 async def _receive_upload(request: Request, user_id: int):
+    dest_path, page_count, form, filename = await _save_uploaded_pdf(
+        request, os.path.join(user_dir(user_id), "library")
+    )
+    book_title = (form.get("title") or "").strip() or os.path.splitext(filename)[0] or "Untitled book"
+    book_id = library.add_book(user_id, book_title, dest_path, page_count, source="shelf")
+    return JSONResponse(_public_book(book_id, library.get_book(user_id, book_id)))
+
+
+async def _save_uploaded_pdf(request: Request, dest_dir: str) -> tuple[str, int, object, str]:
+    """
+    Receive one multipart PDF into dest_dir, enforcing the size and page
+    limits. Returns (saved path, page count, the parsed form, safe filename).
+    Shared by the personal shelf upload and the admin's specialty-library
+    upload so both get exactly the same checks.
+    """
     # Content-Length is required, and checked before request.form() runs:
     # Starlette spools the WHOLE multipart body to a temp file inside
     # form(), so a body with no length header was written to disk in full
     # before the size loop below ever saw it. Browsers (and Telegram's
     # WebView) always send it for a FormData upload.
+    limit_mb = MAX_SHELF_UPLOAD_BYTES // 1024 // 1024
     content_length = request.headers.get("content-length")
     if not (content_length and content_length.isdigit()):
         raise ApiError(status_code=411, detail="Upload rejected: missing file size. Please try again.")
     if int(content_length) > MAX_SHELF_UPLOAD_BYTES + 1_000_000:
-        raise ApiError(status_code=413, detail=f"That file is over the {MAX_SHELF_UPLOAD_BYTES // 1024 // 1024}MB limit.")
+        raise ApiError(status_code=413, detail=f"That file is over the {limit_mb}MB limit.")
 
     form = await request.form()
     upload = form.get("file")
     if upload is None or not hasattr(upload, "read"):
         raise ApiError(status_code=400, detail="No file uploaded (expected a 'file' form field).")
-    title_field = form.get("title")
 
-    library_dir = os.path.join(user_dir(user_id), "library")
-    os.makedirs(library_dir, exist_ok=True)
-    dest_path = unique_path(os.path.join(library_dir, safe_pdf_filename(upload.filename)))
+    os.makedirs(dest_dir, exist_ok=True)
+    filename = safe_pdf_filename(upload.filename)
+    dest_path = unique_path(os.path.join(dest_dir, filename))
 
     total = 0
     try:
@@ -392,11 +412,10 @@ async def _receive_upload(request: Request, user_id: int):
                     break
                 total += len(chunk)
                 if total > MAX_SHELF_UPLOAD_BYTES:
-                    raise ApiError(
-                        status_code=413,
-                        detail=f"That file is over the {MAX_SHELF_UPLOAD_BYTES // 1024 // 1024}MB limit.",
-                    )
-                out.write(chunk)
+                    raise ApiError(status_code=413, detail=f"That file is over the {limit_mb}MB limit.")
+                # Off the event loop: at hundreds of MB, writing inline
+                # would stall every other request (and the bot) meanwhile.
+                await asyncio.to_thread(out.write, chunk)
     except ApiError:
         _safe_remove(dest_path)
         raise
@@ -421,10 +440,7 @@ async def _receive_upload(request: Request, user_id: int):
             status_code=400,
             detail=f"This PDF has {page_count} pages, over the {MAX_SHELF_UPLOAD_PAGES}-page limit.",
         )
-
-    book_title = (title_field or "").strip() or os.path.splitext(safe_pdf_filename(upload.filename))[0] or "Untitled book"
-    book_id = library.add_book(user_id, book_title, dest_path, page_count, source="shelf")
-    return JSONResponse(_public_book(book_id, library.get_book(user_id, book_id)))
+    return dest_path, page_count, form, filename
 
 
 def _read_range(path: str, start: int, end: int):
@@ -521,10 +537,8 @@ async def _run_chapter_division(user_id: int, book_id: str, pdf_path: str):
         set_job_progress(book_id, "chapters", f"Reading page {done}/{total}...")
 
     page_count = await asyncio.to_thread(open_check, pdf_path)
-    if page_count > MAX_PAGES_PER_PASS:
-        raise ChapterDetectionError(
-            f"This book has {page_count} pages, over the {MAX_PAGES_PER_PASS}-page single-pass limit."
-        )
+    if page_count > MAX_BOOK_PAGES:
+        raise ChapterDetectionError(f"This book has {page_count} pages, over the {MAX_BOOK_PAGES}-page limit.")
     previews = await asyncio.to_thread(extract_page_previews, pdf_path, 350, progress)
     chapters = await asyncio.to_thread(detect_chapters, previews)
     ranges = compute_chapter_ranges(chapters, page_count)
@@ -542,7 +556,7 @@ async def divide_into_chapters(request: Request):
         try:
             return await asyncio.wait_for(
                 _run_chapter_division(user["id"], book_id, book["pdf_path"]),
-                timeout=CHAPTER_DIVISION_TIMEOUT_SECONDS,
+                timeout=scaled_timeout(CHAPTER_DIVISION_TIMEOUT_SECONDS, book.get("page_count") or 0),
             )
         except asyncio.TimeoutError:
             library.set_chapters_error(user["id"], book_id, "Chapter detection took too long and timed out.")
@@ -778,7 +792,7 @@ async def index_book(request: Request):
         try:
             num_chunks = await asyncio.wait_for(
                 pdf_qa.build_index(book["pdf_path"], book_id, book["title"], progress_cb=_async_progress(progress)),
-                timeout=QA_INDEXING_TIMEOUT_SECONDS,
+                timeout=scaled_timeout(QA_INDEXING_TIMEOUT_SECONDS, book.get("page_count") or 0),
             )
         except pdf_qa.IndexingError as e:
             raise RuntimeError(str(e))
@@ -1720,6 +1734,239 @@ async def lexidrug_ask(request: Request):
     return JSONResponse({"answer": answer, "drug": entry["title"]})
 
 
+# ---------------------------------------------------------------------------
+# 💬 Ask tab: one question across several books, and specialty libraries
+# ---------------------------------------------------------------------------
+# A user ticks any mix of their own indexed books and the admin-provided
+# books of a specialty (shared_library.py), then asks once. Shared books are
+# answer sources only -- no endpoint here returns their file.
+
+_MULTI_ASK_TIMEOUT_SECONDS = 75  # several indexes to load and search, then one answer
+
+
+def _require_admin(request: Request) -> dict:
+    user = require_user(request)
+    if not subscriptions.is_admin(user["id"]):
+        raise ApiError(status_code=403, detail="Only the admin can change the specialty libraries.")
+    return user
+
+
+def _shared_catalog() -> list[dict]:
+    """shared_library.catalog() plus each book's live indexing state from the job table."""
+    cat = shared_library.catalog()
+    for spec in cat:
+        for b in spec["books"]:
+            job = get_job(b["book_id"], "index") or {}
+            b["indexing"] = job.get("status") == "running"
+            b["progress"] = job.get("progress") if b["indexing"] else None
+    return cat
+
+
+async def ask_library(request: Request):
+    user = require_user(request)
+    my_books = [
+        {
+            "book_id": bid,
+            "title": b["title"],
+            "page_count": b.get("page_count"),
+            "qa_indexed": bool(b.get("qa_indexed")),
+        }
+        for bid, b in library.list_books(user["id"]).items()
+    ]
+    my_books.sort(key=lambda b: b["title"].lower())
+    return JSONResponse(
+        {
+            "my_books": my_books,
+            "specialties": _shared_catalog(),
+            "is_admin": subscriptions.is_admin(user["id"]),
+            "max_books": pdf_qa.MAX_BOOKS_PER_QUESTION,
+            "max_upload_mb": MAX_SHELF_UPLOAD_BYTES // 1024 // 1024,
+        }
+    )
+
+
+async def ask_multi(request: Request):
+    user = require_user(request)
+    body = await _json_body(request)
+    question = (body.get("question") or "").strip()
+    raw_ids = body.get("book_ids")
+    if not question:
+        raise ApiError(status_code=400, detail="Question can't be empty.")
+    if not isinstance(raw_ids, list) or not raw_ids:
+        raise ApiError(status_code=400, detail="Tick at least one book to ask.")
+    if len(raw_ids) > pdf_qa.MAX_BOOKS_PER_QUESTION:
+        raise ApiError(
+            status_code=400,
+            detail=f"That's more than {pdf_qa.MAX_BOOKS_PER_QUESTION} books at once. Untick a few.",
+        )
+
+    # Every id is resolved against what THIS user may read: their own
+    # shelf, or the shared libraries. An id that is neither is refused, so
+    # a guessed id can never reach another user's book.
+    books, seen = [], set()
+    for bid in raw_ids:
+        if not isinstance(bid, str) or bid in seen:
+            continue
+        seen.add(bid)
+        book = shared_library.get_book(bid) if shared_library.is_shared_id(bid) else library.get_book(user["id"], bid)
+        if book is None:
+            raise ApiError(status_code=404, detail="One of the selected books isn't available anymore. Refresh and try again.")
+        if not book.get("qa_indexed"):
+            raise ApiError(status_code=409, detail=f"\"{book['title']}\" isn't indexed for questions yet.")
+        books.append({"book_id": bid, "title": book["title"]})
+    if not books:
+        raise ApiError(status_code=400, detail="Tick at least one book to ask.")
+
+    raw_history = body.get("history") or []
+    if not isinstance(raw_history, list):
+        raise ApiError(status_code=400, detail="Invalid history.")
+    history = []
+    for turn in raw_history[-pdf_qa.MAX_HISTORY_TURNS:]:
+        if not isinstance(turn, dict) or not isinstance(turn.get("question"), str) or not isinstance(turn.get("answer"), str):
+            raise ApiError(status_code=400, detail="Invalid history entry.")
+        history.append({"question": turn["question"], "answer": turn["answer"]})
+
+    try:
+        with subscriptions.metered(user["id"], "questions"):  # one question, however many books
+            result = await asyncio.wait_for(
+                pdf_qa.answer_question_multi(
+                    books, question, history=history, language=subscriptions.get_language(user["id"])
+                ),
+                timeout=_MULTI_ASK_TIMEOUT_SECONDS,
+            )
+    except subscriptions.QuotaExceeded as e:
+        raise ApiError(status_code=402, detail=str(e))
+    except asyncio.TimeoutError:
+        raise ApiError(status_code=504, detail="That took too long and wasn't counted. Try again, or with fewer books.")
+    except pdf_qa.IndexingError as e:
+        raise ApiError(status_code=409, detail=f"{e} (Not counted.)")
+    except Exception:
+        logger.exception("Multi-book Q&A failed for books=%s", [b["book_id"] for b in books])
+        raise ApiError(status_code=500, detail="Something went wrong answering that (not counted). Please try again.")
+    return JSONResponse(result)
+
+
+def _start_shared_index(book_id: str) -> bool:
+    """Index a shared book in the background; the result is recorded on its registry entry."""
+    book = shared_library.get_book(book_id)
+    if book is None:
+        return False
+
+    async def job():
+        def progress(text):
+            set_job_progress(book_id, "index", text)
+
+        try:
+            num_chunks = await asyncio.wait_for(
+                pdf_qa.build_index(book["pdf_path"], book_id, book["title"], progress_cb=_async_progress(progress)),
+                timeout=scaled_timeout(QA_INDEXING_TIMEOUT_SECONDS, book.get("page_count") or 0),
+            )
+        except pdf_qa.IndexingError as e:
+            shared_library.set_index_error(book_id, str(e))
+            raise RuntimeError(str(e))
+        except asyncio.TimeoutError:
+            shared_library.set_index_error(book_id, "Indexing took too long and was stopped.")
+            raise
+        except Exception:
+            shared_library.set_index_error(book_id, "Indexing failed unexpectedly.")
+            raise
+        shared_library.mark_indexed(book_id, num_chunks)
+        return {"num_chunks": num_chunks}
+
+    shared_library.set_index_error(book_id, None)
+    return start_job(book_id, "index", job())
+
+
+def _shared_error(e: Exception) -> ApiError:
+    return ApiError(status_code=400, detail=str(e))
+
+
+async def shared_add_specialty(request: Request):
+    _require_admin(request)
+    body = await _json_body(request)
+    try:
+        name = shared_library.add_specialty(body.get("name"))
+    except shared_library.SharedLibraryError as e:
+        raise _shared_error(e)
+    return JSONResponse({"name": name, "specialties": _shared_catalog()})
+
+
+async def shared_remove_specialty(request: Request):
+    _require_admin(request)
+    body = await _json_body(request)
+    try:
+        shared_library.remove_specialty(body.get("name"))
+    except shared_library.SharedLibraryError as e:
+        raise _shared_error(e)
+    return JSONResponse({"specialties": _shared_catalog()})
+
+
+async def shared_upload(request: Request):
+    """Admin uploads a PDF straight into a specialty; it is indexed automatically."""
+    user = _require_admin(request)
+    dest_path, page_count, form, filename = await _save_uploaded_pdf(request, shared_library.BOOKS_DIR)
+    try:
+        specialty = shared_library.clean_specialty_name(form.get("specialty"))
+        title = " ".join(str(form.get("title") or "").split())[:200] or os.path.splitext(filename)[0] or "Untitled book"
+        book_id = shared_library.add_book(specialty, title, dest_path, page_count, added_by=user["id"])
+    except shared_library.SharedLibraryError as e:
+        _safe_remove(dest_path)
+        raise _shared_error(e)
+    _start_shared_index(book_id)
+    return JSONResponse({"book_id": book_id, "specialties": _shared_catalog()})
+
+
+async def shared_publish(request: Request):
+    """Admin copies a book from their OWN shelf into a specialty (reusing its index when it has one)."""
+    user = _require_admin(request)
+    body = await _json_body(request)
+    book = _book_or_404(user["id"], body.get("book_id") if isinstance(body.get("book_id"), str) else "")
+    try:
+        specialty = shared_library.clean_specialty_name(body.get("specialty"))
+    except shared_library.SharedLibraryError as e:
+        raise _shared_error(e)
+    if not os.path.exists(book["pdf_path"]):
+        raise ApiError(status_code=404, detail="That book's file is missing on the server.")
+
+    new_id = shared_library.new_book_id()
+    dest_path = os.path.join(shared_library.BOOKS_DIR, f"{new_id}.pdf")
+    os.makedirs(shared_library.BOOKS_DIR, exist_ok=True)
+    # A real copy, not a link: deleting the shelf book later must not take
+    # the shared one with it.
+    await asyncio.to_thread(shutil.copyfile, book["pdf_path"], dest_path)
+    try:
+        shared_library.add_book(specialty, book["title"], dest_path, book.get("page_count") or 0, user["id"], book_id=new_id)
+    except shared_library.SharedLibraryError as e:
+        _safe_remove(dest_path)
+        raise _shared_error(e)
+
+    copied = book.get("qa_indexed") and await asyncio.to_thread(pdf_qa.copy_index, body["book_id"], new_id)
+    if copied:
+        shared_library.mark_indexed(new_id, book.get("num_chunks") or 0)
+    else:
+        _start_shared_index(new_id)
+    return JSONResponse({"book_id": new_id, "specialties": _shared_catalog()})
+
+
+async def shared_reindex(request: Request):
+    _require_admin(request)
+    book_id = request.path_params["book_id"]
+    if shared_library.get_book(book_id) is None:
+        raise ApiError(status_code=404, detail="Book not found.")
+    return JSONResponse({"started": _start_shared_index(book_id), "specialties": _shared_catalog()})
+
+
+async def shared_delete_book(request: Request):
+    _require_admin(request)
+    book_id = request.path_params["book_id"]
+    if (get_job(book_id, "index") or {}).get("status") == "running":
+        raise ApiError(status_code=409, detail="This book is still being indexed. Remove it once that finishes.")
+    if shared_library.remove_book(book_id) is None:
+        raise ApiError(status_code=404, detail="Book not found.")
+    pdf_qa.delete_index(book_id)
+    return JSONResponse({"specialties": _shared_catalog()})
+
+
 routes = [
     Route("/api/books", list_books, methods=["GET"]),
     Route("/api/upload", upload_book, methods=["POST"]),
@@ -1756,6 +2003,14 @@ routes = [
     Route("/api/drugs/resolve", drug_resolve, methods=["POST"]),
     Route("/api/drugs/interactions", drug_interactions, methods=["POST"]),
     Route("/api/drugs/ask", drug_ask, methods=["POST"]),
+    Route("/api/ask/library", ask_library, methods=["GET"]),
+    Route("/api/ask/multi", ask_multi, methods=["POST"]),
+    Route("/api/shared/specialties", shared_add_specialty, methods=["POST"]),
+    Route("/api/shared/specialties/remove", shared_remove_specialty, methods=["POST"]),
+    Route("/api/shared/upload", shared_upload, methods=["POST"]),
+    Route("/api/shared/publish", shared_publish, methods=["POST"]),
+    Route("/api/shared/books/{book_id}/index", shared_reindex, methods=["POST"]),
+    Route("/api/shared/books/{book_id}", shared_delete_book, methods=["DELETE"]),
     Route("/api/lexidrug/status", lexidrug_status, methods=["GET"]),
     Route("/api/lexidrug/open", lexidrug_open, methods=["POST"]),
     Route("/api/lexidrug/ask", lexidrug_ask, methods=["POST"]),

@@ -22,7 +22,13 @@ import pdfplumber
 from pypdf import PdfReader, PdfWriter
 
 import cost_ledger
-from config import ANTHROPIC_API_KEY, CLAUDE_MODEL, MAX_PAGES_PER_PASS, ANTHROPIC_CLIENT_TIMEOUT_SECONDS
+from config import (
+    ANTHROPIC_API_KEY,
+    ANTHROPIC_CLIENT_TIMEOUT_SECONDS,
+    CLAUDE_MODEL,
+    MAX_BOOK_PAGES,
+    MAX_PAGES_PER_PASS,
+)
 
 # Explicit timeout -- the SDK's own default is ~10 minutes, which is far too
 # long for a Telegram bot to sit silently on a stalled request. This is one
@@ -94,6 +100,7 @@ def extract_page_previews(pdf_path: str, chars_per_page: int = 350, progress_cb=
             text = page.extract_text() or ""
             text = re.sub(r"\s+", " ", text).strip()
             previews.append(text[:chars_per_page])
+            page.close()  # release this page's parsed objects; see pdf_qa.extract_full_page_text
             if progress_cb and (i % 10 == 0 or i == total - 1):
                 try:
                     progress_cb(i + 1, total)
@@ -102,37 +109,10 @@ def extract_page_previews(pdf_path: str, chars_per_page: int = 350, progress_cb=
     return previews
 
 
-def detect_chapters(previews: list[str]) -> list[dict]:
-    """
-    Ask Claude to find chapter boundaries from page previews.
-    Returns a list of dicts: [{"title": str, "start_page": int}, ...]
-    start_page is 1-indexed and refers to the ORIGINAL pdf page numbers.
-
-    Raises ChapterDetectionError if the page cap is exceeded, if Claude's
-    response can't be parsed, or if it's structurally malformed (missing
-    fields, non-integer/out-of-range start_page, or duplicate start_page
-    values that would make the split logic silently produce a bogus
-    near-empty chapter instead of a clear error).
-    """
-    if len(previews) > MAX_PAGES_PER_PASS:
-        raise ChapterDetectionError(
-            f"This PDF has {len(previews)} pages; the limit is {MAX_PAGES_PER_PASS}. "
-            "Split it into parts first and send those."
-        )
-    with_text = sum(1 for p in previews if len(p) >= _MIN_TEXT_CHARS_PER_PAGE)
-    if previews and with_text < max(1, len(previews) * _MIN_TEXT_PAGE_FRACTION):
-        # Checked before the AI call: a scanned book has nothing to find
-        # chapters in, and sending hundreds of empty "[PAGE n]" lines to the
-        # model only produced a bogus one-chapter split at full cost.
-        raise ChapterDetectionError(
-            "This PDF looks like a scan (pictures of pages, no selectable text), so its text can't be "
-            "read. Run it through an OCR tool first (e.g. Adobe Scan, or \"Make searchable\" in most "
-            "PDF apps) and send the result."
-        )
-
-    numbered_text = "\n".join(
-        f"[PAGE {i + 1}] {preview}" for i, preview in enumerate(previews)
-    )
+def _detect_window(previews: list[str], start: int, end: int, total: int) -> list[dict]:
+    """One AI pass over pages start+1..end (0-based slice bounds). Returns raw, unvalidated entries."""
+    numbered_text = "\n".join(f"[PAGE {i + 1}] {previews[i]}" for i in range(start, end))
+    whole_book = start == 0 and end == total
 
     system_prompt = (
         "You are analyzing the first ~350 characters of every page of a "
@@ -143,14 +123,22 @@ def detect_chapters(previews: list[str]) -> list[dict]:
         "Respond with ONLY a JSON array, no markdown fences, no preamble. "
         'Format: [{"title": "Chapter 1: Mood Disorders", "start_page": 12}, ...] '
         "start_page must be the page number shown in [PAGE N] where that "
-        "chapter's heading first appears. If you cannot find clear chapter "
-        "breaks, return a single entry covering the whole document starting "
-        "at page 1."
+        "chapter's heading first appears. "
     )
+    if whole_book:
+        system_prompt += (
+            "If you cannot find clear chapter breaks, return a single entry covering the whole "
+            "document starting at page 1."
+        )
+    else:
+        system_prompt += (
+            f"You are seeing pages {start + 1}-{end} of a {total}-page book; the rest is analyzed "
+            "separately. List only chapters whose heading appears on one of THESE pages, and return "
+            "an empty array [] if none starts here."
+        )
 
     # One retry: an unparseable reply is usually a one-off, and failing the
     # whole upload over it is worse than a second call.
-    chapters = None
     for attempt in range(2):
         response = client.messages.create(
             model=CLAUDE_MODEL,
@@ -168,16 +156,62 @@ def detect_chapters(previews: list[str]) -> list[dict]:
         raw = re.sub(r"^```json|```$", "", raw.strip(), flags=re.MULTILINE).strip()
         try:
             chapters = json.loads(raw)
-            break
         except json.JSONDecodeError:
             logger.warning(
                 "Chapter split reply was not JSON (attempt %d, stop=%s): %r", attempt + 1, response.stop_reason, raw[:500]
             )
-    if chapters is None:
-        raise ChapterDetectionError("The AI's chapter list came back unreadable. Please send the PDF again.")
+            continue
+        if not isinstance(chapters, list) or (whole_book and not chapters):
+            raise ChapterDetectionError("The AI returned no chapters. Please send the PDF again.")
+        # A window may only name its own pages; anything else is a
+        # hallucinated boundary that would collide with another window's.
+        return [
+            ch for ch in chapters
+            if not (isinstance(ch, dict) and isinstance(ch.get("start_page"), int)
+                    and not isinstance(ch.get("start_page"), bool)
+                    and not (start < ch["start_page"] <= end))
+        ]
+    raise ChapterDetectionError("The AI's chapter list came back unreadable. Please send the PDF again.")
 
-    if not isinstance(chapters, list) or not chapters:
-        raise ChapterDetectionError("The AI returned no chapters.")
+
+def detect_chapters(previews: list[str]) -> list[dict]:
+    """
+    Ask Claude to find chapter boundaries from page previews.
+    Returns a list of dicts: [{"title": str, "start_page": int}, ...]
+    start_page is 1-indexed and refers to the ORIGINAL pdf page numbers.
+
+    Raises ChapterDetectionError if the page cap is exceeded, if Claude's
+    response can't be parsed, or if it's structurally malformed (missing
+    fields, non-integer/out-of-range start_page, or duplicate start_page
+    values that would make the split logic silently produce a bogus
+    near-empty chapter instead of a clear error).
+    """
+    if len(previews) > MAX_BOOK_PAGES:
+        raise ChapterDetectionError(
+            f"This PDF has {len(previews)} pages; the limit is {MAX_BOOK_PAGES}. "
+            "Split it into parts first and send those."
+        )
+    with_text = sum(1 for p in previews if len(p) >= _MIN_TEXT_CHARS_PER_PAGE)
+    if previews and with_text < max(1, len(previews) * _MIN_TEXT_PAGE_FRACTION):
+        # Checked before the AI call: a scanned book has nothing to find
+        # chapters in, and sending hundreds of empty "[PAGE n]" lines to the
+        # model only produced a bogus one-chapter split at full cost.
+        raise ChapterDetectionError(
+            "This PDF looks like a scan (pictures of pages, no selectable text), so its text can't be "
+            "read. Run it through an OCR tool first (e.g. Adobe Scan, or \"Make searchable\" in most "
+            "PDF apps) and send the result."
+        )
+
+    # A long book is read in windows of MAX_PAGES_PER_PASS pages, one AI
+    # call each, and the chapter lists are merged. Pages keep their real
+    # numbers in every window, so the merged list needs no re-mapping. A
+    # book that fits one window takes exactly the single call it always did.
+    total = len(previews)
+    chapters = []
+    for start in range(0, total, MAX_PAGES_PER_PASS):
+        chapters.extend(_detect_window(previews, start, min(start + MAX_PAGES_PER_PASS, total), total))
+    if not chapters:
+        chapters = [{"title": "Full document", "start_page": 1}]
 
     for ch in chapters:
         if not isinstance(ch, dict) or "title" not in ch or "start_page" not in ch:
@@ -274,9 +308,9 @@ def process_pdf(pdf_path: str, output_dir: str, progress_cb=None) -> tuple[list[
     # much more expensive full-text extraction over every page -- no point
     # paying that cost on a PDF we're about to reject anyway.
     page_count = open_check(pdf_path)
-    if page_count > MAX_PAGES_PER_PASS:
+    if page_count > MAX_BOOK_PAGES:
         raise ChapterDetectionError(
-            f"This PDF has {page_count} pages; the limit is {MAX_PAGES_PER_PASS}. "
+            f"This PDF has {page_count} pages; the limit is {MAX_BOOK_PAGES}. "
             "Split it into parts first and send those."
         )
 

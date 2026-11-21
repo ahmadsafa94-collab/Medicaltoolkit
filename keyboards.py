@@ -344,12 +344,21 @@ def make_searchable_kb(pending_id: str) -> InlineKeyboardMarkup:
     )
 
 
-def book_picker_kb(books: dict) -> InlineKeyboardMarkup:
-    """One button per indexed book. books: {book_id: {"title": ..., "num_chunks": ...}}"""
+def book_picker_kb(books: dict, multi_url: str | None = None) -> InlineKeyboardMarkup:
+    """
+    One button per indexed book. books: {book_id: {"title": ..., "num_chunks": ...}}
+    multi_url, when given, adds a button that opens the mini app's 💬 Ask
+    tab, where several books and the specialty libraries can be ticked and
+    asked together.
+    """
     rows = [
         [InlineKeyboardButton(text=f"📖 {info['title']}", callback_data=f"askbook:{book_id}")]
         for book_id, info in books.items()
     ]
+    if multi_url:
+        rows.append(
+            [InlineKeyboardButton(text="☑️ Ask several books / specialty library", web_app=WebAppInfo(url=multi_url))]
+        )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

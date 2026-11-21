@@ -79,7 +79,7 @@ function alertMsg(msg) {
 // ---------------------------------------------------------------------
 
 const views = [
-  "view-shelf", "view-drugs", "view-bookmarks", "view-request-book",
+  "view-shelf", "view-ask", "view-drugs", "view-bookmarks", "view-request-book",
   "view-upload", "view-book", "view-reader",
 ];
 
@@ -87,7 +87,7 @@ const views = [
 // rather than being pushed onto it, so the Telegram BackButton is hidden
 // there -- there is nothing above a tab to go back to, and switching tabs
 // is not a step you reverse.
-const ROOT_VIEWS = ["view-shelf", "view-drugs"];
+const ROOT_VIEWS = ["view-shelf", "view-ask", "view-drugs"];
 let viewStack = ["view-shelf"];
 
 function showView(id, { pushHistory = true } = {}) {
@@ -144,14 +144,18 @@ const SHELF_COLS = 4;
 // limit in upload_book(). null = unlimited (Premium).
 let shelfLimit = null;
 let shelfCount = 0;
+// The server's upload limit, sent with every shelf/ask-library load so this
+// pre-check can't drift from what the server enforces.
+let maxUploadMb = 500;
 
 async function loadShelf() {
   const grid = document.getElementById("shelf-grid");
   const empty = document.getElementById("shelf-empty");
   grid.innerHTML = "";
   try {
-    const { books, shelf_limit, shelf_used } = await api("/api/books");
+    const { books, shelf_limit, shelf_used, max_upload_mb } = await api("/api/books");
     shelfLimit = shelf_limit ?? null;
+    if (max_upload_mb) maxUploadMb = max_upload_mb;
     // From the server, not books.length: paid 📚 Requested Books sit on the
     // shelf but don't count toward the free cap.
     shelfCount = shelf_used ?? books.length;
@@ -458,9 +462,8 @@ document.getElementById("file-input").addEventListener("change", (e) => {
 });
 
 function uploadFile(file) {
-  const MAX_BYTES = 200 * 1024 * 1024;
-  if (file.size > MAX_BYTES) {
-    alertMsg(`That file is over the 200MB limit (${(file.size / 1024 / 1024).toFixed(1)}MB).`);
+  if (file.size > maxUploadMb * 1024 * 1024) {
+    alertMsg(`That file is over the ${maxUploadMb}MB limit (${(file.size / 1024 / 1024).toFixed(1)}MB).`);
     return;
   }
   showView("view-upload");
@@ -2464,6 +2467,7 @@ function wireDrugsTab() {
     t.addEventListener("click", () => {
       showView(t.dataset.tab);
       if (t.dataset.tab === "view-shelf") loadShelf();
+      if (t.dataset.tab === "view-ask") loadAskLibrary();
     });
   });
   document.querySelectorAll("#view-drugs .subtab").forEach((t) => {
@@ -2520,6 +2524,418 @@ function wireDrugsTab() {
   wireLexiPane();
 }
 
+
+// ---------------------------------------------------------------------
+// Ask tab: one question across several books + specialty libraries
+// ---------------------------------------------------------------------
+//
+// A book's own "Ask questions using AI" panel answers from that one book.
+// This tab is the other shape of the same need: tick any mix of your own
+// indexed books and the admin-provided books of a specialty (Psychiatry,
+// Cardiology, ...), and ask once across all of them. The ticks survive
+// switching specialty, so books from two specialties plus your own shelf
+// can be combined in one question.
+//
+// Shared books are answer sources only -- there is no way to open or
+// download one from here, by design (see shared_library.py).
+
+let askLib = null;            // last /api/ask/library response
+let askSelected = new Set();  // ticked book ids (own and shared)
+let askSpecialty = null;      // name of the specialty being shown
+let askThread = [];           // [{q, a, sources}] -- sent back as history
+let askBusy = false;
+let askPollTimer = null;
+let askIndexingOwn = new Set();  // own books whose index job this tab started
+
+function askAllBooks() {
+  if (!askLib) return [];
+  return askLib.my_books.concat(...askLib.specialties.map((s) => s.books));
+}
+
+async function loadAskLibrary({ quiet = false } = {}) {
+  try {
+    askLib = await api("/api/ask/library");
+  } catch (e) {
+    if (!quiet) alertMsg(e.message);
+    return;
+  }
+  if (askLib.max_upload_mb) maxUploadMb = askLib.max_upload_mb;
+  // A tick on a book that has since been removed (or lost its index) would
+  // make the next question fail, so it is dropped here.
+  const askable = new Set(askAllBooks().filter((b) => b.qa_indexed).map((b) => b.book_id));
+  askSelected.forEach((id) => { if (!askable.has(id)) askSelected.delete(id); });
+  const names = askLib.specialties.map((s) => s.name);
+  if (!names.includes(askSpecialty)) askSpecialty = names[0] || null;
+  renderAskLibrary();
+
+  // Keep refreshing while anything is still being indexed, so a book
+  // becomes tickable by itself the moment it is ready.
+  clearTimeout(askPollTimer);
+  const pending = askLib.specialties.some((s) => s.books.some((b) => b.indexing)) || askIndexingOwn.size > 0;
+  if (pending && !document.getElementById("view-ask").hidden) {
+    askPollTimer = setTimeout(() => loadAskLibrary({ quiet: true }), 3000);
+  }
+}
+
+function askRowHtml(b, { shared }) {
+  const pages = b.page_count ? `${b.page_count} p.` : "";
+  const admin = shared && askLib.is_admin;
+  const del = admin ? `<button class="mini-btn" data-del="${b.book_id}" title="Remove from library">🗑</button>` : "";
+  if (b.qa_indexed) {
+    const checked = askSelected.has(b.book_id) ? "checked" : "";
+    return (
+      `<label class="check-row"><input type="checkbox" data-id="${b.book_id}" ${checked} />` +
+      `<span class="check-title">${escapeHtml(b.title)}</span><span class="check-meta">${pages}</span>${del}</label>`
+    );
+  }
+  // Not answerable yet: say why, and offer the one thing that fixes it.
+  let meta, action = "";
+  if (b.indexing || askIndexingOwn.has(b.book_id)) {
+    meta = `<span class="check-meta">⏳ ${escapeHtml(b.progress || "Preparing…")}</span>`;
+  } else if (shared) {
+    meta = b.index_error
+      ? `<span class="check-meta is-error">${escapeHtml(b.index_error)}</span>`
+      : `<span class="check-meta">Not ready yet</span>`;
+    if (admin) action = `<button class="mini-btn" data-reindex="${b.book_id}">Retry</button>`;
+  } else {
+    meta = "";
+    action = `<button class="mini-btn" data-index="${b.book_id}">Make searchable</button>`;
+  }
+  return (
+    `<div class="check-row is-disabled"><input type="checkbox" disabled />` +
+    `<span class="check-title">${escapeHtml(b.title)}</span>${meta}${action}${del}</div>`
+  );
+}
+
+// The dropdown shows how many books are ticked inside each specialty, so
+// ticks made in one are still visible after switching to another.
+function renderAskSpecialtyOptions() {
+  document.getElementById("ask-specialty").innerHTML = askLib.specialties
+    .map((s) => {
+      const ticked = s.books.filter((b) => askSelected.has(b.book_id)).length;
+      const label = `${s.name} (${s.books.length})${ticked ? ` — ${ticked} ticked` : ""}`;
+      return `<option value="${escapeHtml(s.name)}" ${s.name === askSpecialty ? "selected" : ""}>${escapeHtml(label)}</option>`;
+    })
+    .join("");
+}
+
+function renderAskLibrary() {
+  if (!askLib) return;
+  const select = document.getElementById("ask-specialty");
+  const sharedBox = document.getElementById("ask-shared-books");
+  const mineBox = document.getElementById("ask-my-books");
+
+  if (askLib.specialties.length) {
+    select.hidden = false;
+    renderAskSpecialtyOptions();
+    const spec = askLib.specialties.find((s) => s.name === askSpecialty);
+    sharedBox.innerHTML = spec && spec.books.length
+      ? spec.books.map((b) => askRowHtml(b, { shared: true })).join("")
+      : `<p class="muted">No books in this specialty yet.</p>`;
+  } else {
+    select.hidden = true;
+    sharedBox.innerHTML = `<p class="muted">No specialty libraries yet.</p>`;
+  }
+
+  mineBox.innerHTML = askLib.my_books.length
+    ? askLib.my_books.map((b) => askRowHtml(b, { shared: false })).join("")
+    : `<p class="muted">No books on your shelf yet. Add one from the 📚 Shelf tab.</p>`;
+
+  const admin = document.getElementById("ask-admin");
+  admin.hidden = !askLib.is_admin;
+  if (askLib.is_admin) {
+    document.getElementById("ask-admin-target").textContent = askSpecialty
+      ? `Books you add go into: ${askSpecialty}`
+      : "Add a specialty first, then add books to it.";
+    ["ask-admin-upload", "ask-admin-publish", "ask-admin-del-spec"].forEach((id) => {
+      document.getElementById(id).disabled = !askSpecialty;
+    });
+  }
+  renderAskSelection();
+}
+
+function renderAskSelection() {
+  const n = askSelected.size;
+  document.getElementById("ask-selected").textContent = n
+    ? `${n} book${n === 1 ? "" : "s"} ticked.`
+    : "Tick at least one book above to ask.";
+  document.getElementById("ask-send").disabled = n === 0 || askBusy;
+  document.getElementById("ask-clear").hidden = n === 0;
+}
+
+function askAnswerHtml(text, sources) {
+  const escaped = escapeHtml(text);
+  const withMarkers = escaped.replace(/\[(\d+)\]/g, (m, n) => `<span class="cite-marker">[${n}]</span>`);
+  if (!sources || !sources.length) return withMarkers;
+  const lines = sources
+    .map(
+      (s) =>
+        `<span class="src-line"><span class="n">[${s.n}]</span>` +
+        `<span><strong>${escapeHtml(s.title)}</strong>, p.${s.page} — ${escapeHtml(s.text)}</span></span>`
+    )
+    .join("");
+  return `${withMarkers}<span class="qa-sources">${lines}</span>`;
+}
+
+function renderAskThread() {
+  const box = document.getElementById("ask-thread");
+  box.innerHTML = askThread
+    .map(
+      (t) =>
+        `<div class="qa-msg q">${escapeHtml(t.q)}</div>` +
+        `<div class="qa-msg a">${t.sources ? askAnswerHtml(t.a, t.sources) : escapeHtml(t.a)}</div>`
+    )
+    .join("");
+  box.scrollTop = box.scrollHeight;
+}
+
+async function askSend() {
+  if (askBusy) return;
+  const input = document.getElementById("ask-question");
+  const question = input.value.trim();
+  if (!askSelected.size) return alertMsg("Tick at least one book first.");
+  if (!question) return;
+
+  askBusy = true;
+  const n = askSelected.size;
+  askThread.push({ q: question, a: `…searching ${n} book${n === 1 ? "" : "s"}…` });
+  input.value = "";
+  renderAskThread();
+  renderAskSelection();
+  try {
+    const { answer, sources, skipped } = await api("/api/ask/multi", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        book_ids: Array.from(askSelected),
+        question,
+        history: askThread.slice(0, -1).map((t) => ({ question: t.q, answer: t.a })),
+      }),
+    });
+    const note = skipped && skipped.length ? `\n\n(Couldn't search: ${skipped.join(", ")}.)` : "";
+    askThread[askThread.length - 1] = { q: question, a: answer + note, sources: sources || [] };
+  } catch (e) {
+    askThread.pop();  // never replay an error as history
+    input.value = question;
+    alertMsg(e.message);
+    if (e.status === 404 || e.status === 409) loadAskLibrary({ quiet: true });
+  } finally {
+    askBusy = false;
+    renderAskThread();
+    renderAskSelection();
+  }
+}
+
+// Index one of the user's own books from here, so they don't have to leave
+// the tab, open the book, and come back just to be able to tick it.
+async function askIndexOwn(bookId) {
+  askIndexingOwn.add(bookId);
+  renderAskLibrary();
+  const finish = (err) => {
+    askIndexingOwn.delete(bookId);
+    if (err) alertMsg(err);
+    loadAskLibrary({ quiet: true });
+  };
+  try {
+    await api(`/api/books/${bookId}/index`, { method: "POST" });
+  } catch (e) {
+    return finish(e.message);
+  }
+  pollJob(bookId, "index", {
+    onProgress: (p) => {
+      const b = askLib && askLib.my_books.find((x) => x.book_id === bookId);
+      if (b) { b.progress = p; renderAskLibrary(); }
+    },
+    onDone: () => { askSelected.add(bookId); finish(); },
+    onError: (msg) => finish(msg),
+  });
+}
+
+// --- admin: manage the specialty libraries ----------------------------
+
+// window.confirm is unreliable inside Telegram's WebView (it can silently
+// return false), so Telegram's own dialog is used when there is one.
+function askConfirm(message) {
+  return new Promise((resolve) => {
+    if (tg && tg.showConfirm) tg.showConfirm(message, (ok) => resolve(!!ok));
+    else resolve(window.confirm(message));
+  });
+}
+
+async function askAdminCall(path, opts, { confirmText } = {}) {
+  if (confirmText && !(await askConfirm(confirmText))) return;
+  try {
+    const data = await api(path, opts);
+    if (data && data.name) askSpecialty = data.name;
+  } catch (e) {
+    alertMsg(e.message);
+  }
+  loadAskLibrary({ quiet: true });
+}
+
+function askAdminUpload(file) {
+  if (!askSpecialty) return;
+  if (file.size > maxUploadMb * 1024 * 1024) {
+    alertMsg(`That file is over the ${maxUploadMb}MB limit (${(file.size / 1024 / 1024).toFixed(1)}MB).`);
+    return;
+  }
+  const wrap = document.getElementById("ask-admin-progress");
+  const bar = document.getElementById("ask-admin-bar");
+  const status = document.getElementById("ask-admin-status");
+  const uploadBtn = document.getElementById("ask-admin-upload");
+  wrap.hidden = false;
+  uploadBtn.disabled = true;
+  bar.style.width = "0%";
+  status.textContent = `Uploading "${file.name}" to ${askSpecialty}…`;
+
+  const form = new FormData();
+  form.append("file", file, file.name);
+  form.append("title", file.name.replace(/\.pdf$/i, "").replace(/_/g, " "));
+  form.append("specialty", askSpecialty);
+
+  const done = (msg) => {
+    wrap.hidden = true;
+    uploadBtn.disabled = false;
+    if (msg) alertMsg(msg);
+    loadAskLibrary({ quiet: true });
+  };
+  const xhr = new XMLHttpRequest();
+  xhr.open("POST", "/api/shared/upload");
+  xhr.setRequestHeader("X-Telegram-Init-Data", INIT_DATA);
+  xhr.upload.addEventListener("progress", (evt) => {
+    if (!evt.lengthComputable) return;
+    const pct = Math.round((evt.loaded / evt.total) * 100);
+    bar.style.width = pct + "%";
+    status.textContent = pct < 100 ? `Uploading… ${pct}%` : "Checking the file…";
+  });
+  xhr.onload = () => {
+    let data = null;
+    try { data = JSON.parse(xhr.responseText); } catch (_) { /* ignore */ }
+    if (xhr.status >= 200 && xhr.status < 300) return done();
+    const detail = data && data.detail;
+    done((typeof detail === "string" && detail) || `Upload failed (${xhr.status})`);
+  };
+  xhr.onerror = () => done("Upload failed -- check your connection and try again.");
+  xhr.send(form);
+}
+
+function renderAskAdminShelf() {
+  const box = document.getElementById("ask-admin-shelf");
+  if (!askLib.my_books.length) {
+    box.innerHTML = `<p class="muted">Your own shelf is empty.</p>`;
+    return;
+  }
+  box.innerHTML = askLib.my_books
+    .map(
+      (b) =>
+        `<div class="check-row"><span class="check-title">${escapeHtml(b.title)}</span>` +
+        `<button class="mini-btn" data-publish="${b.book_id}">Add to ${escapeHtml(askSpecialty)}</button></div>`
+    )
+    .join("");
+}
+
+function wireAskTab() {
+  const view = document.getElementById("view-ask");
+
+  document.getElementById("ask-specialty").addEventListener("change", (e) => {
+    askSpecialty = e.target.value;
+    document.getElementById("ask-admin-shelf").hidden = true;
+    renderAskLibrary();
+  });
+
+  // One delegated listener for both checklists and every row button.
+  view.addEventListener("change", (e) => {
+    const box = e.target.closest('.check-row input[type="checkbox"][data-id]');
+    if (!box) return;
+    if (box.checked) {
+      if (askLib && askSelected.size >= askLib.max_books) {
+        box.checked = false;
+        return alertMsg(`You can ask up to ${askLib.max_books} books at once. Untick one first.`);
+      }
+      askSelected.add(box.dataset.id);
+    } else {
+      askSelected.delete(box.dataset.id);
+    }
+    // Only the counters are refreshed: rebuilding the lists on every tick
+    // would replace the checkbox under the user's finger.
+    renderAskSpecialtyOptions();
+    renderAskSelection();
+  });
+  view.addEventListener("click", (e) => {
+    const btn = e.target.closest("button.mini-btn");
+    if (!btn) return;
+    e.preventDefault();
+    if (btn.dataset.index) return askIndexOwn(btn.dataset.index);
+    if (btn.dataset.reindex) {
+      return askAdminCall(`/api/shared/books/${btn.dataset.reindex}/index`, { method: "POST" });
+    }
+    if (btn.dataset.del) {
+      return askAdminCall(`/api/shared/books/${btn.dataset.del}`, { method: "DELETE" }, {
+        confirmText: "Remove this book from the specialty library for everyone?",
+      });
+    }
+    if (btn.dataset.publish) {
+      btn.disabled = true;
+      btn.textContent = "Adding…";
+      document.getElementById("ask-admin-shelf").hidden = true;
+      return askAdminCall("/api/shared/publish", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ book_id: btn.dataset.publish, specialty: askSpecialty }),
+      });
+    }
+  });
+
+  document.getElementById("ask-send").addEventListener("click", askSend);
+  document.getElementById("ask-new").addEventListener("click", () => {
+    askThread = [];
+    renderAskThread();
+  });
+  document.getElementById("ask-clear").addEventListener("click", () => {
+    askSelected.clear();
+    renderAskLibrary();
+  });
+
+  const addSpec = () => {
+    const input = document.getElementById("ask-admin-new-spec");
+    const name = input.value.trim();
+    if (!name) return;
+    input.value = "";
+    askAdminCall("/api/shared/specialties", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+  };
+  document.getElementById("ask-admin-add-spec").addEventListener("click", addSpec);
+  document.getElementById("ask-admin-new-spec").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); addSpec(); }
+  });
+  document.getElementById("ask-admin-del-spec").addEventListener("click", () => {
+    if (!askSpecialty) return;
+    askAdminCall("/api/shared/specialties/remove", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: askSpecialty }),
+    }, { confirmText: `Remove the "${askSpecialty}" specialty? (Only works once its books are removed.)` });
+  });
+  document.getElementById("ask-admin-upload").addEventListener("click", () => {
+    document.getElementById("ask-admin-file").click();
+  });
+  document.getElementById("ask-admin-file").addEventListener("change", (e) => {
+    const file = e.target.files[0];
+    e.target.value = "";
+    if (file) askAdminUpload(file);
+  });
+  document.getElementById("ask-admin-publish").addEventListener("click", () => {
+    const box = document.getElementById("ask-admin-shelf");
+    box.hidden = !box.hidden;
+    if (!box.hidden) renderAskAdminShelf();
+  });
+
+  renderAskSelection();
+}
+
 // ---------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------
@@ -2529,6 +2945,13 @@ function wireDrugsTab() {
     INIT_DATA = await waitForInitData();
   }
   wireDrugsTab();
-  syncTabBar("view-shelf");
-  loadShelf();
+  wireAskTab();
+  // "?tab=ask" is how the chat's "Ask several books" button lands here.
+  if (new URLSearchParams(window.location.search).get("tab") === "ask") {
+    showView("view-ask");
+    loadAskLibrary();
+  } else {
+    syncTabBar("view-shelf");
+    loadShelf();
+  }
 })();

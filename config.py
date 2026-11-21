@@ -53,20 +53,23 @@ TRANSLATION_MODEL = "claude-haiku-4-5-20251001"
 # cheaper/faster alternative in the same embedding space if you want to swap.
 VOYAGE_MODEL = "voyage-4"
 
-# Safety cap: don't try to AI-split books with more pages than this in one
-# shot. This bounds two different costs: the Claude API cost of the chapter-
-# detection prompt (scales with page count), AND -- the more important one in
-# practice -- how long pdfplumber's per-page text extraction takes, which is
-# NOT just a function of file size. A short, image-heavy 8MB PDF with a
-# moderate page count is usually fine; a very long or layout-complex book can
-# make extraction itself take many minutes even well under a naive page cap.
-# If you need to raise this for a legitimately long textbook, also consider
-# raising PDF_PROCESSING_TIMEOUT_SECONDS below so it isn't cut off mid-extraction.
-# Raised 400 -> 1000 at the user's request; PDF_PROCESSING_TIMEOUT_SECONDS and
-# CHAPTER_DIVISION_TIMEOUT_SECONDS below were scaled up proportionally (both
-# gate this same extract-previews + detect-chapters pipeline) so a long book
-# that now legitimately takes longer isn't cut off mid-extraction.
+# Chapter detection reads a book in windows of this many pages, one AI
+# call per window (see pdf_processor.detect_chapters). It used to be a hard
+# cap on the whole book; long textbooks are now simply read in several
+# windows.
 MAX_PAGES_PER_PASS = 1000
+
+# The largest book accepted anywhere (chat upload, Book Shelf upload,
+# chapter division). What grows with page count is processing TIME -- text
+# extraction is local CPU work at roughly a second per few pages -- so the
+# timeouts below scale with the book's length (scaled_timeout) rather than
+# cutting a long book off. Override with the MAX_BOOK_PAGES env var.
+MAX_BOOK_PAGES = int(os.environ.get("MAX_BOOK_PAGES", "5000"))
+
+
+def scaled_timeout(base_seconds: int, page_count: int) -> int:
+    """`base_seconds` is the budget per 1,000 pages; a 3,200-page book gets four times it."""
+    return base_seconds * max(1, -(-int(page_count) // 1000))
 
 # Telegram's Bot API hard-caps file downloads at 20MB for regular bots --
 # there is no way to download a bigger file via bot.get_file(), so we check
@@ -115,9 +118,11 @@ QA_INDEXING_TIMEOUT_SECONDS = 600
 # 20MB -- see MAX_UPLOAD_BYTES above). The mini app's uploader posts the
 # file straight from the browser to OUR OWN server over plain HTTPS, never
 # through Telegram's Bot API at all, so that 20MB ceiling simply doesn't
-# apply there -- 200MB is a real, working limit for this path.
-MAX_SHELF_UPLOAD_BYTES = 200 * 1024 * 1024
-MAX_SHELF_UPLOAD_PAGES = 1500
+# apply there. Raised from 200MB/1,500 pages at the owner's request so full
+# reference textbooks fit; override with MAX_SHELF_UPLOAD_MB. Mind the
+# storage volume: every book kept on a shelf counts against it.
+MAX_SHELF_UPLOAD_BYTES = int(os.environ.get("MAX_SHELF_UPLOAD_MB", "500")) * 1024 * 1024
+MAX_SHELF_UPLOAD_PAGES = MAX_BOOK_PAGES
 
 # Background-job timeouts for the mini app's longer-running actions,
 # following the same "never let the user stare at a spinner forever"

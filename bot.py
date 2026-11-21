@@ -38,13 +38,15 @@ from aiogram.types import (
 
 from config import (
     STORAGE_DIR,
+    MAX_SHELF_UPLOAD_BYTES,
     MAX_UPLOAD_BYTES,
     PDF_PROCESSING_TIMEOUT_SECONDS,
+    scaled_timeout,
     WEBAPP_URL,
     PORT,
     SUPPORT_ADMIN_USERNAME,
 )
-from pdf_processor import process_pdf, ChapterDetectionError, count_pages, compute_chapter_ranges
+from pdf_processor import process_pdf, ChapterDetectionError, count_pages, compute_chapter_ranges, open_check
 from paths import user_dir, safe_pdf_filename, unique_path
 from drug_lookup import (
     lookup_drug,
@@ -304,6 +306,9 @@ async def cmd_help(message: Message):
         "itself) laid out on a shelf. From there you can read a book with a built-in viewer, divide it into "
         "chapters, summarize the whole book or one chapter, ask it AI questions, and build a custom quiz "
         "(pick chapters, difficulty, and up to 30 questions) -- all without leaving Telegram.\n\n"
+        "💬 Ask (tab inside Book Shelf) - tick several books at once -- your own, plus the specialty "
+        "libraries (e.g. Psychiatry) provided for everyone -- and ask one question across all of them. "
+        "Each answer names the book and page it came from.\n\n"
         "/ask - pick one of your previously-indexed books and ask it "
         "questions freely, one after another, until /cancel. Answers are "
         "generated only from that book's actual text, with page citations -- "
@@ -1078,8 +1083,9 @@ async def handle_pdf_split_only(message: Message, state: FSMContext):
     if doc.file_size and doc.file_size > MAX_UPLOAD_BYTES:
         await message.answer(
             f"That file is {doc.file_size / 1024 / 1024:.1f}MB, which is over "
-            f"Telegram's {MAX_UPLOAD_BYTES // 1024 // 1024}MB limit for bot downloads. "
-            "Please split it yourself first, or send a smaller file."
+            f"Telegram's {MAX_UPLOAD_BYTES // 1024 // 1024}MB limit for files sent to a bot in chat. "
+            f"Open 📚 Book Shelf and tap + to upload it there instead -- that takes books up to "
+            f"{MAX_SHELF_UPLOAD_BYTES // 1024 // 1024}MB."
         )
         return
 
@@ -1128,16 +1134,23 @@ async def handle_pdf_split_only(message: Message, state: FSMContext):
 
         asyncio.run_coroutine_threadsafe(_edit(), loop)
 
+    budget = PDF_PROCESSING_TIMEOUT_SECONDS
     try:
         try:
+            # The time budget grows with the book: a 3,000-page text needs
+            # several times what a 300-page one does, and a fixed cap cut
+            # long books off mid-read.
+            budget = scaled_timeout(
+                PDF_PROCESSING_TIMEOUT_SECONDS, await asyncio.to_thread(open_check, local_pdf_path)
+            )
             chapters, output_paths = await asyncio.wait_for(
                 asyncio.to_thread(process_pdf, local_pdf_path, output_dir, progress_cb),
-                timeout=PDF_PROCESSING_TIMEOUT_SECONDS,
+                timeout=budget,
             )
         except asyncio.TimeoutError:
             await status_msg.edit_text(
                 "This PDF is taking too long to process (over "
-                f"{PDF_PROCESSING_TIMEOUT_SECONDS // 60} minutes) -- it's likely "
+                f"{budget // 60} minutes) -- it's likely "
                 "very long or has complex, image/table-heavy pages. Try a "
                 "shorter book, or split it into smaller files yourself first."
             )
@@ -1201,8 +1214,9 @@ async def handle_pdf_upload(message: Message):
     if doc.file_size and doc.file_size > MAX_UPLOAD_BYTES:
         await message.answer(
             f"That file is {doc.file_size / 1024 / 1024:.1f}MB, which is over "
-            f"Telegram's {MAX_UPLOAD_BYTES // 1024 // 1024}MB limit for bot downloads. "
-            "Please split it yourself first, or send a smaller file."
+            f"Telegram's {MAX_UPLOAD_BYTES // 1024 // 1024}MB limit for files sent to a bot in chat. "
+            f"Open 📚 Book Shelf and tap + to upload it there instead -- that takes books up to "
+            f"{MAX_SHELF_UPLOAD_BYTES // 1024 // 1024}MB."
         )
         return
 
@@ -1291,11 +1305,18 @@ async def _process_chat_upload(message: Message, doc, file_name: str) -> None:
 
         asyncio.run_coroutine_threadsafe(_edit(), loop)
 
+    budget = PDF_PROCESSING_TIMEOUT_SECONDS
     try:
         try:
+            # The time budget grows with the book: a 3,000-page text needs
+            # several times what a 300-page one does, and a fixed cap cut
+            # long books off mid-read.
+            budget = scaled_timeout(
+                PDF_PROCESSING_TIMEOUT_SECONDS, await asyncio.to_thread(open_check, local_pdf_path)
+            )
             chapters, output_paths = await asyncio.wait_for(
                 asyncio.to_thread(process_pdf, local_pdf_path, output_dir, progress_cb),
-                timeout=PDF_PROCESSING_TIMEOUT_SECONDS,
+                timeout=budget,
             )
         except asyncio.TimeoutError:
             # Note: this makes the bot GIVE UP waiting -- it can't force-kill
@@ -1306,7 +1327,7 @@ async def _process_chat_upload(message: Message, doc, file_name: str) -> None:
             # left staring at a frozen status message with no way out.
             await status_msg.edit_text(
                 "This PDF is taking too long to process (over "
-                f"{PDF_PROCESSING_TIMEOUT_SECONDS // 60} minutes) -- it's likely "
+                f"{budget // 60} minutes) -- it's likely "
                 "very long or has complex, image/table-heavy pages. Try a "
                 "shorter book, or split it into smaller files yourself first."
             )
