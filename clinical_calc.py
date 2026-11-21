@@ -220,13 +220,21 @@ def calculate_meld(bilirubin_mgdl: float, inr: float, creatinine_mgdl: float, on
 def calculate_meld_na(
     bilirubin_mgdl: float, inr: float, creatinine_mgdl: float, sodium_meql: float, on_dialysis: bool
 ) -> float:
-    """MELD-Na: applies a sodium adjustment to the classic MELD score when MELD > 11."""
-    meld = calculate_meld(bilirubin_mgdl, inr, creatinine_mgdl, on_dialysis)
-    if meld <= 11:
-        return meld
-    na = min(max(sodium_meql, 125), 137)
-    meld_na = meld + 1.32 * (137 - na) - (0.033 * meld * (137 - na))
-    return min(max(round(meld_na), 6), 40)
+    """
+    MELD-Na (OPTN, 2016). The sodium adjustment is decided on, and applied
+    to, MELD(i) -- the unrounded initial score rounded to one decimal --
+    not the integer MELD. Testing the rounded integer against 11 dropped the
+    adjustment for MELD(i) in (11, 11.5): bili 1.9, INR 1.25, Cr 1.0, Na 125
+    is MELD(i) 11.4 and MELD-Na 23, which that version reported as 11.
+    """
+    bilirubin, inr_c, creatinine = _meld_clamp_labs(bilirubin_mgdl, inr, creatinine_mgdl, on_dialysis, cr_cap=4.0)
+    meld_i = round(
+        10 * (0.957 * math.log(creatinine) + 0.378 * math.log(bilirubin) + 1.120 * math.log(inr_c) + 0.643), 1
+    )
+    if meld_i > 11:
+        na = min(max(sodium_meql, 125), 137)
+        meld_i = meld_i + 1.32 * (137 - na) - (0.033 * meld_i * (137 - na))
+    return min(max(round(meld_i), 6), 40)
 
 
 def calculate_meld3(

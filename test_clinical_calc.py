@@ -92,6 +92,9 @@ meld_na_low = cc.calculate_meld_na(1.0, 1.0, 1.0, 130, False)
 check_eq("MELD-Na == MELD when MELD<=11", meld_na_low, meld_low)
 # MELD-Na: hyponatremia should increase score above MELD when MELD>11
 meld_base = cc.calculate_meld(2.0, 1.5, 1.2, False)
+# OPTN boundary: MELD(i) 11.4 rounds to integer MELD 11, but the sodium
+# adjustment applies because MELD(i) > 11 -> MELD-Na 23.
+check_eq("MELD-Na applies Na when MELD(i)=11.4", cc.calculate_meld_na(1.9, 1.25, 1.0, 125, False), 23)
 meld_na_hypo = cc.calculate_meld_na(2.0, 1.5, 1.2, 125, False)
 print(f"  MELD-Na with hyponatremia (Na=125): base MELD={meld_base}, MELD-Na={meld_na_hypo} (should be higher)")
 if meld_na_hypo <= meld_base:
