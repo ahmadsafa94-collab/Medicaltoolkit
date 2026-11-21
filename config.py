@@ -137,21 +137,6 @@ ASK_TIMEOUT_SECONDS = 30
 # scales with chapter count and each document send has its own network cost.
 SEND_CHAPTER_FILES_TIMEOUT_SECONDS = 300
 
-# --- ECG teaching references (see ecg_reference.py) ---
-
-# Admin-uploaded ECG textbooks, indexed with the same Voyage embeddings as
-# "Ask my book" and retrieved at ECG-interpretation time so the read is
-# anchored to real teaching material instead of the model's own recall --
-# the ECG equivalent of what glossary.py's reference ranges already do for
-# lab interpretation. Shared across ALL users (one admin-curated set), which
-# is why this lives under _admin/ rather than any one user's directory.
-ECG_REFERENCE_DIR = os.path.join(STORAGE_DIR, "_admin", "ecg_reference")
-ECG_REFERENCE_TOP_K = 6           # passages pulled per query, across all reference books
-# Ceiling on retrieved text injected into the verify prompt. Raised from
-# 7000 when the read started retrieving per-topic (the tracing's pattern
-# plus the method for rate, intervals and axis): with four topics sharing
-# one budget, the old cap left roughly one passage each.
-ECG_REFERENCE_MAX_CHARS = 10000
 
 # --- Admin / premium subscription system ---
 
@@ -191,11 +176,6 @@ FREE_DAILY_QUESTIONS = 10
 # already over the limit are never touched -- the check only blocks ADDING
 # a book, so nobody loses a book they already uploaded.
 FREE_SHELF_BOOKS = 2
-
-# ECG/lab interpretation (see ecg_lab_ai.py) are Premium-only, but every free
-# user gets exactly one free trial of EACH before being asked to upgrade.
-ECG_FREE_TRIALS = 1
-LAB_FREE_TRIALS = 1
 
 # Telegram Stars pricing (currency code "XTR" in sendInvoice), in the order
 # the plans are offered in ⭐ My Plan. 1 Star was roughly $0.016 to purchase

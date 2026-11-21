@@ -39,7 +39,6 @@ from config import (
     STORAGE_DIR,
     MAX_UPLOAD_BYTES,
     PDF_PROCESSING_TIMEOUT_SECONDS,
-    QA_INDEXING_TIMEOUT_SECONDS,
     WEBAPP_URL,
     PORT,
     SUPPORT_ADMIN_USERNAME,
@@ -88,8 +87,6 @@ import admin_log
 import book_requests
 import customer_flow
 import drug_qa_flow
-import ecg_lab_flow
-import ecg_reference
 import flashcard_flow
 import flashcards
 import glossary
@@ -151,11 +148,6 @@ admin_flow.register_admin_handlers(dp)
 # Customer "My Plan" panel: usage, Telegram Stars upgrade, pay-another-way
 # contact-admin flow, referrals, payment history, language -- see customer_flow.py.
 customer_flow.register_customer_handlers(dp)
-
-# ECG / Lab interpretation -- ADMIN ONLY now, reached from the admin panel
-# rather than a user menu while the accuracy of the reads is still being
-# worked on (see ecg_lab_flow's admin gate).
-ecg_lab_flow.register_ecg_lab_handlers(dp)
 
 # Drugs Info -> Drug LookUp (free-form Q&A grounded in a single drug's FDA
 # label -- also reachable straight from a /dose lookup's section menu)
@@ -403,6 +395,20 @@ async def btn_support(message: Message, state: FSMContext):
 async def cancel_pdf_split(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("Cancelled.")
+
+
+@dp.callback_query(F.data.in_({"study:ecg", "study:lab"}) | F.data.startswith("lab:mode:"))
+async def handle_retired_ecg_lab(callback: CallbackQuery):
+    """
+    ECG and lab interpretation were retired. Their buttons are gone from
+    every menu, but inline keyboards already delivered stay tappable in a
+    user's chat history forever -- this answers those taps instead of
+    leaving Telegram's loading spinner hanging on a callback nobody handles.
+    """
+    await callback.answer(
+        "ECG and lab interpretation have been retired. Try 📚 Book Shelf, 💊 Drugs Info or 🧮 Calculators.",
+        show_alert=True,
+    )
 
 
 @dp.callback_query(F.data == "clin:calc")
@@ -1007,92 +1013,6 @@ async def handle_book_delivery_document(message: Message, state: FSMContext):
     await status.edit_text(f"✅ Delivered to user {customer_id} -- added to their Book Shelf and sent as a file.")
 
 
-@dp.message(F.document, admin_flow.AdminStates.awaiting_ecg_reference)
-async def handle_ecg_reference_document(message: Message, state: FSMContext):
-    """
-    An admin is adding an ECG teaching book (admin panel -> 🫀 ECG Teaching
-    Books -> ➕ Add, which sets this state). The PDF is indexed once and from
-    then on every user's ECG interpretation is checked against the passages
-    of it that match their tracing -- see ecg_reference.py.
-
-    Registered directly on `dp` and BEFORE the unconditional
-    @dp.message(F.document) handler below, for the same reason
-    handle_book_delivery_document above is: aiogram tries a Router's own
-    handlers before descending into any sub-router, so this on
-    admin_flow.router would never be reached -- the generic upload handler
-    has no state filter and would swallow the textbook into the admin's own
-    Book Shelf instead.
-    """
-    await state.clear()
-    if not subscriptions.is_admin(message.from_user.id):
-        return
-
-    doc = message.document
-    file_name = doc.file_name or "ecg_reference.pdf"
-    if doc.mime_type != "application/pdf" and not file_name.lower().endswith(".pdf"):
-        await message.answer("That doesn't look like a PDF. Please send a .pdf file, or start over from the admin panel.")
-        return
-    if doc.file_size and doc.file_size > MAX_UPLOAD_BYTES:
-        await message.answer(
-            f"That file is {doc.file_size / 1024 / 1024:.1f}MB, over Telegram's "
-            f"{MAX_UPLOAD_BYTES // 1024 // 1024}MB bot-download limit. Please send a smaller PDF."
-        )
-        return
-
-    ref_id = ecg_reference.new_ref_id()
-    dest_path = ecg_reference.pdf_path_for(ref_id, safe_pdf_filename(file_name))
-    # Underscores in a PDF filename are almost always stand-ins for spaces
-    # ("Marriott_Practical_ECG.pdf"), and this title is shown to users under
-    # every ECG read as a source -- so normalize it once here rather than
-    # surfacing the raw filename.
-    title = os.path.splitext(file_name)[0].replace("_", " ").strip() or "ECG reference"
-
-    status = await message.answer(f"Downloading '{title}'...")
-    try:
-        file = await bot.get_file(doc.file_id)
-        await bot.download_file(file.file_path, destination=dest_path)
-    except TelegramAPIError as e:
-        logger.exception("Failed to download ECG reference PDF")
-        await status.edit_text(f"Couldn't download that file from Telegram: {e}")
-        return
-
-    async def progress(text):
-        try:
-            await status.edit_text(f"Indexing '{title}'\n{text}")
-        except TelegramBadRequest:
-            pass  # same text twice, or the message is gone -- progress display is never worth failing the upload over
-
-    try:
-        num_chunks = await asyncio.wait_for(
-            ecg_reference.index_book(dest_path, ref_id, title, progress_cb=progress),
-            timeout=QA_INDEXING_TIMEOUT_SECONDS,
-        )
-    except asyncio.TimeoutError:
-        _discard_failed_ecg_reference(dest_path)
-        await status.edit_text("Indexing took too long and was stopped. Try a shorter PDF, or split it first.")
-        return
-    except Exception as e:
-        logger.exception("Failed to index ECG reference book")
-        _discard_failed_ecg_reference(dest_path)
-        await status.edit_text(f"Couldn't index that book: {e}")
-        return
-
-    ecg_reference.register_book(ref_id, title, dest_path, num_chunks, added_by=message.from_user.id)
-    await status.edit_text(
-        f"✅ '{title}' is now teaching the ECG reader -- {num_chunks} passages indexed.\n\n"
-        "Every ECG a user sends from now on is read, then checked against the parts of this book that match "
-        "that tracing."
-    )
-
-
-def _discard_failed_ecg_reference(pdf_path: str) -> None:
-    """Drop a half-processed reference PDF so a failed add leaves nothing behind (it was never registered)."""
-    try:
-        os.remove(pdf_path)
-    except OSError:
-        pass
-
-
 @dp.message(F.document, SplitStates.awaiting_pdf)
 async def handle_pdf_split_only(message: Message, state: FSMContext):
     """
@@ -1197,37 +1117,6 @@ async def handle_pdf_split_only(message: Message, state: FSMContext):
         except OSError:
             pass
         shutil.rmtree(output_dir, ignore_errors=True)
-
-
-@dp.message(F.document, ecg_lab_flow.EcgLabStates.awaiting_ecg_image)
-async def handle_ecg_document(message: Message, state: FSMContext):
-    """
-    An ECG sent as a FILE rather than a compressed photo.
-
-    Registered directly on `dp` and BEFORE the unconditional
-    @dp.message(F.document) handler below, for the same reason as
-    handle_book_delivery_document and handle_pdf_split_only above: aiogram
-    checks a Router's own handlers before descending into any included
-    sub-router, so ecg_lab_flow's own
-    @router.message(EcgLabStates.awaiting_ecg_image, F.photo | F.document)
-    never sees a document -- handle_pdf_upload below has no state filter and
-    swallows it first, answering "That doesn't look like a PDF."
-
-    That made the ECG flow's own advice impossible to follow: it asks for
-    the tracing as a file (Telegram's photo compression destroys the 1 mm
-    detail a bundle-branch pattern lives in -- see ecg_tiles), and anyone
-    who did as asked got told to send a PDF instead. Photos kept working,
-    which is exactly why it went unnoticed. Delegates to the same handler
-    the photo path uses so there is only one ECG read to maintain.
-    """
-    await ecg_lab_flow.handle_ecg_image(message, state)
-
-
-@dp.message(F.document, ecg_lab_flow.EcgLabStates.awaiting_lab_image)
-async def handle_lab_document(message: Message, state: FSMContext):
-    """A lab report sent as a file -- same shadowing problem and same fix as
-    handle_ecg_document above."""
-    await ecg_lab_flow.handle_lab_image(message, state)
 
 
 @dp.message(F.document)

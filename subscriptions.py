@@ -4,7 +4,7 @@ Plan" panel, Telegram Stars payments, and every AI-costing feature's quota
 check all sit on top of.
 
 Storage layout (small per-purpose JSON files, same pattern as library.py):
-  STORAGE_DIR/{user_id}/subscription.json   -- one user's plan/usage/trials
+  STORAGE_DIR/{user_id}/subscription.json   -- one user's plan/usage
   STORAGE_DIR/_admin/users_index.json       -- {user_id: {first_seen, last_seen, username}}
                                                 for admin stats/broadcast/lookup, since there's
                                                 otherwise no way to enumerate "every user who has
@@ -19,9 +19,6 @@ Design notes:
     replaced) by a renewal/grant that arrives before the current one lapses
     -- see grant_premium(). is_premium() lazily downgrades an expired user
     back to "free" the next time anything checks their status.
-  - ECG/lab interpretation use a SEPARATE one-shot trial mechanism
-    (trial_used) rather than the daily counters: once ever, not once a
-    day, per the "give one free try" ask.
 """
 
 import json
@@ -37,8 +34,6 @@ from config import (
     FREE_DAILY_QUIZZES,
     FREE_DAILY_QUESTIONS,
     FREE_SHELF_BOOKS,
-    ECG_FREE_TRIALS,
-    LAB_FREE_TRIALS,
     REFERRAL_BONUS_DAYS,
 )
 
@@ -62,8 +57,6 @@ FEATURE_LABELS = {
     "quizzes": "quizzes",
     "questions": "Ask-AI questions",
 }
-TRIAL_LIMITS = {"ecg": ECG_FREE_TRIALS, "lab": LAB_FREE_TRIALS}
-TRIAL_LABELS = {"ecg": "ECG interpretation", "lab": "lab interpretation"}
 
 
 class QuotaExceeded(Exception):
@@ -91,16 +84,7 @@ class ShelfLimitReached(Exception):
         )
 
 
-class PremiumRequired(Exception):
-    """Raised when a FREE user has used up their one-time trial of a Premium-only feature."""
 
-    def __init__(self, feature: str):
-        self.feature = feature
-        label = TRIAL_LABELS.get(feature, feature)
-        super().__init__(
-            f"You've used your one free {label} trial. {label.capitalize()} is a Premium feature -- "
-            "upgrade via ⭐ My Plan to keep using it."
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +190,7 @@ def is_premium(user_id: int) -> bool:
     admin (config.ADMIN_USER_IDS) -- admins get full, unmetered access to
     every Premium-gated feature with no subscription needed, since every
     quota/trial check in this module (check_and_consume,
-    check_and_consume_trial, can_use_trial_or_premium) funnels through this
+    is_premium) funnels through this
     one function. Auto-downgrades (and persists) an expired plan back to
     free for everyone else.
     """
@@ -393,44 +377,12 @@ def check_shelf_capacity(user_id: int, current_count: int) -> None:
         raise ShelfLimitReached(current_count)
 
 
-def can_use_trial_or_premium(user_id: int, feature: str) -> bool:
-    """
-    Read-only peek (never consumes the trial) -- use this BEFORE prompting
-    the user for input (e.g. "send a photo"), so a user who's already used
-    their trial sees the upgrade prompt immediately instead of being asked
-    to upload a photo first and only THEN told no. Call
-    check_and_consume_trial() at the point the input is actually submitted.
-    """
-    if is_premium(user_id):
-        return True
-    return not _load(user_id)["trial_used"].get(feature, False)
-
-
-def check_and_consume_trial(user_id: int, feature: str) -> None:
-    """
-    feature in {"ecg", "lab"}. Premium users always pass. Free users get
-    exactly TRIAL_LIMITS[feature] uses EVER (not per month) before
-    PremiumRequired is raised.
-    """
-    sub = _load(user_id)
-    if is_premium(user_id):
-        return
-
-    sub = _load(user_id)
-    if not sub["trial_used"].get(feature, False):
-        sub["trial_used"][feature] = True
-        _save(user_id, sub)
-        return
-    raise PremiumRequired(feature)
-
-
 def usage_summary(user_id: int) -> dict:
     """Free-tier usage counters plus each limit, for the 'My Plan' panel."""
     sub = _load(user_id)
     return {
         "usage": sub["usage"],
         "limits": FREE_LIMITS,
-        "trial_used": sub["trial_used"],
     }
 
 

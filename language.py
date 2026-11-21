@@ -1,12 +1,12 @@
 """
 Supported response languages for AI-generated content (chapter summaries,
-quizzes, Ask-AI answers, mnemonics, ECG/lab interpretation).
+quizzes, Ask-AI answers, mnemonics, drug answers).
 
 The chosen language reaches the user in three ways:
 
   1. AI-generated content -- every generation call threads a `language`
      parameter through to its system prompt (chapter_ai.py, quiz_ai.py,
-     pdf_qa.py, ecg_lab_ai.py, drug_qa.py).
+     pdf_qa.py, drug_qa.py, interaction_ai.py).
   2. Menu and button labels -- translated by Claude and cached per language;
      see ui_text.py.
   3. What the user TYPES -- a drug or glossary name written in their own

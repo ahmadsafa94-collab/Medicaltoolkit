@@ -45,7 +45,6 @@ _PLANS_BY_PAYLOAD = {plan["payload"]: plan for plan in PREMIUM_PLANS}
 
 class CustomerStates(StatesGroup):
     awaiting_contact_admin_message = State()
-    awaiting_lab_text = State()
     awaiting_feedback_message = State()
     awaiting_support_message = State()
 
@@ -60,20 +59,13 @@ def _plan_summary_text(user_id: int) -> str:
         until = time.strftime("%Y-%m-%d", time.gmtime(sub["premium_until"]))
         lines.append(f"Renews/expires: {until}")
         lines.append("")
-        lines.append("Unlimited summaries, quizzes, Ask-AI, ECG/lab interpretation, and Book Shelf.")
+        lines.append("Unlimited summaries, quizzes, Ask-AI, drug tools, and Book Shelf.")
     else:
         lines.append("")
         lines.append("Usage today:")
         for feature, limit in usage["limits"].items():
             used = usage["usage"].get(feature, 0)
             lines.append(f"  {subscriptions.FEATURE_LABELS[feature]}: {used}/{limit}")
-        trial_used = usage["trial_used"]
-        lines.append(
-            f"  ECG interpretation trial: {'used' if trial_used.get('ecg') else 'available'}"
-        )
-        lines.append(
-            f"  Lab interpretation trial: {'used' if trial_used.get('lab') else 'available'}"
-        )
         # Listed apart from the block above because it isn't a monthly
         # allowance: it's a standing cap on books currently on the shelf,
         # so deleting one frees a slot immediately (see subscriptions.py).
@@ -128,7 +120,7 @@ async def _send_premium_invoice(message: Message, payload: str, title: str, star
         await tg_bot.send_invoice(
             chat_id=message.chat.id,
             title=f"Medical Student Toolkit -- {title}",
-            description="Unlimited AI summaries, quizzes, Ask-AI, ECG/lab interpretation, and Book Shelf.",
+            description="Unlimited AI summaries, quizzes, Ask-AI, drug tools, and Book Shelf.",
             payload=payload,
             currency="XTR",
             prices=[LabeledPrice(label=title, amount=stars)],
@@ -493,7 +485,7 @@ async def handle_history(callback: CallbackQuery):
 async def _prompt_language(answer_fn):
     """Shared by the 🌐 Language main-menu button (bot.py) and the legacy plan:language callback below."""
     await answer_fn(
-        "🌐 Pick the language AI-generated content (summaries, quizzes, Ask-AI, ECG/lab interpretation) "
+        "🌐 Pick the language AI-generated content (summaries, quizzes, Ask-AI, drug answers) "
         "should be written in:",
         reply_markup=language.language_picker_kb(),
     )

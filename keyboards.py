@@ -61,8 +61,7 @@ def main_menu_kb(webapp_url: str = "", is_admin: bool = False, language: str | N
         splitter, notes, Ask My Books, and bookmarks.
 
     BTN_CALCULATORS has no submenu and goes straight to the calculator
-    list. ECG and lab interpretation are not here at all any more -- they
-    are in the admin panel while their accuracy is still being worked on.
+    list.
 
     BTN_SHELF ("📚 BOOK SHELF") is deliberately first and alone on its own
     row -- the closest a plain-text ReplyKeyboardMarkup button (no bold/size
@@ -389,8 +388,8 @@ def drugs_info_kb(language: str | None = None) -> InlineKeyboardMarkup:
     one door with two tabs: compare drugs, or ask about one.
 
     The calculators moved out to the top level (BTN_CALCULATORS), and ECG
-    and lab interpretation moved to the admin panel, so nothing is left
-    that "Clinical Tools" was the heading for.
+    and lab interpretation were retired, so nothing is left that "Clinical
+    Tools" was the heading for.
 
     Inline buttons are matched by callback_data, not by their caption, so
     translating these is safe with no filter changes -- unlike the reply
@@ -419,15 +418,6 @@ def study_tools_kb(language: str | None = None) -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text=ui_text.t(language, label), callback_data=cb)] for label, cb in items]
-    )
-
-
-def lab_input_mode_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="⌨️ Type values", callback_data="lab:mode:text")],
-            [InlineKeyboardButton(text="📷 Send a photo", callback_data="lab:mode:photo")],
-        ]
     )
 
 
@@ -474,29 +464,8 @@ def admin_menu_kb() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="🐞 Reported problems", callback_data="admin:reports")],
             [InlineKeyboardButton(text="🤝 Top Referrers", callback_data="admin:referrals")],
             [InlineKeyboardButton(text="📚 Book Requests", callback_data="admin:bookrequests")],
-            [InlineKeyboardButton(text="🫀 ECG Teaching Books", callback_data="admin:ecgref")],
-            # ECG and lab interpretation live here now rather than in the
-            # user menu: both are being worked on, and the admin needs to
-            # keep exercising them on real tracings and real reports to see
-            # where the reads are still wrong. Same handlers the user menu
-            # used, now admin-gated (see ecg_lab_flow).
-            [InlineKeyboardButton(text="🫀 ECG Interpretation", callback_data="study:ecg")],
-            [InlineKeyboardButton(text="🧪 Lab Interpretation", callback_data="study:lab")],
         ]
     )
-
-
-def admin_ecg_reference_kb(books: list[dict]) -> InlineKeyboardMarkup:
-    """
-    The 🫀 ECG Teaching Books view: add a book, or remove one of the books
-    currently grounding every ECG interpretation (see ecg_reference.py).
-    """
-    rows = [[InlineKeyboardButton(text="➕ Add a teaching book", callback_data="admin:ecgrefadd")]]
-    for book in books:
-        rows.append(
-            [InlineKeyboardButton(text=f"🗑 Remove: {book['title'][:40]}", callback_data=f"admin:ecgrefdel:{book['ref_id']}")]
-        )
-    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def book_request_offer_kb(request_id: str, price_usd: float, stars: int) -> InlineKeyboardMarkup:
@@ -645,7 +614,5 @@ def admin_test_menu_kb() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="📝 Chapter summary", callback_data="admin:testrun:summary")],
             [InlineKeyboardButton(text="❓ Chapter quiz", callback_data="admin:testrun:quiz")],
             [InlineKeyboardButton(text="🧠 Mnemonics", callback_data="admin:testrun:mnemonics")],
-            [InlineKeyboardButton(text="🧪 Lab interpretation", callback_data="admin:testrun:lab")],
-            [InlineKeyboardButton(text="🫀 ECG vision call", callback_data="admin:testrun:ecg")],
         ]
     )
