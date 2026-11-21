@@ -54,7 +54,12 @@ def _validate_number(value, name: str, low: float, high: float) -> float:
 
 
 def validate_age(age) -> float:
-    return _validate_number(age, "Age", 0, 120)
+    # CKD-EPI 2021 and Cockcroft-Gault are adult equations; a child's age
+    # used to be accepted and produced a confident, meaningless number.
+    value = _validate_number(age, "Age", 0, 120)
+    if value < 18:
+        raise RenalInputError("eGFR (CKD-EPI) and CrCl (Cockcroft-Gault) are adult equations (age 18+). For children use a pediatric equation such as bedside Schwartz.")
+    return value
 
 
 def validate_weight_kg(weight) -> float:

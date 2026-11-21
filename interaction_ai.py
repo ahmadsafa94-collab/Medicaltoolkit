@@ -117,6 +117,9 @@ def analyze_interactions(drugs: list[dict], language: str = "English") -> str:
     try:
         response = client.messages.create(
             model=CLAUDE_MODEL,
+            # Sonnet 5 thinks by default when this is omitted, and thinking
+            # tokens count against max_tokens -- which is sized for the answer.
+            thinking={"type": "disabled"},
             max_tokens=1500,
             system=system_prompt,
             messages=[{"role": "user", "content": f"Analyze possible interactions among: {names}"}],

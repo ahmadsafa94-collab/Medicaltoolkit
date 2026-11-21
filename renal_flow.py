@@ -34,7 +34,7 @@ import renal_calc
 import session_cache
 from drug_lookup import find_renal_relevant_content
 from keyboards import renal_mode_kb, renal_sex_kb, renal_unit_kb, renal_cancel_kb
-from telegram_helpers import send_long_text, send_table_entries
+from telegram_helpers import md_bold, send_long_text, send_table_entries
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +99,7 @@ async def handle_renal_start(callback: CallbackQuery, state: FSMContext):
     await state.update_data(cache_id=cache_id, drug_name=sections.get("_name", "this drug"))
 
     await callback.message.answer(
-        f"How would you like to provide renal function for *{sections.get('_name', 'this drug')}*?\n\n"
+        f"How would you like to provide renal function for *{md_bold(sections.get('_name', 'this drug'))}*?\n\n"
         "eGFR and CrCl are different measurements (CrCl needs weight, eGFR doesn't) -- "
         "pick whichever matches what you have, or have me calculate one.",
         parse_mode="Markdown",
@@ -200,7 +200,10 @@ async def handle_renal_age(message: Message, state: FSMContext):
     await message.answer("Sex? (this is a required input to the formula itself)", reply_markup=renal_sex_kb())
 
 
-@router.callback_query(F.data.startswith("rc:sex:"))
+# Each step's buttons only act in that step's state. Unfiltered, an old
+# "Male" or "mg/dL" button tapped out of order skipped the age prompt and
+# crashed later with KeyError 'age'.
+@router.callback_query(F.data.startswith("rc:sex:"), RenalCalcStates.choosing_sex)
 async def handle_renal_sex(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     data = await _require_flow_data(callback, state)
@@ -237,7 +240,7 @@ async def handle_renal_weight(message: Message, state: FSMContext):
     await message.answer("What unit is the serum creatinine value in?", reply_markup=renal_unit_kb())
 
 
-@router.callback_query(F.data.startswith("rc:unit:"))
+@router.callback_query(F.data.startswith("rc:unit:"), RenalCalcStates.choosing_creatinine_unit)
 async def handle_renal_unit(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     data = await _require_flow_data(callback, state)
@@ -252,6 +255,11 @@ async def handle_renal_unit(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer(
         f"Enter the serum creatinine value ({unit_label}):", reply_markup=renal_cancel_kb()
     )
+
+
+@router.callback_query(F.data.startswith("rc:sex:") | F.data.startswith("rc:unit:"))
+async def handle_renal_stale_button(callback: CallbackQuery):
+    await callback.answer("That button is from an earlier step. Please continue from the latest message.", show_alert=True)
 
 
 @router.message(RenalCalcStates.entering_creatinine, _NOT_A_COMMAND)

@@ -43,7 +43,7 @@ import session_cache
 import subscriptions
 from config import QA_INDEXING_TIMEOUT_SECONDS
 from keyboards import cancel_kb, book_picker_kb
-from telegram_helpers import send_long_text
+from telegram_helpers import md_bold, send_long_text
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +107,7 @@ async def handle_book_pick(callback: CallbackQuery, state: FSMContext):
     await state.update_data(book_id=book_id, title=book["title"])
     await callback.answer()
     await callback.message.answer(
-        f"📖 Ask a question about *{book['title']}*:", parse_mode="Markdown", reply_markup=cancel_kb()
+        f"📖 Ask a question about *{md_bold(book['title'])}*:", parse_mode="Markdown", reply_markup=cancel_kb()
     )
 
 
@@ -145,10 +145,9 @@ async def handle_book_question(message: Message, state: FSMContext):
         subscriptions.refund(message.from_user.id, "questions")
         await status_msg.edit_text("That took too long and wasn't counted. Please try again.")
         return
-    except pdf_qa.IndexingError:
-        logger.exception("Book Q&A could not use the index for book_id=%s", book_id)
+    except pdf_qa.IndexingError as e:
         subscriptions.refund(message.from_user.id, "questions")
-        await status_msg.edit_text("Couldn't search this book just now (not counted). Please try again.")
+        await status_msg.edit_text(f"{e} (Not counted.)")
         return
     except Exception:
         logger.exception("Book Q&A failed for book_id=%s", book_id)
@@ -226,7 +225,7 @@ async def handle_index_request(callback: CallbackQuery):
     library.mark_indexed(user_id, book_id, num_chunks)
 
     await status_msg.edit_text(
-        f"✅ *{book['title']}* is ready ({num_chunks} passages indexed). "
+        f"✅ *{md_bold(book['title'])}* is ready ({num_chunks} passages indexed). "
         f"Use /ask or 💬 Ask My Books to ask it a question.",
         parse_mode="Markdown",
     )

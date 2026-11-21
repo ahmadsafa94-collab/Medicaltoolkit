@@ -77,7 +77,7 @@ from keyboards import (
     BTN_FEEDBACK,
     BTN_SUPPORT,
 )
-from telegram_helpers import send_long_text, send_documents_safely, send_table_entries
+from telegram_helpers import md, md_bold, send_long_text, send_documents_safely, send_table_entries
 from renal_flow import register_renal_handlers
 from calc_flow import register_calc_handlers, cmd_calculators
 from interaction_flow import register_interaction_handlers, cmd_interactions
@@ -108,6 +108,31 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 dp = Dispatcher()
+
+
+@dp.update.outer_middleware()
+async def _block_gate(handler, event, data):
+    """
+    Enforce the admin panel's 🚫 Block. It used to set a flag nothing ever
+    read, so a blocked user kept full use of the bot. A blocked user's
+    updates are dropped here, before any handler runs; a button tap is
+    still answered (otherwise Telegram shows a spinner indefinitely) and a
+    checkout is refused so no payment can go through. Admins are never
+    blocked, so an accidental self-block can't lock anyone out of /admin.
+    """
+    user = data.get("event_from_user")
+    if user is None or subscriptions.is_admin(user.id) or not subscriptions.is_blocked(user.id):
+        return await handler(event, data)
+    try:
+        if event.callback_query is not None:
+            await event.callback_query.answer("Your access to this bot has been suspended.", show_alert=True)
+        elif event.pre_checkout_query is not None:
+            await event.pre_checkout_query.answer(ok=False, error_message="Your access to this bot has been suspended.")
+        elif event.message is not None and event.message.text and event.message.text.startswith("/start"):
+            await event.message.answer("Your access to this bot has been suspended.")
+    except Exception:
+        logger.exception("Couldn't notify blocked user %s", user.id)
+    return None
 
 # Everything the user sees leaves in their chosen language -- one
 # interception point rather than a translate() call at hundreds of send
@@ -308,6 +333,7 @@ async def cmd_help(message: Message):
         "/feedback - report a problem or give feedback; goes straight to the admin "
         "(same as the 🐞 Report a problem / Give Feedback button in the menu below).\n\n"
         "/support - get help directly from the admin (same as the 🆘 Support button in the menu below).\n\n"
+        "/paysupport - help with a payment or a refund request. /terms - terms of service.\n\n"
         "💊 Drugs Info (menu button) - AI-checked drug interactions, and Drug LookUp for asking "
         "anything about a drug, answered from its FDA label.\n\n"
         "🧮 Calculators (menu button) - the clinical calculators.\n\n"
@@ -534,7 +560,7 @@ async def _show_dose_menu(edit_fn, sections: dict, drug_name: str, user_id: int 
             # should never take down the lookup the user actually asked for.
             logger.exception("Failed to record recent lookup for user %s", user_id)
 
-    menu_text = f"💊 *{name}* — found {len(sections_present)} section(s). Tap what you need:"
+    menu_text = f"💊 *{md_bold(name)}* — found {len(sections_present)} section(s). Tap what you need:"
     try:
         await edit_fn(
             menu_text, parse_mode="Markdown", reply_markup=drug_sections_kb(cache_id, sections_present)
@@ -828,7 +854,7 @@ async def cmd_glossary(message: Message):
             return
         t, c, d = glossary.lookup_term(resolved)
         await message.answer(
-            f"Showing *{t}* -- the closest glossary entry to \"{term}\".",
+            f"Showing *{md_bold(t)}* -- the closest glossary entry to \"{md(term)}\".",
             parse_mode="Markdown",
         )
 

@@ -108,9 +108,14 @@ async def _api_error_handler(request: Request, exc: HTTPException):
 def require_user(request: Request) -> dict:
     init_data = request.headers.get("x-telegram-init-data", "")
     try:
-        return validate_init_data(init_data)
+        user = validate_init_data(init_data)
     except AuthError as e:
         raise ApiError(status_code=401, detail=str(e))
+    # Same gate as the bot's _block_gate middleware: a blocked user must not
+    # keep using the mini app (which calls the same paid AI features).
+    if not subscriptions.is_admin(user["id"]) and subscriptions.is_blocked(user["id"]):
+        raise ApiError(status_code=403, detail="Your access to this bot has been suspended.")
+    return user
 
 
 # ---------------------------------------------------------------------------
@@ -833,9 +838,10 @@ async def ask_book(request: Request):
         raise ApiError(status_code=402, detail=str(e))
     except asyncio.TimeoutError:
         raise ApiError(status_code=504, detail="That took too long and wasn't counted. Please try again.")
-    except pdf_qa.IndexingError:
-        logger.exception("Book Q&A could not use the index for book_id=%s", book_id)
-        raise ApiError(status_code=500, detail="Couldn't search this book just now (not counted). Please try again.")
+    except pdf_qa.IndexingError as e:
+        # pdf_qa's own messages are written for users (not indexed yet,
+        # search service down); the metered block has already refunded.
+        raise ApiError(status_code=409, detail=f"{e} (Not counted.)")
     except ApiError:
         raise
     except Exception:

@@ -31,6 +31,7 @@ import anki_export
 import chapter_ai
 import flashcards
 import library
+from telegram_helpers import md_bold
 import subscriptions
 from config import FLASHCARD_GENERATION_TIMEOUT_SECONDS
 from keyboards import (
@@ -71,7 +72,7 @@ async def _send_book_menu(answer_fn, user_id: int, book_id: str, book_title: str
     deck = flashcards.get_deck(user_id, book_id)
     chapter_breakdown = flashcards.chapter_breakdown(user_id, book_id)
     await answer_fn(
-        f"📖 *{book_title}*\n\nCards in deck: {len(deck)}",
+        f"📖 *{md_bold(book_title)}*\n\nCards in deck: {len(deck)}",
         parse_mode="Markdown",
         reply_markup=flashcard_book_menu_kb(
             book_id,
@@ -354,7 +355,7 @@ async def handle_chapter_filter_pick(callback: CallbackQuery):
 
 
 async def _show_current_card(answer_fn, user_id: int, book_id: str, card: dict):
-    await answer_fn(f"🗂 *{card['front']}*", parse_mode="Markdown", reply_markup=flashcard_reveal_kb())
+    await answer_fn(f"🗂 *{md_bold(card['front'])}*", parse_mode="Markdown", reply_markup=flashcard_reveal_kb())
 
 
 @router.callback_query(F.data == "flash:reveal", FlashcardStates.reviewing)

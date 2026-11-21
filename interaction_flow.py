@@ -36,7 +36,7 @@ import interaction_ai
 import subscriptions
 from drug_lookup import lookup_drug, DrugNotFoundError, DrugLookupRateLimitedError
 from keyboards import interaction_menu_kb, interaction_confirm_kb
-from telegram_helpers import send_long_text
+from telegram_helpers import md_bold, send_long_text
 
 logger = logging.getLogger(__name__)
 
@@ -263,7 +263,7 @@ async def handle_ix_add_drug(message: Message, state: FSMContext):
             }
         )
         await status_msg.edit_text(
-            f"Did you mean *{candidate_name}*?", parse_mode="Markdown", reply_markup=interaction_confirm_kb()
+            f"Did you mean *{md_bold(candidate_name)}*?", parse_mode="Markdown", reply_markup=interaction_confirm_kb()
         )
         return
     except Exception:

@@ -445,6 +445,7 @@ def my_plan_kb(is_premium: bool, plans: list[dict]) -> InlineKeyboardMarkup:
     # history keeps working instead of going silently dead.
     rows.append([InlineKeyboardButton(text="🤝 Affiliate Program", callback_data="plan:referral")])
     rows.append([InlineKeyboardButton(text="🧾 Payment history", callback_data="plan:history")])
+    rows.append([InlineKeyboardButton(text="🆘 Payment help / refunds", callback_data="plan:paysupport")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

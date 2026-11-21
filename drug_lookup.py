@@ -16,6 +16,8 @@ import urllib.parse
 
 import httpx
 
+from config import OPENFDA_API_KEY
+
 logger = logging.getLogger(__name__)
 
 OPENFDA_LABEL_URL = "https://api.fda.gov/drug/label.json"
@@ -49,6 +51,13 @@ MAX_CHARS_PER_BULLET = 600  # safety net only, for pathologically long single se
 
 class DrugNotFoundError(Exception):
     pass
+
+
+def _with_key(url: str) -> str:
+    """Append the openFDA API key, when one is configured (config.OPENFDA_API_KEY)."""
+    if not OPENFDA_API_KEY:
+        return url
+    return f"{url}&api_key={urllib.parse.quote(OPENFDA_API_KEY)}"
 
 
 class DrugLookupRateLimitedError(Exception):
@@ -338,6 +347,7 @@ async def _fetch_label_record(drug_name: str, retries: int = 1) -> dict | None:
             params = {"search": query, "limit": _CANDIDATE_LIMIT}
             url = f"{OPENFDA_LABEL_URL}?{urllib.parse.urlencode(params)}"
             logger.info("openFDA lookup attempt %d for '%s': %s", query_index, drug_name, url)
+            url = _with_key(url)  # after logging, so the key never reaches the logs
 
             for attempt in range(retries + 1):
                 try:
@@ -360,7 +370,7 @@ async def _fetch_label_record(drug_name: str, retries: int = 1) -> dict | None:
                         await asyncio.sleep(2)
                         continue
                     raise DrugLookupRateLimitedError(
-                        "openFDA rate limit reached. Wait a few seconds and try again."
+                        "The FDA drug database is busy right now. Please try again in a few minutes."
                     )
                 if response.status_code != 200:
                     logger.warning("openFDA unexpected status %s: %s", response.status_code, response.text[:300])

@@ -66,7 +66,8 @@ def extract_chapter_text(pdf_path: str, max_chars: int = MAX_CHARS_PER_CHAPTER) 
                 text = page.extract_text() or ""
                 parts.append(text)
     except Exception as e:
-        raise ChapterAIError(f"Couldn't read text from this chapter's PDF: {e}")
+        logger.warning("PDF text extraction failed: %s", e)
+        raise ChapterAIError("Couldn't read text from this chapter's PDF. The file may be damaged or scanned.")
 
     full_text = re.sub(r"\n{3,}", "\n\n", "\n".join(parts)).strip()
     if not full_text:
@@ -101,7 +102,8 @@ def extract_text_for_page_range(
                 text = page.extract_text() or ""
                 parts.append(text)
     except Exception as e:
-        raise ChapterAIError(f"Couldn't read text for this chapter: {e}")
+        logger.warning("PDF text extraction failed: %s", e)
+        raise ChapterAIError("Couldn't read text for this chapter. The file may be damaged or scanned.")
 
     full_text = re.sub(r"\n{3,}", "\n\n", "\n".join(parts)).strip()
     if not full_text:
@@ -117,6 +119,9 @@ def _call_claude(system_prompt: str, user_content: str, max_tokens: int, feature
     """Synchronous call (the anthropic SDK's default client is sync) -- callers run this via asyncio.to_thread."""
     response = client.messages.create(
         model=CLAUDE_MODEL,
+        # Sonnet 5 thinks by default when this is omitted, and thinking
+        # tokens count against max_tokens -- which is sized for the answer.
+        thinking={"type": "disabled"},
         max_tokens=max_tokens,
         system=system_prompt,
         messages=[{"role": "user", "content": user_content}],
@@ -142,7 +147,8 @@ def summarize_chapter(title: str, text: str, truncated: bool, language: str = "E
     try:
         summary = _call_claude(system_prompt, f"Chapter title: {title}\n\n{text}", max_tokens=2000, feature="chapter_summary")
     except Exception as e:
-        raise ChapterAIError(f"The AI request failed: {e}")
+        logger.warning("AI request failed: %s", e)
+        raise ChapterAIError("The AI service didn't respond properly. Please try again in a moment.")
 
     note = "\n\n_(Note: this chapter was long, so the summary is based on its first portion only.)_" if truncated else ""
     return summary + note
@@ -186,7 +192,8 @@ def summarize_chapter_full(title: str, text: str, hard_truncated: bool = False, 
             try:
                 part_notes.append(_call_claude(part_prompt, chunk, max_tokens=1200, feature="chapter_summary"))
             except Exception as e:
-                raise ChapterAIError(f"The AI request failed summarizing part {i + 1}/{len(chunks)}: {e}")
+                logger.warning("AI request failed: %s", e)
+                raise ChapterAIError("The AI service didn't respond properly. Please try again in a moment.")
 
         combined = "\n\n".join(f"[Part {i + 1} of {len(chunks)}]\n{notes}" for i, notes in enumerate(part_notes))
         reduce_prompt = (
@@ -200,7 +207,8 @@ def summarize_chapter_full(title: str, text: str, hard_truncated: bool = False, 
         try:
             summary = _call_claude(reduce_prompt, combined, max_tokens=2200, feature="chapter_summary")
         except Exception as e:
-            raise ChapterAIError(f"The AI request failed combining chapter parts: {e}")
+            logger.warning("AI request failed: %s", e)
+            raise ChapterAIError("The AI service didn't respond properly. Please try again in a moment.")
 
     if hard_truncated:
         summary += (
@@ -223,7 +231,8 @@ def quiz_chapter(title: str, text: str, truncated: bool, num_questions: int = 5,
     try:
         quiz = _call_claude(system_prompt, f"Chapter title: {title}\n\n{text}", max_tokens=2500, feature="chapter_quiz")
     except Exception as e:
-        raise ChapterAIError(f"The AI request failed: {e}")
+        logger.warning("AI request failed: %s", e)
+        raise ChapterAIError("The AI service didn't respond properly. Please try again in a moment.")
 
     note = "\n\n_(Note: this chapter was long, so questions are based on its first portion only.)_" if truncated else ""
     return quiz + note
@@ -248,7 +257,8 @@ def generate_mnemonics(title: str, text: str, language: str = "English") -> str:
     try:
         return _call_claude(system_prompt, f"Chapter title: {title}\n\n{text}", max_tokens=1500, feature="mnemonics")
     except Exception as e:
-        raise ChapterAIError(f"The AI request failed: {e}")
+        logger.warning("AI request failed: %s", e)
+        raise ChapterAIError("The AI service didn't respond properly. Please try again in a moment.")
 
 
 MAX_CARDS_PER_GENERATION = 50
@@ -315,11 +325,13 @@ def generate_flashcards(
             # MAX_CARDS_PER_GENERATION, same headroom quiz_ai.generate_quiz
             # uses for its own MAX_QUESTIONS.
             max_tokens=min(150 * num_cards + 400, 8000),
+            thinking={"type": "disabled"},  # see _call_claude: thinking would eat this budget
             system=system_prompt,
             messages=[{"role": "user", "content": f"Chapter title: {title}\n\n{text}"}],
         )
     except Exception as e:
-        raise ChapterAIError(f"The AI request failed: {e}")
+        logger.warning("AI request failed: %s", e)
+        raise ChapterAIError("The AI service didn't respond properly. Please try again in a moment.")
 
     try:
         cost_ledger.record_claude_response("flashcards", response)
@@ -332,7 +344,8 @@ def generate_flashcards(
     try:
         cards = json.loads(raw)
     except json.JSONDecodeError as e:
-        raise ChapterAIError(f"Could not read the AI's flashcard response: {e}\nRaw: {raw[:500]}")
+        logger.warning("Unparseable AI reply: %s; raw=%r", e, raw[:500])
+        raise ChapterAIError("The AI's reply came back in an unreadable format. Please try again.")
 
     if not isinstance(cards, list) or not cards:
         raise ChapterAIError("The AI returned no flashcards.")
@@ -473,4 +486,5 @@ def summarize_whole_book(title: str, pdf_path: str, chapters: list[dict], progre
     try:
         return _call_claude(system_prompt, combined, max_tokens=2500, feature="book_summary")
     except Exception as e:
-        raise ChapterAIError(f"The AI request failed: {e}")
+        logger.warning("AI request failed: %s", e)
+        raise ChapterAIError("The AI service didn't respond properly. Please try again in a moment.")

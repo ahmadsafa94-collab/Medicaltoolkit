@@ -342,7 +342,7 @@ def answer_question(
 
     try:
         response = client.messages.create(
-            model=CLAUDE_MODEL, max_tokens=1200, system=system_prompt, messages=messages
+            model=CLAUDE_MODEL, max_tokens=1200, thinking={"type": "disabled"}, system=system_prompt, messages=messages
         )
     except Exception:
         logger.exception("AI request failed")

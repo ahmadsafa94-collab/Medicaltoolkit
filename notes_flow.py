@@ -6,6 +6,7 @@ call involved anywhere in this module.
 
 import logging
 
+from telegram_helpers import md, md_bold
 from keyboards import cancel_kb
 import re
 
@@ -64,13 +65,13 @@ async def handle_pick_book(callback: CallbackQuery):
 
     book_notes = notes.list_notes(user_id, book_id)
     if not book_notes:
-        text = f"📓 *{book['title']}*\n\nNo notes yet."
+        text = f"📓 *{md_bold(book['title'])}*\n\nNo notes yet."
     else:
-        lines = [f"📓 *{book['title']}*", ""]
+        lines = [f"📓 *{md_bold(book['title'])}*", ""]
         for n in book_notes[:20]:
             page_label = f"p.{n['page']}" if n.get("page") else "(no page)"
             preview = n["text"][:200]
-            lines.append(f"*{page_label}*: {preview}")
+            lines.append(f"*{page_label}*: {md(preview)}")
             lines.append("")
         text = "\n".join(lines)
 

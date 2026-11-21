@@ -42,12 +42,16 @@ def _ask(system_prompt: str, user_text: str, feature: str, max_tokens: int) -> s
     try:
         response = client.messages.create(
             model=CLAUDE_MODEL,
+            # Sonnet 5 thinks by default when this is omitted, and thinking
+            # tokens count against max_tokens -- which is sized for the answer.
+            thinking={"type": "disabled"},
             max_tokens=max_tokens,
             system=system_prompt,
             messages=[{"role": "user", "content": user_text.strip()}],
         )
     except Exception as e:
-        raise NameResolverError(f"The AI request failed: {e}")
+        logger.warning("AI request failed: %s", e)
+        raise NameResolverError("The AI service didn't respond properly. Please try again in a moment.")
 
     try:
         cost_ledger.record_claude_response(feature, response)

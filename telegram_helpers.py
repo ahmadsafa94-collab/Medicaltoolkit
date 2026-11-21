@@ -9,12 +9,33 @@ route-registration modules.
 
 import asyncio
 import logging
+import re
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter, TelegramAPIError
 from aiogram.types import Message, FSInputFile, BufferedInputFile
 
 from table_image import render_table_image
+
+
+def md(text) -> str:
+    """
+    Escape a value for Telegram's legacy Markdown, for use OUTSIDE an entity
+    (not between *...* or _..._). A stray "_" or "*" from a filename, a
+    referral link or a note made Telegram reject the whole message.
+    """
+    return re.sub(r"([_*`\[])", r"\\\1", str(text))
+
+
+def md_bold(text) -> str:
+    """
+    A value to place INSIDE *...*. Legacy Markdown reads everything inside
+    an entity literally up to the closing "*" -- a backslash escape would
+    be shown as a backslash -- so the only thing that can break it is a "*"
+    in the value itself, which is swapped for a look-alike.
+    """
+    return str(text).replace("*", "∗")
+
 
 logger = logging.getLogger(__name__)
 

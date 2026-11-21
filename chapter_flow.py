@@ -3,23 +3,28 @@ Callback handlers for the "📝 Summarize" / "❓ Quiz me" buttons attached to
 each split chapter document (see bot.py's handle_pdf_upload and
 telegram_helpers.send_documents_safely).
 
-The chapter's extracted text is cached (via session_cache, same TTL-limited
-in-memory cache /dose uses for section buttons) at send time, BEFORE the
+The chapter's extracted text is stored on disk for 30 days (see
+_store_chapter) at send time, BEFORE the
 split chapter PDF file gets deleted from disk in bot.py's cleanup step --
 these handlers only ever read from that cache, never from the filesystem,
 since the file is long gone by the time a button is actually tapped.
 """
 
 import asyncio
+import json
 import logging
+import os
+import secrets
+import tempfile
+import time
 
 from aiogram import Router, F
 from aiogram.types import CallbackQuery
 
 import ui_text
 import chapter_ai
-import session_cache
 import subscriptions
+from config import STORAGE_DIR
 from keyboards import chapter_ai_kb
 from telegram_helpers import send_long_text
 
@@ -65,8 +70,56 @@ async def build_chapter_ai_kb(chapter: dict, path: str):
         logger.info("No extractable text for chapter '%s' -- sending without AI buttons", chapter.get("title"))
         return None
 
-    cache_id = session_cache.put({"title": chapter["title"], "text": text, "hard_truncated": hard_truncated})
+    cache_id = await asyncio.to_thread(_store_chapter, chapter["title"], text, hard_truncated)
     return chapter_ai_kb(cache_id)
+
+
+# Chapter text behind the Summarize/Quiz/Mnemonics buttons, on disk. It
+# used to live in session_cache (memory, 500 entries shared by every user,
+# 30 minutes, gone on each restart/redeploy), so the buttons under a
+# chapter sent this morning said "expired, re-upload" by lunch -- and the
+# cache held up to 500 x 400k characters in RAM.
+_CHAPTER_TEXT_DIR = os.path.join(STORAGE_DIR, "_chapter_text")
+_CHAPTER_TEXT_TTL_SECONDS = 30 * 86400
+_last_prune = 0.0
+
+
+def _store_chapter(title: str, text: str, hard_truncated: bool) -> str:
+    global _last_prune
+    os.makedirs(_CHAPTER_TEXT_DIR, exist_ok=True)
+    cache_id = secrets.token_hex(8)  # fits Telegram's 64-byte callback_data with room to spare
+    fd, tmp = tempfile.mkstemp(dir=_CHAPTER_TEXT_DIR, suffix=".tmp")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump({"title": title, "text": text, "hard_truncated": hard_truncated}, f)
+    os.replace(tmp, os.path.join(_CHAPTER_TEXT_DIR, f"{cache_id}.json"))
+    if time.time() - _last_prune > 3600:
+        _last_prune = time.time()
+        _prune_chapter_texts()
+    return cache_id
+
+
+def _prune_chapter_texts() -> None:
+    cutoff = time.time() - _CHAPTER_TEXT_TTL_SECONDS
+    try:
+        for name in os.listdir(_CHAPTER_TEXT_DIR):
+            path = os.path.join(_CHAPTER_TEXT_DIR, name)
+            try:
+                if os.path.getmtime(path) < cutoff:
+                    os.remove(path)
+            except OSError:
+                pass
+    except OSError:
+        logger.exception("Pruning stored chapter texts failed (non-fatal)")
+
+
+def _load_chapter(cache_id: str) -> dict | None:
+    if not cache_id.isalnum():  # callback data is client-controlled: never let it name a path
+        return None
+    try:
+        with open(os.path.join(_CHAPTER_TEXT_DIR, f"{cache_id}.json"), encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
 
 _AI_DISCLAIMER = (
     "\n\n⚠️ AI-generated study aid -- may contain errors or omissions. "
@@ -75,11 +128,11 @@ _AI_DISCLAIMER = (
 
 
 async def _get_chapter_entry(callback: CallbackQuery, cache_id: str) -> dict | None:
-    entry = session_cache.get(cache_id)
+    entry = await asyncio.to_thread(_load_chapter, cache_id)
     if entry is None:
         await callback.answer(
-            "This chapter's cached text has expired (or the bot restarted). "
-            "Re-upload the PDF to generate a new summary/quiz.",
+            "These buttons have expired (chapters are kept for 30 days). Open the book from 📚 Book Shelf "
+            "to summarize or quiz it again.",
             show_alert=True,
         )
         return None

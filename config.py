@@ -6,6 +6,10 @@ load_dotenv()
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 VOYAGE_API_KEY = os.environ["VOYAGE_API_KEY"]
+# Optional but strongly recommended in production: without a key openFDA
+# allows 1,000 requests/day per server IP (each drug lookup can use up to
+# 3), with one it allows 120,000. Free at https://open.fda.gov/apis/authentication/
+OPENFDA_API_KEY = os.environ.get("OPENFDA_API_KEY", "").strip()
 
 # Public HTTPS URL the Book Shelf mini app is served from, e.g.
 # "https://yourapp.herokuapp.com/webapp/" -- this is what gets registered

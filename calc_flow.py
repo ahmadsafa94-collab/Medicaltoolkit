@@ -339,13 +339,13 @@ _register(Calculator(
         YesNoField("on_dialysis", "Has the patient had >=2 dialysis sessions in the past week (or >=24h CVVHD)?"),
     ],
     compute=_compute_meld3,
-    intro="⚠️ Implemented from memory without a live reference to check -- treat as a rough estimate and verify independently.",
+    intro="MELD 3.0 (Kim et al., 2021). Study aid -- confirm against your transplant centre's calculator.",
 ))
 
 _register(Calculator(
     "cha2ds2_vasc", "CHA₂DS₂-VASc", "🩺",
     fields=[
-        NumberField("age", "Enter age in years:", cc.validate_age),
+        NumberField("age", "Enter age in years:", cc.validate_adult_age),
         _SEX_FIELD(),
         YesNoField("chf", "History of congestive heart failure / LV dysfunction?"),
         YesNoField("hypertension", "History of hypertension?"),

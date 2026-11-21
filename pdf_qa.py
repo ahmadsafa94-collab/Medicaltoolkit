@@ -144,7 +144,8 @@ async def build_index(pdf_path: str, book_id: str, title: str, progress_cb=None)
     try:
         page_texts = await asyncio.to_thread(extract_full_page_text, pdf_path)
     except Exception as e:
-        raise IndexingError(f"Couldn't read this PDF's text: {e}")
+        logger.warning("PDF text extraction failed: %s", e)
+        raise IndexingError("Couldn't read this PDF's text. The file may be damaged or scanned.")
 
     chunks = build_chunks(page_texts)
     if not chunks:
@@ -155,7 +156,8 @@ async def build_index(pdf_path: str, book_id: str, title: str, progress_cb=None)
     try:
         embeddings = await embed_texts([c["text"] for c in chunks], input_type="document")
     except Exception as e:
-        raise IndexingError(f"Voyage AI embedding request failed: {e}")
+        logger.warning("Voyage embedding request failed: %s", e)
+        raise IndexingError("The search service didn't respond properly. Please try again in a moment.")
 
     vectors = np.array(embeddings, dtype=np.float32)
     norms = np.linalg.norm(vectors, axis=1, keepdims=True)
@@ -164,9 +166,7 @@ async def build_index(pdf_path: str, book_id: str, title: str, progress_cb=None)
     vectors /= norms
 
     meta_path, vectors_path = _index_paths(book_id)
-    with open(meta_path, "w") as f:
-        json.dump({"title": title, "chunks": chunks}, f)
-    np.save(vectors_path, vectors)
+    await asyncio.to_thread(_write_index_files, meta_path, vectors_path, {"title": title, "chunks": chunks}, vectors)
 
     if progress_cb:
         await progress_cb("Done.")
@@ -183,13 +183,47 @@ def delete_index(book_id: str) -> None:
             pass
 
 
+def _write_index_files(meta_path: str, vectors_path: str, meta: dict, vectors: np.ndarray) -> None:
+    """
+    Both files are written to temp names and swapped in with os.replace.
+    They used to be written in place, so re-indexing while someone was
+    asking a question -- or a crash mid-write -- left a truncated JSON or a
+    vectors file that no longer matched the chunks (IndexError, then
+    "Something went wrong" on every question until re-indexed). Vectors go
+    in first: a reader that catches the new vectors with the old meta sees
+    the count mismatch and is rejected below rather than misreading.
+    """
+    vec_tmp = vectors_path + f".{os.getpid()}.tmp.npy"
+    meta_tmp = meta_path + f".{os.getpid()}.tmp"
+    try:
+        np.save(vec_tmp, vectors)
+        with open(meta_tmp, "w") as f:
+            json.dump(meta, f)
+        os.replace(vec_tmp, vectors_path)
+        os.replace(meta_tmp, meta_path)
+    finally:
+        for p in (vec_tmp, meta_tmp):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
+
 def load_index(book_id: str) -> tuple[dict, np.ndarray] | None:
+    """Synchronous (reads up to tens of MB) -- call via asyncio.to_thread from async code."""
     meta_path, vectors_path = _index_paths(book_id)
     if not (os.path.exists(meta_path) and os.path.exists(vectors_path)):
         return None
-    with open(meta_path) as f:
-        meta = json.load(f)
-    vectors = np.load(vectors_path)
+    try:
+        with open(meta_path) as f:
+            meta = json.load(f)
+        vectors = np.load(vectors_path)
+    except (OSError, ValueError):
+        logger.exception("Q&A index for %s is unreadable", book_id)
+        return None
+    if len(meta.get("chunks", [])) != len(vectors):
+        logger.warning("Q&A index for %s is inconsistent (%d chunks, %d vectors)", book_id, len(meta.get("chunks", [])), len(vectors))
+        return None
     return meta, vectors
 
 
@@ -260,6 +294,9 @@ async def translate_question_for_search(question: str, language: str) -> str:
         response = await asyncio.to_thread(
             claude_client.messages.create,
             model=CLAUDE_MODEL,
+            # Sonnet 5 thinks by default when this is omitted, and thinking
+            # tokens count against max_tokens -- which is sized for the answer.
+            thinking={"type": "disabled"},
             max_tokens=300,
             system=(
                 "Translate the user's question into English. It will be used as a search query over an "
@@ -345,9 +382,9 @@ async def answer_question(
     back multiple excerpts and one excerpt is only ever excerpt N once).
     Raises IndexingError if the book hasn't been indexed.
     """
-    loaded = load_index(book_id)
+    loaded = await asyncio.to_thread(load_index, book_id)  # off the event loop: it can be tens of MB
     if loaded is None:
-        raise IndexingError("This book hasn't been indexed yet. Process it and tap 'Make searchable' first.")
+        raise IndexingError("This book hasn't been indexed yet (or its index needs rebuilding). Tap 'Make searchable' to index it.")
     meta, vectors = loaded
 
     if not question.strip():
@@ -437,12 +474,16 @@ async def answer_question(
         response = await asyncio.to_thread(
             claude_client.messages.create,
             model=CLAUDE_MODEL,
+            # Sonnet 5 thinks by default when this is omitted, and thinking
+            # tokens count against max_tokens -- which is sized for the answer.
+            thinking={"type": "disabled"},
             max_tokens=1500,
             system=system_prompt,
             messages=messages,
         )
     except Exception as e:
-        raise IndexingError(f"The AI request failed: {e}")
+        logger.warning("AI request failed: %s", e)
+        raise IndexingError("The AI service didn't respond properly. Please try again in a moment.")
 
     try:
         cost_ledger.record_claude_response("ask_ai", response)

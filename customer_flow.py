@@ -26,6 +26,7 @@ import admin_log
 import book_requests
 import language
 import library
+from telegram_helpers import md
 import subscriptions
 import ui_text
 from config import (
@@ -608,6 +609,13 @@ async def cmd_pay_support(message: Message, state: FSMContext):
     )
 
 
+@router.callback_query(F.data == "plan:paysupport")
+async def handle_plan_paysupport(callback: CallbackQuery, state: FSMContext):
+    """⭐ My Plan's "🆘 Payment help / refunds" button -- same flow as /paysupport."""
+    await callback.answer()
+    await cmd_pay_support(callback.message, state)
+
+
 @router.message(Command("cancel"), CustomerStates.awaiting_paysupport_message)
 async def handle_pay_support_cancel(message: Message, state: FSMContext):
     await state.clear()
@@ -758,7 +766,7 @@ async def handle_referral(callback: CallbackQuery):
     stats = subscriptions.get_referral_stats(user_id)
     await callback.message.answer(
         "🤝 *Affiliate Program*\n\n"
-        f"Share your link: {link}\n\n"
+        f"Share your link: {md(link)}\n\n"
         f"Every friend who signs up through it and becomes Premium for the first time earns you BOTH "
         f"{REFERRAL_BONUS_DAYS} free days of Premium -- no limit on how many times this can happen, so "
         "the more people you bring in, the more free Premium you build up.\n\n"
@@ -787,7 +795,7 @@ async def handle_history(callback: CallbackQuery):
         elif source.startswith("bookreq_"):
             lines.append(f"{when} -- {p['stars']} Stars (requested book)")
         else:
-            lines.append(f"{when} -- {p['stars']} Stars ({p['days']} days, {source})")
+            lines.append(f"{when} -- {p['stars']} Stars ({p['days']} days, {md(source)})")
     await callback.message.answer("\n".join(lines), parse_mode="Markdown")
 
 

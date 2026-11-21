@@ -101,6 +101,14 @@ def validate_age(v) -> float:
     return _num(v, "Age", 0, 120)
 
 
+def validate_adult_age(v) -> float:
+    """For adult-only scores (CHA2DS2-VASc): a child's age would silently produce a meaningless score."""
+    age = _num(v, "Age", 0, 120)
+    if age < 18:
+        raise CalcInputError("This score is validated for adults (18+) only.")
+    return age
+
+
 # ---------------------------------------------------------------------------
 # BMI + BSA
 # ---------------------------------------------------------------------------
@@ -247,10 +255,10 @@ def calculate_meld3(
     on_dialysis: bool,
 ) -> float:
     """
-    MELD 3.0 (Kim WR et al., Gastroenterology 2021). See module docstring --
-    this is the one formula here to independently verify before relying on
-    it; it was implemented from recollection of a newer, more complex
-    formula without being able to check a live source.
+    MELD 3.0 (Kim WR et al., Gastroenterology 2021): bounds (bilirubin and
+    INR floor 1.0, creatinine 1.0-3.0 and 3.0 on dialysis, sodium 125-137,
+    albumin 1.5-3.5) and coefficients checked against the published
+    formula.
     """
     bilirubin = max(bilirubin_mgdl, 1.0)
     inr_v = max(inr, 1.0)

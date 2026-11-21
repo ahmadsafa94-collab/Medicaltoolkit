@@ -120,6 +120,9 @@ def answer_question(
     try:
         response = client.messages.create(
             model=CLAUDE_MODEL,
+            # Sonnet 5 thinks by default when this is omitted, and thinking
+            # tokens count against max_tokens -- which is sized for the answer.
+            thinking={"type": "disabled"},
             max_tokens=1200,
             system=system_prompt,
             messages=messages,

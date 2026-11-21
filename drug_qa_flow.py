@@ -42,7 +42,7 @@ import session_cache
 import subscriptions
 from drug_lookup import lookup_drug, DrugNotFoundError, DrugLookupRateLimitedError
 from keyboards import cancel_kb, drug_suggestion_kb
-from telegram_helpers import send_long_text
+from telegram_helpers import md_bold, send_long_text
 
 logger = logging.getLogger(__name__)
 
@@ -200,7 +200,7 @@ async def handle_ask_from_dose_lookup(callback: CallbackQuery, state: FSMContext
     await state.set_state(DrugQAStates.awaiting_question)
     await state.update_data(drug_name=name, sections=sections, history=[])
     await callback.message.answer(
-        f"💊 Ask a question about *{name}*:", parse_mode="Markdown", reply_markup=cancel_kb()
+        f"💊 Ask a question about *{md_bold(name)}*:", parse_mode="Markdown", reply_markup=cancel_kb()
     )
 
 

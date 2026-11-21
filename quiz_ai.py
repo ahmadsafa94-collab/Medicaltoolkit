@@ -104,12 +104,16 @@ def generate_quiz(
     try:
         response = client.messages.create(
             model=CLAUDE_MODEL,
+            # Sonnet 5 thinks by default when this is omitted, and thinking
+            # tokens count against max_tokens -- which is sized for the answer.
+            thinking={"type": "disabled"},
             max_tokens=min(300 * num_questions + 500, 8000),
             system=system_prompt,
             messages=[{"role": "user", "content": context}],
         )
     except Exception as e:
-        raise QuizError(f"The AI request failed: {e}")
+        logger.warning("AI request failed: %s", e)
+        raise QuizError("The AI service didn't respond properly. Please try again in a moment.")
 
     try:
         cost_ledger.record_claude_response("quiz", response)
@@ -122,21 +126,25 @@ def generate_quiz(
     try:
         questions = json.loads(raw)
     except json.JSONDecodeError as e:
-        raise QuizError(f"Could not read the AI's response: {e}\nRaw: {raw[:500]}")
+        logger.warning("Unparseable AI reply: %s; raw=%r", e, raw[:500])
+        raise QuizError("The AI's reply came back in an unreadable format. Please try again.")
 
     if not isinstance(questions, list) or not questions:
         raise QuizError("The AI returned no questions.")
 
+    # A single malformed entry used to reject the whole quiz (and, before
+    # refunds, cost the user a quiz). Bad entries are now skipped; the quiz
+    # only fails if fewer than half of the requested questions survive.
     validated = []
     for q in questions:
-        if not isinstance(q, dict) or "question" not in q or "options" not in q or "correct_index" not in q:
-            raise QuizError(f"Malformed question entry: {q}")
-        options = q["options"]
+        if not isinstance(q, dict) or "question" not in q or "correct_index" not in q:
+            continue
+        options = q.get("options")
         if not isinstance(options, list) or len(options) != 4:
-            raise QuizError(f"Question does not have exactly 4 options: {q}")
+            continue
         ci = q["correct_index"]
         if isinstance(ci, bool) or not isinstance(ci, int) or not (0 <= ci < 4):
-            raise QuizError(f"Invalid correct_index in question: {q}")
+            continue
         validated.append(
             {
                 "question": str(q["question"]),
@@ -145,5 +153,8 @@ def generate_quiz(
                 "explanation": str(q.get("explanation", "")),
             }
         )
+    if len(validated) < max(1, (num_questions + 1) // 2):
+        logger.warning("Quiz had only %d valid of %d returned questions", len(validated), len(questions))
+        raise QuizError("The AI's quiz came back malformed. Please try again.")
 
     return validated
