@@ -2522,6 +2522,13 @@ function wireDrugsTab() {
   renderInteractionChips();
   renderLookupState();
   wireLexiPane();
+  // The Lexicomp tab only exists for users while the cloud phone is
+  // connected; otherwise it would be a tab that can only say "offline".
+  api("/api/lexidrug/status")
+    .then(({ enabled }) => {
+      document.querySelector('#view-drugs .subtab[data-drugtab="lexi"]').hidden = !enabled;
+    })
+    .catch(() => {});
 }
 
 
