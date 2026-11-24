@@ -41,6 +41,7 @@ import os
 import re
 import secrets
 import shutil
+import socket
 import tempfile
 import threading
 import time
@@ -284,10 +285,134 @@ def check_url(url: str) -> str:
     return url
 
 
+def _ip_allowed(ip_text: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(ip_text.split("%", 1)[0])
+    except ValueError:
+        return False
+    if ip.version == 6 and ip.ipv4_mapped:
+        ip = ip.ipv4_mapped
+    return ip.is_global
+
+
+# ---------------------------------------------------------------------
+# Egress proxy: every connection the browser makes goes through here
+# ---------------------------------------------------------------------
+# The hostname check above only sees names. A public name can resolve to
+# a private address, and a page can redirect (or load a sub-resource) to
+# one -- Playwright's request routing does not see redirects. So Chromium
+# is started with this in-process proxy as its only way out: it resolves
+# each host itself, refuses the connection unless every address is a
+# public one, and connects to the exact address it checked (so a second,
+# different DNS answer can't be slipped in between check and connect).
+
+_PROXY_PORTS = {80, 443, 8080, 8443}
+_PROXY_CONNECT_TIMEOUT = 10
+_PROXY_HEAD_LIMIT = 64 * 1024
+
+
+async def _resolve_public(host: str, port: int) -> str:
+    host = host.strip("[]")
+    if _ALLOW_LOCAL:
+        return host
+    if _blocked_host(host) or port not in _PROXY_PORTS:
+        raise PermissionError(f"{host}:{port} not allowed")
+    infos = await asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    addrs = [info[4][0] for info in infos]
+    if not addrs or not all(_ip_allowed(a) for a in addrs):
+        raise PermissionError(f"{host} resolves to a non-public address")
+    return addrs[0]
+
+
+async def _pipe(reader, writer) -> None:
+    try:
+        while True:
+            data = await reader.read(65536)
+            if not data:
+                break
+            writer.write(data)
+            await writer.drain()
+    except Exception:
+        pass
+    finally:
+        try:
+            writer.close()
+        except Exception:
+            pass
+
+
+async def _proxy_client(client_reader, client_writer) -> None:
+    upstream_writer = None
+    try:
+        head = await asyncio.wait_for(client_reader.readuntil(b"\r\n\r\n"), timeout=30)
+        if len(head) > _PROXY_HEAD_LIMIT:
+            raise ValueError("request head too large")
+        lines = head.decode("latin-1").split("\r\n")
+        method, target, version = lines[0].split(" ", 2)
+        if method.upper() == "CONNECT":
+            host, _, port = target.rpartition(":")
+            port = int(port)
+            ip = await _resolve_public(host, port)
+            upstream_reader, upstream_writer = await asyncio.wait_for(
+                asyncio.open_connection(ip, port), timeout=_PROXY_CONNECT_TIMEOUT
+            )
+            client_writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
+            await client_writer.drain()
+        else:
+            parts = urllib.parse.urlsplit(target)
+            if parts.scheme != "http" or not parts.hostname:
+                raise ValueError("unsupported request")
+            port = parts.port or 80
+            ip = await _resolve_public(parts.hostname, port)
+            upstream_reader, upstream_writer = await asyncio.wait_for(
+                asyncio.open_connection(ip, port), timeout=_PROXY_CONNECT_TIMEOUT
+            )
+            path = urllib.parse.urlunsplit(("", "", parts.path or "/", parts.query, ""))
+            headers = [
+                ln for ln in lines[1:]
+                if ln and not ln.lower().startswith(("proxy-connection:", "proxy-authorization:", "connection:"))
+            ]
+            upstream_writer.write(
+                (f"{method} {path} {version}\r\n" + "\r\n".join(headers + ["Connection: close"]) + "\r\n\r\n")
+                .encode("latin-1")
+            )
+            await upstream_writer.drain()
+        await asyncio.gather(_pipe(client_reader, upstream_writer), _pipe(upstream_reader, client_writer))
+    except Exception as e:
+        logger.info("Web browser connection refused: %s", e)
+        try:
+            client_writer.write(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            await client_writer.drain()
+        except Exception:
+            pass
+    finally:
+        for w in (client_writer, upstream_writer):
+            if w is not None:
+                try:
+                    w.close()
+                except Exception:
+                    pass
+
+
+_proxy_server = None
+
+
+async def _proxy_address() -> str:
+    global _proxy_server
+    if _proxy_server is None:
+        _proxy_server = await asyncio.start_server(_proxy_client, "127.0.0.1", 0)
+    port = _proxy_server.sockets[0].getsockname()[1]
+    return f"http://127.0.0.1:{port}"
+
+
 async def _guard(route) -> None:
     url = route.request.url
     parts = urllib.parse.urlsplit(url)
-    if parts.scheme in ("http", "https") and _blocked_host(parts.hostname or ""):
+    # data:/blob: are the page's own content; anything else that isn't
+    # web traffic (file:, chrome:, ftp: ...) has no business here.
+    if parts.scheme in ("data", "blob"):
+        await route.continue_()
+    elif parts.scheme not in ("http", "https", "ws", "wss") or _blocked_host(parts.hostname or ""):
         await route.abort()
     else:
         await route.continue_()
@@ -329,6 +454,9 @@ async def _get_browser():
                 executable_path=_executable(),
                 headless=True,
                 args=["--no-sandbox", "--disable-dev-shm-usage"],
+                # "<-loopback>" removes Chromium's built-in exemption, so even
+                # localhost goes through the proxy (and is refused there).
+                proxy={"server": await _proxy_address(), "bypass": "<-loopback>"},
             )
         except Exception as e:
             logger.exception("Couldn't start Chromium")
