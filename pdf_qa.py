@@ -682,6 +682,7 @@ async def answer_question(
 MAX_BOOKS_PER_QUESTION = 15
 _MULTI_PER_BOOK_CANDIDATES = 12  # best passages kept from each book (per query) before the global ranking
 _MULTI_MAX_PASSAGES = 12         # passages handed to Claude across all books
+_MULTI_WEB_CANDIDATES = 40       # web-source passages that join the reranking (web_sources.py)
 
 
 def _top_matches(meta: dict, vectors: np.ndarray, query_vec: np.ndarray, top_k: int) -> list[dict]:
@@ -694,7 +695,11 @@ def _top_matches(meta: dict, vectors: np.ndarray, query_vec: np.ndarray, top_k: 
 
 
 async def answer_question_multi(
-    books: list[dict], question: str, history: list[dict] | None = None, language: str = "English"
+    books: list[dict],
+    question: str,
+    history: list[dict] | None = None,
+    language: str = "English",
+    web_fetch=None,
 ) -> dict:
     """
     One question answered from SEVERAL indexed books (a user's own and/or
@@ -709,13 +714,18 @@ async def answer_question_multi(
     than taking an equal slice of each -- while no single long book can
     crowd the others out of the candidate pool.
 
-    Returns {"answer", "sources": [{"n", "page", "text", "book_id", "title"}], "skipped": [titles]}.
-    "skipped" lists books whose index could not be read, so the caller can
-    tell the user instead of silently answering from fewer books.
+    web_fetch: optional async callable(search_question) -> (passages, skipped
+    names), for ticked web sources (web_sources.py). Its passages
+    ({"text", "title", "url", "book_id", "page": None}) join the reranking
+    with the books' and are cited the same way, with their address.
+
+    Returns {"answer", "sources": [{"n", "page", "text", "book_id", "title", "url"?}], "skipped": [titles]}.
+    "skipped" lists books (or websites) that could not be read, so the
+    caller can tell the user instead of silently answering from fewer.
     """
     if not question.strip():
         raise IndexingError("Please send your question as text.")
-    if not books:
+    if not books and web_fetch is None:
         raise IndexingError("Tick at least one book to ask.")
     books = books[:MAX_BOOKS_PER_QUESTION]
     history = (history or [])[-MAX_HISTORY_TURNS:]
@@ -724,19 +734,26 @@ async def answer_question_multi(
     if language and language.strip().lower() != "english":
         search_question = await translate_question_for_search(question, language)
 
+    # Websites are searched while the books are: a browser fetch takes a
+    # few seconds that the index search doesn't need to wait for.
+    web_task = asyncio.ensure_future(web_fetch(search_question)) if web_fetch is not None else None
+
     queries = [search_question]
     if history:
         queries.append(_search_query_text(search_question, history))
-    try:
-        embedded = await embed_texts(queries, input_type="query")
-    except Exception as e:
-        logger.warning("Voyage query embedding failed: %s", e)
-        raise IndexingError("The search service didn't respond properly. Please try again in a moment.")
     query_vecs = []
-    for emb in embedded:
-        vec = np.array(emb, dtype=np.float32)
-        norm = np.linalg.norm(vec)
-        query_vecs.append(vec / norm if norm > 0 else vec)
+    if books:
+        try:
+            embedded = await embed_texts(queries, input_type="query")
+        except Exception as e:
+            logger.warning("Voyage query embedding failed: %s", e)
+            if web_task is not None:
+                web_task.cancel()
+            raise IndexingError("The search service didn't respond properly. Please try again in a moment.")
+        for emb in embedded:
+            vec = np.array(emb, dtype=np.float32)
+            norm = np.linalg.norm(vec)
+            query_vecs.append(vec / norm if norm > 0 else vec)
 
     page_numbers = _explicit_page_numbers(search_question) if len(books) == 1 else []
 
@@ -760,25 +777,44 @@ async def answer_question_multi(
             candidates.append(dict(m, book_id=book["book_id"], title=book["title"]))
         del meta, vectors, loaded
 
-    if not candidates:
-        raise IndexingError("None of the selected books could be searched. Try re-indexing them.")
+    web_passages = []
+    if web_task is not None:
+        try:
+            web_passages, web_skipped = await web_task
+        except Exception:
+            logger.exception("Web sources failed")
+            web_passages, web_skipped = [], ["the selected websites"]
+        skipped += web_skipped
+
+    if not candidates and not web_passages:
+        raise IndexingError(
+            "None of the selected books or websites could be searched."
+            if web_task is not None else "None of the selected books could be searched. Try re-indexing them."
+        )
 
     forced = [c for c in candidates if c.get("forced")]
     # Vector scores are comparable across books (one embedding model), so
     # they pick a shortlist; the reranker then orders that shortlist by how
     # well each passage answers the question, whichever book it came from.
     shortlist = sorted((c for c in candidates if not c.get("forced")), key=lambda c: c["score"], reverse=True)
-    shortlist = shortlist[:QA_MULTI_RERANK_CANDIDATES]
+    shortlist = shortlist[:QA_MULTI_RERANK_CANDIDATES] + web_passages[:_MULTI_WEB_CANDIDATES]
     rerank_query = _search_query_text(search_question, history) if history else search_question
     ranked = await rerank(rerank_query, shortlist, _MULTI_MAX_PASSAGES)
     matches = (forced + ranked)[: max(QA_TOP_K, _MULTI_MAX_PASSAGES)]
 
     numbered = list(enumerate(matches, start=1))
-    context = "\n\n".join(f"[{n}] (Book: \"{m['title']}\", page {m['page']})\n{m['text']}" for n, m in numbered)
+    context = "\n\n".join(
+        (f"[{n}] (Website: \"{m['title']}\", {m['url']})" if m.get("url") else f"[{n}] (Book: \"{m['title']}\", page {m['page']})")
+        + f"\n{m['text']}"
+        for n, m in numbered
+    )
     titles = "; ".join(f"\"{b['title']}\"" for b in books if b["title"] not in skipped)
+    if web_passages:
+        sites = sorted({m["title"].split(":", 1)[0] for m in web_passages})
+        titles = "; ".join(x for x in [titles, "websites: " + ", ".join(sites)] if x)
 
     system_prompt = (
-        f"You are answering a question using ONLY the numbered excerpts below, taken from these books: "
+        f"You are answering a question using ONLY the numbered excerpts below, taken from these sources: "
         f"{titles}. Follow these rules strictly:\n"
         "1. Answer using only information in the excerpts -- do not use outside knowledge, even if "
         "you know the topic.\n"
@@ -786,9 +822,10 @@ async def answer_question_multi(
         "came from, like this: \"The heart has four chambers [1].\" If several excerpts support one "
         "claim, cite all of them: \"...four chambers [1][2].\" Cite the excerpt NUMBER shown below, "
         "never the page number.\n"
-        "3. The excerpts come from different books. Where the books agree, give one combined answer. "
-        "Where they differ (a different dose, criterion, or recommendation), say so plainly and name "
-        "which book says what -- never blend two books' numbers into one.\n"
+        "3. The excerpts may come from different books and websites. Where they agree, give one combined "
+        "answer. Where they differ (a different dose, criterion, or recommendation), say so plainly and "
+        "name which source says what -- never blend two sources' numbers into one. A website excerpt may "
+        "be a study abstract: report its findings as that study's, not as general guidance.\n"
         "4. If the excerpts don't contain enough information to answer, say so clearly instead of "
         "guessing.\n"
         "5. Be concise and direct -- this will be read on a phone screen.\n"
@@ -830,7 +867,10 @@ async def answer_question_multi(
     return {
         "answer": answer_text,
         "sources": [
-            {"n": n, "page": m["page"], "text": m["text"][:300], "book_id": m["book_id"], "title": m["title"]}
+            dict(
+                {"n": n, "page": m["page"], "text": m["text"][:300], "book_id": m["book_id"], "title": m["title"]},
+                **({"url": m["url"]} if m.get("url") else {}),
+            )
             for n, m in numbered
         ],
         "skipped": skipped,

@@ -80,7 +80,7 @@ function alertMsg(msg) {
 
 const views = [
   "view-shelf", "view-ask", "view-drugs", "view-bookmarks", "view-request-book",
-  "view-upload", "view-book", "view-reader",
+  "view-upload", "view-book", "view-reader", "view-web",
 ];
 
 // The tab bar's destinations. A root view resets the navigation stack
@@ -116,6 +116,7 @@ function syncTabBar(activeId) {
 
 function goBack() {
   if (viewStack.length > 1) {
+    if (viewStack[viewStack.length - 1] === "view-web") webClose();
     viewStack.pop();
     const prev = viewStack[viewStack.length - 1];
     showView(prev, { pushHistory: false });
@@ -3069,7 +3070,7 @@ let askIndexingOwn = new Set();  // own books whose index job this tab started
 
 function askAllBooks() {
   if (!askLib) return [];
-  return askLib.my_books.concat(...askLib.specialties.map((s) => s.books));
+  return askLib.my_books.concat(...askLib.specialties.map((s) => s.books), askLib.web_sources || []);
 }
 
 async function loadAskLibrary({ quiet = false } = {}) {
@@ -3175,6 +3176,19 @@ function renderAskLibrary() {
     : `<p class="muted">No books on your shelf yet. Add one from the 📚 Shelf tab.</p>`;
   loadCoverThumbs(document.getElementById("view-ask"));
 
+  const webs = askLib.web_sources || [];
+  document.getElementById("ask-web-block").hidden = webs.length === 0;
+  document.getElementById("ask-web-books").innerHTML = webs
+    .map(
+      (b) =>
+        `<label class="check-row"><input type="checkbox" data-id="${b.book_id}" ${askSelected.has(b.book_id) ? "checked" : ""} />` +
+        `<span class="web-row-icon">🌐</span><span class="check-title">${escapeHtml(b.title)}</span></label>`
+    )
+    .join("");
+  const webAdmin = document.getElementById("web-admin");
+  webAdmin.hidden = !askLib.is_admin;
+  if (askLib.is_admin && !webSitesLoaded) loadWebSites();
+
   const admin = document.getElementById("ask-admin");
   admin.hidden = !askLib.is_admin;
   if (askLib.is_admin) {
@@ -3230,7 +3244,9 @@ function askAnswerHtml(text, sources) {
     .map(
       (s) =>
         `<span class="src-line" data-n="${s.n}"><span class="n">[${s.n}]</span>` +
-        `<span><strong>${escapeHtml(s.title)}</strong>, p.${s.page} — ${escapeHtml(sourcePreview(s.text))}</span></span>`
+        (s.url
+          ? `<span>🌐 <strong>${escapeHtml(s.title)}</strong> — ${escapeHtml(sourcePreview(s.text))}</span></span>`
+          : `<span><strong>${escapeHtml(s.title)}</strong>, p.${s.page} — ${escapeHtml(sourcePreview(s.text))}</span></span>`)
     )
     .join("");
   return `${body}<span class="qa-sources">${lines}</span>`;
@@ -3652,7 +3668,8 @@ function wireAskTab() {
     if (cite) {
       const turn = askThread[parseInt(cite.closest(".qa-msg").dataset.turn, 10)];
       const src = turn && turn.sources && turn.sources.find((x) => String(x.n) === cite.dataset.n);
-      if (src) openSource(src.book_id, src.page, src.text, src.n);
+      if (src && src.url) openExternal(src.url);
+      else if (src) openSource(src.book_id, src.page, src.text, src.n);
       return;
     }
     const topicBtn = e.target.closest("button.topic-main");
@@ -3797,6 +3814,7 @@ function wireAskTab() {
   }
   wireDrugsTab();
   wireAskTab();
+  wireWebSources();
   document.querySelectorAll("#view-shelf .subtab").forEach((t) =>
     t.addEventListener("click", () => setShelfTab(t.dataset.shelftab))
   );
@@ -3813,3 +3831,306 @@ function wireAskTab() {
     loadShelf();
   }
 })();
+
+
+// ---------------------------------------------------------------------
+// 🌐 Web sources (admin): log in to a website in the bot's own browser,
+// then tell the bot how to search it. The page is a live picture of the
+// server's browser; a tap on it is a click at the same spot.
+// ---------------------------------------------------------------------
+
+let webSites = [];
+let webSitesLoaded = false;
+let webOpenSettings = null;   // site_id whose settings form is open
+let webFrame = null;          // last frame: {url, width, height, steps, site_id}
+let webBusy = false;
+let webRefreshTimer = null;
+
+function openExternal(url) {
+  if (tg && tg.openLink) tg.openLink(url);
+  else window.open(url, "_blank", "noopener");
+}
+
+async function loadWebSites() {
+  webSitesLoaded = true;
+  try {
+    ({ sites: webSites } = await api("/api/admin/web/sites"));
+  } catch (e) {
+    webSitesLoaded = false;
+    return;
+  }
+  renderWebSites();
+}
+
+function webStatusLine(s) {
+  const parts = [];
+  parts.push(s.has_session ? "✅ Login saved" : "No login saved");
+  if (s.login_steps) parts.push(`${s.login_steps} login steps${s.secret_steps ? " (password encrypted)" : ""}`);
+  if (s.last_login) {
+    const when = new Date(s.last_login * 1000).toLocaleString();
+    parts.push(s.last_login_ok === false ? `<span class="bad">⚠️ Last login failed ${when}: ${escapeHtml(s.last_error || "")}</span>` : `last login ${when}`);
+  }
+  parts.push(s.enabled ? "🟢 In Ask your books" : "⚪ Not in Ask your books");
+  return parts.join(" · ");
+}
+
+function renderWebSites() {
+  const box = document.getElementById("web-sites");
+  if (!webSites.length) {
+    box.innerHTML = `<p class="muted">No websites yet. Type an address above and tap Open.</p>`;
+    return;
+  }
+  box.innerHTML = webSites
+    .map((s) => {
+      const form =
+        webOpenSettings === s.site_id
+          ? `<div class="web-form" data-form="${s.site_id}">
+              <label>Name<input class="drug-input" data-f="name" maxlength="80" value="${escapeHtml(s.name || "")}" /></label>
+              <label>Search address <span class="hint">— the page that shows search results, with {query} where the words go. Search the site once in the browser and copy the address it lands on.</span>
+                <input class="drug-input" data-f="search_url" placeholder="https://pubmed.ncbi.nlm.nih.gov/?term={query}" value="${escapeHtml(s.search_url)}" /></label>
+              <label>Result links contain <span class="hint">— text (or a regular expression) found in the address of each result to read. Empty = read the results page itself.</span>
+                <input class="drug-input" data-f="link_pattern" placeholder="pubmed.ncbi.nlm.nih.gov/\\d+" value="${escapeHtml(s.link_pattern)}" /></label>
+              <label>Results to read
+                <select class="ask-select" data-f="max_results">${[1, 2, 3, 4, 5]
+                  .map((n) => `<option ${n === s.max_results ? "selected" : ""}>${n}</option>`)
+                  .join("")}</select></label>
+              <label class="web-check"><input type="checkbox" data-f="enabled" ${s.enabled ? "checked" : ""} /> Available in Ask your books</label>
+              <button class="btn" data-web-save="${s.site_id}">Save settings</button>
+              <div class="drug-input-row"><input class="drug-input" data-f="test" placeholder="Test search, e.g. lithium bipolar" />
+                <button class="btn secondary" data-web-test="${s.site_id}">Test</button></div>
+              <div data-test-out="${s.site_id}"></div>
+            </div>`
+          : "";
+      return (
+        `<div class="web-site"><div class="web-site-head"><strong>${escapeHtml(s.name || "")}</strong>` +
+        `<span class="muted">${escapeHtml(new URL(s.start_url).hostname)}</span></div>` +
+        `<div class="web-site-status">${webStatusLine(s)}</div>` +
+        `<div class="web-site-actions">` +
+        `<button class="mini-btn" data-web-open="${s.site_id}">🌐 Open</button>` +
+        `<button class="mini-btn" data-web-settings="${s.site_id}">⚙️ Where to search</button>` +
+        (s.login_steps ? `<button class="mini-btn" data-web-relogin="${s.site_id}">🔑 Log in again now</button>` : "") +
+        `<button class="mini-btn" data-web-del="${s.site_id}">🗑</button></div>${form}</div>`
+      );
+    })
+    .join("");
+}
+
+function webFormValues(siteId) {
+  const form = document.querySelector(`[data-form="${siteId}"]`);
+  const val = (f) => form.querySelector(`[data-f="${f}"]`);
+  return {
+    name: val("name").value.trim(),
+    search_url: val("search_url").value.trim(),
+    link_pattern: val("link_pattern").value.trim(),
+    max_results: parseInt(val("max_results").value, 10),
+    enabled: val("enabled").checked,
+  };
+}
+
+async function webSiteClick(e) {
+  const b = e.target.closest("button");
+  if (!b) return;
+  if (b.dataset.webOpen) return webOpen(null, b.dataset.webOpen);
+  if (b.dataset.webSettings) {
+    webOpenSettings = webOpenSettings === b.dataset.webSettings ? null : b.dataset.webSettings;
+    return renderWebSites();
+  }
+  const id = b.dataset.webSave || b.dataset.webTest || b.dataset.webRelogin || b.dataset.webDel;
+  if (!id) return;
+  const label = b.textContent;
+  b.disabled = true;
+  try {
+    if (b.dataset.webSave) {
+      await api(`/api/admin/web/sites/${id}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(webFormValues(id)),
+      });
+      webOpenSettings = null;
+      await loadWebSites();
+      loadAskLibrary({ quiet: true });  // the source may have just appeared under Websites
+    } else if (b.dataset.webTest) {
+      const out = document.querySelector(`[data-test-out="${id}"]`);
+      const query = document.querySelector(`[data-form="${id}"] [data-f="test"]`).value.trim();
+      b.textContent = "Searching…";
+      out.innerHTML = "";
+      const { results } = await api(`/api/admin/web/sites/${id}/test`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query }),
+      });
+      out.innerHTML = results.length
+        ? results
+            .map(
+              (r) =>
+                `<div class="web-test-result"><strong>${escapeHtml(r.title || r.url)}</strong> (${r.chars} characters)<br>` +
+                `<span class="muted">${escapeHtml(r.url)}</span><br>${escapeHtml(r.preview)}…</div>`
+            )
+            .join("")
+        : `<p class="muted">Nothing found. Check the search address and the result-link text.</p>`;
+    } else if (b.dataset.webRelogin) {
+      b.textContent = "Logging in…";
+      await api(`/api/admin/web/sites/${id}/relogin`, { method: "POST" });
+      await loadWebSites();
+      alertMsg("Logged in again and saved.");
+    } else if (b.dataset.webDel) {
+      const ok = await new Promise((res) =>
+        tg && tg.showConfirm ? tg.showConfirm("Delete this website and its saved login?", res) : res(window.confirm("Delete?"))
+      );
+      if (!ok) return;
+      await api(`/api/admin/web/sites/${id}`, { method: "DELETE" });
+      await loadWebSites();
+      loadAskLibrary({ quiet: true });
+    }
+  } catch (err) {
+    alertMsg(err.message);
+    if (b.dataset.webRelogin) loadWebSites();
+  } finally {
+    b.disabled = false;
+    if (document.body.contains(b)) b.textContent = label;
+  }
+}
+
+// --- the browser view -------------------------------------------------
+
+function webSetBusy(on) {
+  webBusy = on;
+  document.getElementById("web-busy").hidden = !on;
+}
+
+function webShow(frame) {
+  webFrame = frame;
+  document.getElementById("web-shot").src = `data:image/jpeg;base64,${frame.image}`;
+  const url = document.getElementById("web-url");
+  if (document.activeElement !== url) url.value = frame.url;
+  document.getElementById("web-steps").textContent = frame.steps;
+}
+
+async function webCall(path, body) {
+  if (webBusy) return;
+  webSetBusy(true);
+  clearTimeout(webRefreshTimer);
+  try {
+    const frame = await api(path, body === undefined ? {} : {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    webShow(frame);
+    // Pages often keep drawing after they report "loaded": take one more
+    // picture a moment later.
+    webRefreshTimer = setTimeout(webRefresh, 1800);
+  } catch (e) {
+    alertMsg(e.message);
+  } finally {
+    webSetBusy(false);
+  }
+}
+
+// A quiet second picture: no busy overlay, and dropped if an action has
+// started meanwhile (that action brings its own picture).
+async function webRefresh() {
+  if (webBusy || document.getElementById("view-web").hidden) return;
+  try {
+    const frame = await api("/api/admin/web/browser/frame");
+    if (!webBusy) webShow(frame);
+  } catch (_) { /* the next action will show the state */ }
+}
+
+async function webOpen(url, siteId) {
+  const site = siteId && webSites.find((s) => s.site_id === siteId);
+  document.getElementById("web-save-name").value = site ? site.name : "";
+  document.getElementById("web-shot").removeAttribute("src");
+  document.getElementById("web-url").value = url || (site && site.start_url) || "";
+  showView("view-web");
+  await webCall("/api/admin/web/browser/open", siteId ? { site_id: siteId } : { url });
+}
+
+function webClose() {
+  clearTimeout(webRefreshTimer);
+  api("/api/admin/web/browser/close", { method: "POST" }).catch(() => {});
+}
+
+function webAction(body) {
+  return webCall("/api/admin/web/browser/action", body);
+}
+
+function webType(secret) {
+  const input = document.getElementById("web-text");
+  const text = input.value;
+  if (!text) return alertMsg("Type the text into the box first, then tap the button.");
+  input.value = "";
+  webAction({ type: "type", text, secret });
+}
+
+async function webSave() {
+  if (webBusy) return;
+  const name = document.getElementById("web-save-name").value.trim();
+  webSetBusy(true);
+  clearTimeout(webRefreshTimer);
+  try {
+    const { site } = await api("/api/admin/web/browser/save", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    webOpenSettings = site.site_id;  // next step: tell the bot where to search
+    await loadWebSites();
+    goBack();  // closes the browser too
+    alertMsg(`Saved "${site.name}". Now set where the bot should search it.`);
+  } catch (e) {
+    alertMsg(e.message);
+  } finally {
+    webSetBusy(false);
+  }
+}
+
+function wireWebSources() {
+  document.getElementById("web-sites").addEventListener("click", webSiteClick);
+  const openNew = () => {
+    const url = document.getElementById("web-new-url").value.trim();
+    if (!url) return alertMsg("Type the website's address first.");
+    webOpen(url, null);
+  };
+  document.getElementById("web-new-open").addEventListener("click", openNew);
+  document.getElementById("web-new-url").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); openNew(); }
+  });
+
+  document.getElementById("web-shot").addEventListener("click", (e) => {
+    if (!webFrame || webBusy) return;
+    const img = e.currentTarget;
+    const rect = img.getBoundingClientRect();
+    const x = ((e.clientX - rect.left) / rect.width) * webFrame.width;
+    const y = ((e.clientY - rect.top) / rect.height) * webFrame.height;
+    webAction({ type: "click", x, y });
+  });
+  const go = () => {
+    const url = document.getElementById("web-url").value.trim();
+    if (url) webAction({ type: "goto", url });
+  };
+  document.getElementById("web-go").addEventListener("click", go);
+  document.getElementById("web-url").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); go(); }
+  });
+  document.querySelector("#view-web .web-tools").addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-web]");
+    if (!b) return;
+    const what = b.dataset.web;
+    if (what === "back") webAction({ type: "back" });
+    else if (what === "reload") webAction({ type: "reload" });
+    else if (what === "up") webAction({ type: "scroll", dy: -500 });
+    else if (what === "down") webAction({ type: "scroll", dy: 500 });
+    else webCall("/api/admin/web/browser/frame");
+  });
+  document.getElementById("web-type").addEventListener("click", () => webType(false));
+  document.getElementById("web-type-secret").addEventListener("click", () => webType(true));
+  document.getElementById("web-text").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); webType(false); }
+  });
+  document.querySelectorAll("#view-web [data-key]").forEach((b) =>
+    b.addEventListener("click", () => webAction({ type: "key", key: b.dataset.key }))
+  );
+  document.getElementById("web-rec-restart").addEventListener("click", () => webAction({ type: "restart_recording" }));
+  document.getElementById("web-save").addEventListener("click", webSave);
+}

@@ -62,6 +62,7 @@ import subscriptions
 import drug_lookup
 import drug_qa
 import interaction_ai
+import web_sources
 import lexidrug
 import name_resolver
 from bot_instance import bot as tg_bot
@@ -1807,6 +1808,7 @@ async def lexidrug_ask(request: Request):
 # answer sources only -- no endpoint here returns their file.
 
 _MULTI_ASK_TIMEOUT_SECONDS = 75  # several indexes to load and search, then one answer
+_WEB_FETCH_TIMEOUT_SECONDS = 45  # one website: search, then read its top results (web_sources.py)
 
 
 def _require_admin(request: Request) -> dict:
@@ -1843,6 +1845,7 @@ async def ask_library(request: Request):
         {
             "my_books": my_books,
             "specialties": _shared_catalog(),
+            "web_sources": web_sources.ask_sources(),
             "is_admin": subscriptions.is_admin(user["id"]),
             "max_books": pdf_qa.MAX_BOOKS_PER_QUESTION,
             "max_upload_mb": MAX_SHELF_UPLOAD_BYTES // 1024 // 1024,
@@ -1868,19 +1871,41 @@ async def ask_multi(request: Request):
     # Every id is resolved against what THIS user may read: their own
     # shelf, or the shared libraries. An id that is neither is refused, so
     # a guessed id can never reach another user's book.
-    books, seen = [], set()
+    books, webs, seen = [], [], set()
     for bid in raw_ids:
         if not isinstance(bid, str) or bid in seen:
             continue
         seen.add(bid)
+        if bid.startswith("web:"):
+            site = web_sources.get_site(bid[4:])
+            if site is None or not site.get("enabled") or not site.get("search_url"):
+                raise ApiError(status_code=404, detail="One of the selected websites isn't available anymore. Refresh and try again.")
+            webs.append({"book_id": bid, "title": site["name"]})
+            continue
         book = shared_library.get_book(bid) if shared_library.is_shared_id(bid) else library.get_book(user["id"], bid)
         if book is None:
             raise ApiError(status_code=404, detail="One of the selected books isn't available anymore. Refresh and try again.")
         if not book.get("qa_indexed"):
             raise ApiError(status_code=409, detail=f"\"{book['title']}\" isn't indexed for questions yet.")
         books.append({"book_id": bid, "title": book["title"]})
-    if not books:
+    if not books and not webs:
         raise ApiError(status_code=400, detail="Tick at least one book to ask.")
+
+    async def web_fetch(search_question: str):
+        """Search every ticked website at once; one that fails is reported as skipped, not fatal."""
+        terms = await web_sources.search_terms(search_question)
+        results = await asyncio.gather(
+            *(asyncio.wait_for(web_sources.passages(w["book_id"][4:], terms), timeout=_WEB_FETCH_TIMEOUT_SECONDS) for w in webs),
+            return_exceptions=True,
+        )
+        found, skipped = [], []
+        for w, r in zip(webs, results):
+            if isinstance(r, BaseException):
+                logger.warning("Web source %s failed: %r", w["book_id"], r)
+                skipped.append(w["title"])
+            else:
+                found += r
+        return found, skipped
 
     raw_history = body.get("history") or []
     if not isinstance(raw_history, list):
@@ -1895,9 +1920,10 @@ async def ask_multi(request: Request):
         with subscriptions.metered(user["id"], "questions"):  # one question, however many books
             result = await asyncio.wait_for(
                 pdf_qa.answer_question_multi(
-                    books, question, history=history, language=subscriptions.get_language(user["id"])
+                    books, question, history=history, language=subscriptions.get_language(user["id"]),
+                    web_fetch=web_fetch if webs else None,
                 ),
-                timeout=_MULTI_ASK_TIMEOUT_SECONDS,
+                timeout=_MULTI_ASK_TIMEOUT_SECONDS + (_WEB_FETCH_TIMEOUT_SECONDS if webs else 0),
             )
     except subscriptions.QuotaExceeded as e:
         raise ApiError(status_code=402, detail=str(e))
@@ -1915,7 +1941,7 @@ async def ask_multi(request: Request):
     topic_id = body.get("topic_id")
     if ask_sessions.valid_id(topic_id):
         try:
-            ask_sessions.append_turn(user["id"], topic_id, books, question, result["answer"], result["sources"])
+            ask_sessions.append_turn(user["id"], topic_id, books + webs, question, result["answer"], result["sources"])
         except Exception:
             logger.exception("Couldn't save Ask topic %s", topic_id)
     return JSONResponse(result)
@@ -2368,7 +2394,10 @@ def _qa_text(turns: list[dict]) -> str:
         if t.get("sources"):
             lines += ["", "**Sources**"]
             for s in t["sources"]:
-                where = f"{s.get('title')}, p.{s.get('page')}" if s.get("title") else f"p.{s.get('page')}"
+                if s.get("url"):
+                    where = f"{s.get('title')}, {s['url']}"
+                else:
+                    where = f"{s.get('title')}, p.{s.get('page')}" if s.get("title") else f"p.{s.get('page')}"
                 lines.append(f"[{s.get('n')}] {where} — {s.get('text', '')}")
         blocks.append("\n".join(lines))
     return "\n\n".join(blocks)
@@ -2411,6 +2440,125 @@ async def ask_export(request: Request):
             detail="Couldn't send that to your Telegram chat. Make sure you've started a chat with the bot, then try again.",
         )
     return JSONResponse({"sent": True})
+
+
+# ---------------------------------------------------------------------
+# 🌐 Web sources (admin): a server-side browser to log in to a website,
+# then where the bot should search it (web_sources.py)
+# ---------------------------------------------------------------------
+
+def _require_web_admin(request: Request) -> dict:
+    user = require_user(request)
+    if not subscriptions.is_admin(user["id"]):
+        raise ApiError(status_code=403, detail="Only the admin can manage web sources.")
+    return user
+
+
+async def _web_call(coro):
+    try:
+        return await coro
+    except web_sources.WebSourceError as e:
+        raise ApiError(status_code=400, detail=str(e))
+    except asyncio.TimeoutError:
+        raise ApiError(status_code=504, detail="The website took too long to answer.")
+    except Exception:
+        logger.exception("Web source action failed")
+        raise ApiError(status_code=500, detail="The browser had a problem. Please try again.")
+
+
+def _web_site_id(request: Request) -> str:
+    site_id = request.path_params["site_id"]
+    if web_sources.get_site(site_id) is None:
+        raise ApiError(status_code=404, detail="That website isn't saved anymore.")
+    return site_id
+
+
+async def web_sites(request: Request):
+    _require_web_admin(request)
+    return JSONResponse({"sites": web_sources.list_sites(), "live": web_sources.live_info()})
+
+
+async def web_browser_open(request: Request):
+    _require_web_admin(request)
+    body = await _json_body(request)
+    site_id = body.get("site_id")
+    url = body.get("url")
+    if site_id:
+        site = web_sources.get_site(site_id)
+        if site is None:
+            raise ApiError(status_code=404, detail="That website isn't saved anymore.")
+        url = url or site["start_url"]
+    return JSONResponse(await _web_call(web_sources.live_start(url or "", site_id or None)))
+
+
+async def web_browser_frame(request: Request):
+    _require_web_admin(request)
+    return JSONResponse(await _web_call(web_sources.live_frame()))
+
+
+async def web_browser_action(request: Request):
+    _require_web_admin(request)
+    body = await _json_body(request)
+    return JSONResponse(await _web_call(web_sources.live_action(body)))
+
+
+async def web_browser_save(request: Request):
+    _require_web_admin(request)
+    body = await _json_body(request)
+    name = body.get("name") if isinstance(body.get("name"), str) else None
+    site = await _web_call(web_sources.live_save(name, keep_steps=body.get("keep_steps", True) is not False))
+    return JSONResponse({"site": site})
+
+
+async def web_browser_close(request: Request):
+    _require_web_admin(request)
+    await web_sources.live_close()
+    return JSONResponse({"closed": True})
+
+
+async def web_site_update(request: Request):
+    _require_web_admin(request)
+    site_id = _web_site_id(request)
+    body = await _json_body(request)
+    fields = {k: body[k] for k in ("name", "search_url", "link_pattern", "max_results", "enabled") if k in body}
+    try:
+        return JSONResponse({"site": web_sources.update_site(site_id, fields)})
+    except web_sources.WebSourceError as e:
+        raise ApiError(status_code=400, detail=str(e))
+
+
+async def web_site_delete(request: Request):
+    _require_web_admin(request)
+    site_id = _web_site_id(request)
+    try:
+        web_sources.delete_site(site_id)
+    except web_sources.WebSourceError as e:
+        raise ApiError(status_code=400, detail=str(e))
+    return JSONResponse({"deleted": True})
+
+
+async def web_site_relogin(request: Request):
+    _require_web_admin(request)
+    site_id = _web_site_id(request)
+    await _web_call(asyncio.wait_for(web_sources.relogin(site_id), timeout=90))
+    return JSONResponse({"site": next(s for s in web_sources.list_sites() if s["site_id"] == site_id)})
+
+
+async def web_site_test(request: Request):
+    """Run a search the way Ask your books will, and show what came back."""
+    _require_web_admin(request)
+    site_id = _web_site_id(request)
+    body = await _json_body(request)
+    query = (body.get("query") or "").strip()[:200]
+    if not query:
+        raise ApiError(status_code=400, detail="Type something to search for.")
+    results = await _web_call(asyncio.wait_for(web_sources.search(site_id, query), timeout=90))
+    return JSONResponse({
+        "results": [
+            {"title": r["title"], "url": r["url"], "chars": len(r["text"]), "preview": r["text"][:400]}
+            for r in results
+        ]
+    })
 
 
 async def backfill_shared_chapters() -> None:
@@ -2482,6 +2630,16 @@ routes = [
     Route("/api/ask/topics/{topic_id}", ask_topic, methods=["GET"]),
     Route("/api/ask/topics/{topic_id}", ask_topic_delete, methods=["DELETE"]),
     Route("/api/ask/export", ask_export, methods=["POST"]),
+    Route("/api/admin/web/sites", web_sites, methods=["GET"]),
+    Route("/api/admin/web/sites/{site_id}", web_site_update, methods=["POST"]),
+    Route("/api/admin/web/sites/{site_id}", web_site_delete, methods=["DELETE"]),
+    Route("/api/admin/web/sites/{site_id}/relogin", web_site_relogin, methods=["POST"]),
+    Route("/api/admin/web/sites/{site_id}/test", web_site_test, methods=["POST"]),
+    Route("/api/admin/web/browser/open", web_browser_open, methods=["POST"]),
+    Route("/api/admin/web/browser/frame", web_browser_frame, methods=["GET"]),
+    Route("/api/admin/web/browser/action", web_browser_action, methods=["POST"]),
+    Route("/api/admin/web/browser/save", web_browser_save, methods=["POST"]),
+    Route("/api/admin/web/browser/close", web_browser_close, methods=["POST"]),
     Route("/api/suggest-book", suggest_book, methods=["POST"]),
     Route("/api/shared/specialties", shared_add_specialty, methods=["POST"]),
     Route("/api/shared/specialties/remove", shared_remove_specialty, methods=["POST"]),
