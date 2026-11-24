@@ -821,6 +821,7 @@ async function askAboutCurrentBook() {
   }
   askStartTopic();
   renderAskLibrary();
+  askShowPage("chat");
   const q = document.getElementById("ask-question");
   q.focus();
   q.scrollIntoView({ block: "center" });
@@ -3199,11 +3200,27 @@ function renderAskSpecActions() {
 function renderAskSelection() {
   renderAskSpecActions();
   const n = askSelected.size;
-  document.getElementById("ask-selected").textContent = n
-    ? `${n} book${n === 1 ? "" : "s"} ticked.`
-    : "Tick at least one book above to ask.";
+  const titles = askAllBooks().filter((b) => askSelected.has(b.book_id)).map((b) => b.title);
+  document.getElementById("ask-res-list").innerHTML = n
+    ? `<b>Answering from ${n} resource${n === 1 ? "" : "s"}:</b> ${titles.map(escapeHtml).join(" · ")}`
+    : "No resources chosen yet.";
+  const hint = document.getElementById("ask-selected");
+  hint.hidden = n > 0;
+  hint.textContent = "Tap 📚 Choose resources above to pick the books to answer from.";
+  document.getElementById("ask-choose").classList.toggle("secondary", n > 0);
   document.getElementById("ask-send").disabled = n === 0 || askBusy;
   document.getElementById("ask-clear").hidden = n === 0;
+  const done = document.getElementById("ask-pick-done");
+  done.textContent = n ? `✅ Done — ${n} selected` : "✅ Done";
+}
+
+// The Ask tab is two pages: choosing resources, and the questions and
+// answers themselves (with the chosen resources listed in small print).
+function askShowPage(page) {
+  const picking = page === "pick";
+  document.getElementById("ask-pick").hidden = !picking;
+  document.getElementById("ask-chat").hidden = picking;
+  window.scrollTo(0, 0);
 }
 
 function askAnswerHtml(text, sources) {
@@ -3312,6 +3329,7 @@ async function askOpenTopic(topicId) {
   (topic.books || []).forEach((b) => { if (available.has(b.book_id)) askSelected.add(b.book_id); });
   document.getElementById("ask-topics").hidden = true;
   renderAskLibrary();
+  askShowPage("chat");
   renderAskThread();
   document.getElementById("ask-thread").scrollIntoView({ block: "start", behavior: "smooth" });
 }
@@ -3722,6 +3740,11 @@ function wireAskTab() {
   document.getElementById("ask-clear").addEventListener("click", () => {
     askSelected.clear();
     renderAskLibrary();
+  });
+  document.getElementById("ask-choose").addEventListener("click", () => askShowPage("pick"));
+  document.getElementById("ask-pick-done").addEventListener("click", () => {
+    askShowPage("chat");
+    if (askSelected.size) document.getElementById("ask-question").focus();
   });
 
   const addSpec = () => {

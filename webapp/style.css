@@ -647,7 +647,7 @@ body.has-tabbar .fab { bottom: calc(76px + env(safe-area-inset-bottom, 0px)); }
 #ask-question:focus, .compose-box:focus { outline: none; border-color: var(--button); box-shadow: 0 0 0 3px rgba(38, 120, 182, 0.15); }
 .ask-send-btn { display: block; width: 100%; margin-top: 10px; padding: 12px; font-size: 16px; border-radius: 12px; }
 .ask-compose-tools { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
-.mini-btn.ask-like, .ask-compose-tools .mini-btn, .ask-compose-head .mini-btn {
+.mini-btn.ask-like, .ask-compose-tools .mini-btn, .ask-compose-head .mini-btn, .ask-pick-head .mini-btn {
   padding: 7px 11px; border-radius: 9px; font: inherit; font-size: 13px; cursor: pointer;
   border: 1px solid rgba(128, 128, 128, 0.28); background: var(--bg); color: var(--link);
 }
@@ -673,3 +673,17 @@ body.has-tabbar .fab { bottom: calc(76px + env(safe-area-inset-bottom, 0px)); }
 .drug-input-row .btn { border-radius: 12px; padding: 0 18px; }
 #interaction-check { margin-top: 14px; }
 .tabbar .tab small { white-space: nowrap; }
+
+/* ---------- Ask: choose-resources page / chat page ---------- */
+.ask-pick-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+.ask-pick-bar {
+  position: sticky; bottom: calc(60px + env(safe-area-inset-bottom, 0px)); z-index: 5;
+  padding: 10px 16px; background: linear-gradient(to top, var(--bg) 70%, transparent);
+}
+.ask-pick-bar .ask-send-btn { margin-top: 0; }
+.ask-res-bar { padding: 4px 16px 8px; }
+.ask-choose-btn { width: 100%; border-radius: 12px; padding: 12px; font-weight: 600; }
+.ask-res-list {
+  margin: 8px 2px 0; font-size: 12px; line-height: 1.45; color: var(--hint); unicode-bidi: plaintext;
+}
+.ask-res-list b { font-weight: 600; color: var(--text); }

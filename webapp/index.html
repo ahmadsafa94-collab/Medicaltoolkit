@@ -15,7 +15,7 @@
     changes style.css or app.js, or the fix for THIS bug silently stops
     covering your NEXT change.
   -->
-  <link rel="stylesheet" href="style.css?v=19" />
+  <link rel="stylesheet" href="style.css?v=20" />
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 </head>
@@ -154,10 +154,16 @@
   <section id="view-ask" class="view" hidden>
     <header class="topbar"><h1>💬 Ask your books</h1></header>
 
+    <!-- Page 1: choose resources (opened from the chat page's button) -->
+    <div id="ask-pick" hidden>
     <div class="panel">
+      <div class="ask-pick-head">
+        <strong>📚 Choose resources</strong>
+        <button id="ask-clear" class="mini-btn" hidden>🧹 Clear all</button>
+      </div>
       <p class="muted">
-        Tick the books you want answers from — your own, a specialty library, or both — then ask
-        once. Every answer cites the book and page it came from.
+        Tick the books you want answers from — your own, a specialty library, or both.
+        Every answer cites the book and page it came from.
       </p>
 
       <p class="ask-heading">🏥 Specialty library</p>
@@ -202,6 +208,18 @@
       <div id="ask-admin-shelf" class="check-list" hidden></div>
     </div>
 
+    <div class="ask-pick-bar">
+      <button id="ask-pick-done" class="btn ask-send-btn">✅ Done</button>
+    </div>
+    </div>
+
+    <!-- Page 2: questions and answers only -->
+    <div id="ask-chat">
+    <div class="ask-res-bar">
+      <button id="ask-choose" class="btn secondary ask-choose-btn">📚 Choose resources</button>
+      <p id="ask-res-list" class="ask-res-list"></p>
+    </div>
+
     <div id="ask-topics" class="panel" hidden>
       <div class="reader-source-head"><strong>🕘 Saved topics</strong><button id="ask-topics-close" class="mini-btn">✕</button></div>
       <div id="ask-topics-list"></div>
@@ -210,10 +228,7 @@
     <div id="ask-thread" class="qa-thread"></div>
 
     <div class="panel ask-compose">
-      <div class="ask-compose-head">
-        <p id="ask-selected" class="muted"></p>
-        <button id="ask-clear" class="mini-btn">Untick all</button>
-      </div>
+      <p id="ask-selected" class="muted ask-topic-note" hidden></p>
       <p id="ask-topic-note" class="muted ask-topic-note" hidden>Follow-up questions continue this topic. Tap 🆕 New topic to start fresh.</p>
       <textarea id="ask-question" class="compose-box" rows="4" dir="auto" placeholder="Type your question… e.g. First-line treatment for bipolar depression?"></textarea>
       <button id="ask-send" class="btn ask-send-btn" disabled>Ask</button>
@@ -222,6 +237,7 @@
         <button id="ask-history" class="mini-btn">🕘 Saved topics</button>
         <button id="ask-topic-pdf" class="mini-btn" hidden>📄 Topic as PDF</button>
       </div>
+    </div>
     </div>
   </section>
 
@@ -362,6 +378,6 @@
     <button class="tab" data-tab="view-drugs"><span>💊</span><small>Drugs</small></button>
   </nav>
 
-  <script src="app.js?v=19"></script>
+  <script src="app.js?v=20"></script>
 </body>
 </html>
