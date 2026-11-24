@@ -42,13 +42,14 @@ from starlette.exceptions import HTTPException
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse, StreamingResponse
+from starlette.responses import FileResponse, JSONResponse, StreamingResponse
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
 import anki_export
 import book_requests
 import chapter_ai
+import covers
 import flashcards
 import library
 import notes
@@ -313,6 +314,7 @@ async def delete_book(request: Request):
 
     library.remove_book(user["id"], book_id, delete_file=True)
     pdf_qa.delete_index(book_id)
+    covers.delete_covers(book_id)
     library.delete_qa_sessions_for_book(user["id"], book_id)
     library.delete_quiz_attempts_for_book(user["id"], book_id)
     return JSONResponse({"deleted": True, "book_id": book_id})
@@ -1963,6 +1965,7 @@ async def shared_delete_book(request: Request):
     if shared_library.remove_book(book_id) is None:
         raise ApiError(status_code=404, detail="Book not found.")
     pdf_qa.delete_index(book_id)
+    covers.delete_covers(book_id)
     return JSONResponse({"specialties": _shared_catalog()})
 
 
@@ -2172,6 +2175,48 @@ async def upload_cancel(request: Request):
     return JSONResponse({"cancelled": True})
 
 
+# ---------------------------------------------------------------------------
+# Book covers (page 1 as an image) and renaming shared books
+# ---------------------------------------------------------------------------
+
+async def _cover_response(book_id: str, pdf_path: str, request: Request):
+    size = request.query_params.get("size", "thumb")
+    if size not in ("thumb", "full"):
+        raise ApiError(status_code=400, detail="size must be thumb or full.")
+    try:
+        path = await asyncio.to_thread(covers.get_cover, book_id, pdf_path, size)
+    except covers.CoverError as e:
+        raise ApiError(status_code=404, detail=str(e))
+    # Covers never change for a given book id, so the browser may keep them.
+    return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=86400"})
+
+
+async def book_cover(request: Request):
+    user = require_user(request)
+    book_id = request.path_params["book_id"]
+    book = _book_or_404(user["id"], book_id)
+    return await _cover_response(book_id, book["pdf_path"], request)
+
+
+async def shared_book_cover(request: Request):
+    require_user(request)  # any signed-in user may see a shared book's cover -- see covers.py
+    book_id = request.path_params["book_id"]
+    book = shared_library.get_book(book_id) if shared_library.is_shared_id(book_id) else None
+    if book is None:
+        raise ApiError(status_code=404, detail="Book not found.")
+    return await _cover_response(book_id, book["pdf_path"], request)
+
+
+async def shared_rename(request: Request):
+    _require_admin(request)
+    body = await _json_body(request)
+    try:
+        title = shared_library.rename_book(request.path_params["book_id"], body.get("title"))
+    except shared_library.SharedLibraryError as e:
+        raise _shared_error(e)
+    return JSONResponse({"title": title, "specialties": _shared_catalog()})
+
+
 routes = [
     Route("/api/books", list_books, methods=["GET"]),
     Route("/api/upload", upload_book, methods=["POST"]),
@@ -2221,6 +2266,9 @@ routes = [
     Route("/api/shared/publish", shared_publish, methods=["POST"]),
     Route("/api/shared/books/{book_id}/index", shared_reindex, methods=["POST"]),
     Route("/api/shared/books/{book_id}", shared_delete_book, methods=["DELETE"]),
+    Route("/api/shared/books/{book_id}/rename", shared_rename, methods=["POST"]),
+    Route("/api/shared/books/{book_id}/cover", shared_book_cover, methods=["GET"]),
+    Route("/api/books/{book_id}/cover", book_cover, methods=["GET"]),
     Route("/api/lexidrug/status", lexidrug_status, methods=["GET"]),
     Route("/api/lexidrug/open", lexidrug_open, methods=["POST"]),
     Route("/api/lexidrug/ask", lexidrug_ask, methods=["POST"]),

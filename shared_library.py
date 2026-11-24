@@ -166,6 +166,17 @@ def _update(book_id: str, **fields) -> bool:
     return True
 
 
+def rename_book(book_id: str, title) -> str:
+    title = " ".join(str(title or "").split())
+    if not title:
+        raise SharedLibraryError("The title can't be empty.")
+    if len(title) > 200:
+        raise SharedLibraryError("Keep the title under 200 characters.")
+    if not _update(book_id, title=title):
+        raise SharedLibraryError("That book no longer exists.")
+    return title
+
+
 def mark_indexed(book_id: str, num_chunks: int) -> bool:
     return _update(book_id, qa_indexed=True, num_chunks=num_chunks, index_error=None, index_model=VOYAGE_MODEL)
 

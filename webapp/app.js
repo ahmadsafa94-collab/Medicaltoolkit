@@ -2684,7 +2684,8 @@ async function loadAskLibrary({ quiet = false } = {}) {
   askSelected.forEach((id) => { if (!askable.has(id)) askSelected.delete(id); });
   const names = askLib.specialties.map((s) => s.name);
   if (!names.includes(askSpecialty)) askSpecialty = names[0] || null;
-  renderAskLibrary();
+  // A background refresh must not rebuild the list under a title being typed.
+  if (!(quiet && askEditingId)) renderAskLibrary();
 
   // Keep refreshing while anything is still being indexed, so a book
   // becomes tickable by itself the moment it is ready.
@@ -2699,11 +2700,22 @@ function askRowHtml(b, { shared }) {
   const pages = b.page_count ? `${b.page_count} p.` : "";
   const admin = shared && askLib.is_admin;
   const del = admin ? `<button class="mini-btn" data-del="${b.book_id}" title="Remove from library">🗑</button>` : "";
+  const edit = admin ? `<button class="mini-btn" data-rename="${b.book_id}" title="Edit title">✏️</button>` : "";
+  const cover = coverButtonHtml(b.book_id, shared);
+  if (admin && askEditingId === b.book_id) {
+    // Inline title editor (window.prompt is unreliable inside Telegram).
+    return (
+      `<div class="check-row">${cover}` +
+      `<input class="rename-input" type="text" maxlength="200" value="${escapeHtml(b.title)}" data-rename-input="${b.book_id}" />` +
+      `<button class="mini-btn" data-rename-save="${b.book_id}">Save</button>` +
+      `<button class="mini-btn" data-rename-cancel="1">✕</button></div>`
+    );
+  }
   if (b.qa_indexed) {
     const checked = askSelected.has(b.book_id) ? "checked" : "";
     return (
-      `<label class="check-row"><input type="checkbox" data-id="${b.book_id}" ${checked} />` +
-      `<span class="check-title">${escapeHtml(b.title)}</span><span class="check-meta">${pages}</span>${del}</label>`
+      `<label class="check-row"><input type="checkbox" data-id="${b.book_id}" ${checked} />${cover}` +
+      `<span class="check-title">${escapeHtml(b.title)}</span><span class="check-meta">${pages}</span>${edit}${del}</label>`
     );
   }
   // Not answerable yet: say why, and offer the one thing that fixes it.
@@ -2720,8 +2732,8 @@ function askRowHtml(b, { shared }) {
     action = `<button class="mini-btn" data-index="${b.book_id}">Make searchable</button>`;
   }
   return (
-    `<div class="check-row is-disabled"><input type="checkbox" disabled />` +
-    `<span class="check-title">${escapeHtml(b.title)}</span>${meta}${action}${del}</div>`
+    `<div class="check-row is-disabled"><input type="checkbox" disabled />${cover}` +
+    `<span class="check-title">${escapeHtml(b.title)}</span>${meta}${action}${edit}${del}</div>`
   );
 }
 
@@ -2758,6 +2770,7 @@ function renderAskLibrary() {
   mineBox.innerHTML = askLib.my_books.length
     ? askLib.my_books.map((b) => askRowHtml(b, { shared: false })).join("")
     : `<p class="muted">No books on your shelf yet. Add one from the 📚 Shelf tab.</p>`;
+  loadCoverThumbs(document.getElementById("view-ask"));
 
   const admin = document.getElementById("ask-admin");
   admin.hidden = !askLib.is_admin;
@@ -2940,6 +2953,94 @@ function renderAskAdminShelf() {
     .join("");
 }
 
+// --- book covers --------------------------------------------------------
+// Page 1 of each PDF, rendered by the server. Fetched with the Telegram
+// sign-in header (an <img src> can't send it) and kept as object URLs, so
+// the frequent list re-renders don't fetch the same image again.
+
+const coverUrls = new Map();   // "s:<id>" / "m:<id>" -> object URL, or null if it failed
+const coverQueue = [];
+let coverActive = 0;
+const COVER_PARALLEL = 4;
+
+function coverKey(id, shared) { return (shared ? "s:" : "m:") + id; }
+
+function coverButtonHtml(id, shared) {
+  const book = askAllBooks().find((b) => b.book_id === id);
+  const title = book ? escapeHtml(book.title) : "";
+  const url = coverUrls.get(coverKey(id, shared));
+  const inner = url ? `<img src="${url}" alt="" />` : `<span class="cover-ph">📘</span>`;
+  return `<button type="button" class="cover-btn" data-cover="${id}" data-shared="${shared ? 1 : 0}" data-title="${title}" title="Show cover">${inner}</button>`;
+}
+
+function coverPath(id, shared, size) {
+  return `${shared ? "/api/shared/books" : "/api/books"}/${id}/cover?size=${size}`;
+}
+
+async function fetchImage(path) {
+  const res = await fetch(path, { headers: { "X-Telegram-Init-Data": INIT_DATA } });
+  if (!res.ok) throw new Error(`cover ${res.status}`);
+  return URL.createObjectURL(await res.blob());
+}
+
+function loadCoverThumbs(root) {
+  root.querySelectorAll("button.cover-btn").forEach((btn) => {
+    const key = coverKey(btn.dataset.cover, btn.dataset.shared === "1");
+    if (coverUrls.has(key) || coverQueue.some((q) => q.key === key)) return;
+    coverQueue.push({ key, id: btn.dataset.cover, shared: btn.dataset.shared === "1" });
+  });
+  pumpCovers();
+}
+
+function pumpCovers() {
+  while (coverActive < COVER_PARALLEL && coverQueue.length) {
+    const job = coverQueue.shift();
+    coverActive++;
+    fetchImage(coverPath(job.id, job.shared, "thumb"))
+      .then((url) => {
+        coverUrls.set(job.key, url);
+        document.querySelectorAll(`button.cover-btn[data-cover="${job.id}"][data-shared="${job.shared ? 1 : 0}"]`)
+          .forEach((b) => { b.innerHTML = `<img src="${url}" alt="" />`; });
+      })
+      .catch(() => coverUrls.set(job.key, null))  // keep the 📘 placeholder; don't retry every render
+      .finally(() => { coverActive--; pumpCovers(); });
+  }
+}
+
+async function showCover(id, shared, title) {
+  const box = document.getElementById("cover-viewer");
+  const img = document.getElementById("cover-viewer-img");
+  document.getElementById("cover-viewer-title").textContent = title || "";
+  img.hidden = true;
+  document.getElementById("cover-viewer-status").textContent = "Loading cover…";
+  box.hidden = false;
+  try {
+    const url = await fetchImage(coverPath(id, shared, "full"));
+    if (img.dataset.url) URL.revokeObjectURL(img.dataset.url);
+    img.dataset.url = url;
+    img.src = url;
+    img.hidden = false;
+    document.getElementById("cover-viewer-status").textContent = "";
+  } catch (_) {
+    document.getElementById("cover-viewer-status").textContent = "This book's cover couldn't be shown.";
+  }
+}
+
+let askEditingId = null;  // shared book whose title is being edited inline (admin)
+
+function askSaveRename(id) {
+  const input = document.querySelector(`input[data-rename-input="${id}"]`);
+  const title = input ? input.value.trim() : "";
+  const book = askAllBooks().find((b) => b.book_id === id);
+  askEditingId = null;
+  if (!title || (book && title === book.title)) return renderAskLibrary();
+  askAdminCall(`/api/shared/books/${id}/rename`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title }),
+  });
+}
+
 function wireAskTab() {
   const view = document.getElementById("view-ask");
 
@@ -2968,9 +3069,24 @@ function wireAskTab() {
     renderAskSelection();
   });
   view.addEventListener("click", (e) => {
+    const coverBtn = e.target.closest("button.cover-btn");
+    if (coverBtn) {
+      // Inside a <label>: without this the tap would also tick the book.
+      e.preventDefault();
+      return showCover(coverBtn.dataset.cover, coverBtn.dataset.shared === "1", coverBtn.dataset.title);
+    }
     const btn = e.target.closest("button.mini-btn");
     if (!btn) return;
     e.preventDefault();
+    if (btn.dataset.rename) {
+      askEditingId = btn.dataset.rename;
+      renderAskLibrary();
+      const input = document.querySelector(`input[data-rename-input="${askEditingId}"]`);
+      if (input) { input.focus(); input.select(); }
+      return;
+    }
+    if (btn.dataset.renameSave) return askSaveRename(btn.dataset.renameSave);
+    if (btn.dataset.renameCancel) { askEditingId = null; return renderAskLibrary(); }
     if (btn.dataset.index) return askIndexOwn(btn.dataset.index);
     if (btn.dataset.reindex) {
       return askAdminCall(`/api/shared/books/${btn.dataset.reindex}/index`, { method: "POST" });
@@ -2993,6 +3109,14 @@ function wireAskTab() {
   });
 
   document.getElementById("ask-send").addEventListener("click", askSend);
+  view.addEventListener("keydown", (e) => {
+    const input = e.target.closest("input[data-rename-input]");
+    if (!input) return;
+    if (e.key === "Enter") { e.preventDefault(); askSaveRename(input.dataset.renameInput); }
+    if (e.key === "Escape") { askEditingId = null; renderAskLibrary(); }
+  });
+  const viewer = document.getElementById("cover-viewer");
+  viewer.addEventListener("click", () => { viewer.hidden = true; });
   document.getElementById("ask-new").addEventListener("click", () => {
     askThread = [];
     renderAskThread();
