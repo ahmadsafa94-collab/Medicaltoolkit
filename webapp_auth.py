@@ -60,7 +60,8 @@ def validate_init_data(init_data: str) -> dict:
     data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(pairs.items()))
     computed_hash = hmac.new(_secret_key(), data_check_string.encode(), hashlib.sha256).hexdigest()
 
-    if not hmac.compare_digest(computed_hash, received_hash):
+    # compare_digest raises TypeError on non-ASCII str; compare bytes instead.
+    if not hmac.compare_digest(computed_hash.encode(), received_hash.encode("utf-8", "replace")):
         raise AuthError("Sign-in data failed its signature check -- this request did not come from Telegram.")
 
     auth_date = pairs.get("auth_date")

@@ -29,9 +29,12 @@ def safe_pdf_filename(raw_name: str | None) -> str:
     """
     name = os.path.basename(raw_name or "")
     name = re.sub(r"[^\w.-]", "_", name).strip(". ") or "upload"
-    if not name.lower().endswith(".pdf"):
-        name += ".pdf"
-    return name[:200]  # keep well under filesystem filename limits
+    stem = name[:-4] if name.lower().endswith(".pdf") else name
+    # Filesystems limit names in BYTES (255): a 148-character Persian name is
+    # 284 bytes and failed to save. The stem is cut to 180 bytes -- room for
+    # unique_path's " (2)" -- and .pdf always survives the cut.
+    stem = stem.encode("utf-8")[:180].decode("utf-8", "ignore").strip(". ") or "upload"
+    return stem + ".pdf"
 
 
 def unique_path(path: str) -> str:

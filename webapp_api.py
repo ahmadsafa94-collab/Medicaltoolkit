@@ -356,12 +356,9 @@ async def rename_book(request: Request):
     if library.is_shared_ref(_book_or_404(user["id"], book_id)):
         raise ApiError(status_code=403, detail="Specialty-library books are named by the admin.")
 
-    try:
-        body = await request.json()
-    except Exception:
-        raise ApiError(status_code=400, detail="Invalid JSON body.")
+    body = await _json_body(request)
 
-    new_title = (body.get("title") or "").strip()
+    new_title = _text(body, "title", 300)
     if not new_title:
         raise ApiError(status_code=400, detail="Title can't be empty.")
     if len(new_title) > 200:
@@ -379,10 +376,7 @@ async def set_cover_color(request: Request):
     book_id = request.path_params["book_id"]
     _book_or_404(user["id"], book_id)
 
-    try:
-        body = await request.json()
-    except Exception:
-        raise ApiError(status_code=400, detail="Invalid JSON body.")
+    body = await _json_body(request)
 
     color = body.get("color")
     if color is not None and not _VALID_HEX_COLOR.match(color):
@@ -425,10 +419,7 @@ async def set_bookmark(request: Request):
     book_id = request.path_params["book_id"]
     book = _book_or_404(user["id"], book_id)
 
-    try:
-        body = await request.json()
-    except Exception:
-        raise ApiError(status_code=400, detail="Invalid JSON body.")
+    body = await _json_body(request)
 
     page = body.get("page")
     if page is not None:
@@ -588,8 +579,12 @@ async def get_book_file(request: Request):
     try:
         _units, _, rng = range_header.partition("=")
         start_s, _, end_s = rng.partition("-")
-        start = int(start_s) if start_s else 0
-        end = int(end_s) if end_s else file_size - 1
+        if not start_s:  # suffix range: the last N bytes
+            start = max(0, file_size - int(end_s))
+            end = file_size - 1
+        else:
+            start = int(start_s)
+            end = int(end_s) if end_s else file_size - 1
         end = min(end, file_size - 1)
     except ValueError:
         raise ApiError(status_code=416, detail="Invalid Range header.")
@@ -751,10 +746,7 @@ async def summarize(request: Request):
     book = _book_or_404(user["id"], book_id)
     chapters = book.get("chapters") or []
 
-    try:
-        body = await request.json()
-    except Exception:
-        raise ApiError(status_code=400, detail="Invalid JSON body.")
+    body = await _json_body(request)
 
     scope = body.get("scope")
     if scope not in ("book", "chapter"):
@@ -821,7 +813,7 @@ async def summarize(request: Request):
     # A whole-book summary is one AI pass per chapter (often 30-80 calls),
     # so it costs one unit per chapter rather than one in total -- before,
     # it was the cheapest way to spend the most.
-    units = len(chapters) if scope == "book" else 1
+    units = min(len(chapters), chapter_ai.MAX_CHAPTERS_FOR_WHOLE_BOOK_SUMMARY) if scope == "book" else 1
     started = start_metered_job(book_id, job_type, job(), user["id"], "summaries", units)
     return JSONResponse({"started": started, "job_type": job_type})
 
@@ -841,13 +833,10 @@ async def export_summary_pdf(request: Request):
     book_id = request.path_params["book_id"]
     book = _book_or_404(user["id"], book_id)
 
-    try:
-        body = await request.json()
-    except Exception:
-        raise ApiError(status_code=400, detail="Invalid JSON body.")
+    body = await _json_body(request)
 
-    text = (body.get("text") or "").strip()
-    title = (body.get("title") or "").strip() or book.get("title") or "Summary"
+    text = _text(body, "text", 400000)
+    title = _text(body, "title", 300) or book.get("title") or "Summary"
     if not text:
         raise ApiError(status_code=400, detail="Nothing to export -- generate a summary first.")
 
@@ -901,6 +890,11 @@ async def index_book(request: Request):
             return JSONResponse({"started": True})
         if (get_job(book_id, "index") or {}).get("status") == "running":
             return JSONResponse({"started": True})
+        shared = shared_library.get_book(book_id) or {}
+        if shared.get("index_error") and not subscriptions.is_admin(user["id"]):
+            # A failed full-book indexing run is the admin's to retry; any
+            # user re-triggering it was an unmetered, repeatable cost.
+            raise ApiError(status_code=409, detail="This book is still being prepared by the admin. Please try again later.")
         return JSONResponse({"started": _start_shared_index(book_id)})
 
     async def job():
@@ -926,11 +920,8 @@ async def ask_book(request: Request):
     book_id = request.path_params["book_id"]
     book = _book_or_404(user["id"], book_id)
 
-    try:
-        body = await request.json()
-    except Exception:
-        raise ApiError(status_code=400, detail="Invalid JSON body.")
-    question = (body.get("question") or "").strip()
+    body = await _json_body(request)
+    question = _text(body, "question", 4000)
     raw_history = body.get("history") or []
     raw_session_id = body.get("session_id")
     session_id = raw_session_id.strip() if isinstance(raw_session_id, str) and raw_session_id.strip() else None
@@ -953,7 +944,7 @@ async def ask_book(request: Request):
         q, a = turn.get("question"), turn.get("answer")
         if not isinstance(q, str) or not isinstance(a, str):
             raise ApiError(status_code=400, detail="Invalid history entry.")
-        history.append({"question": q, "answer": a})
+        history.append({"question": q[:_HISTORY_Q_CHARS], "answer": a[:_HISTORY_A_CHARS]})
 
     # Consumed only once the request is known to be valid, and refunded by
     # the metered block on any failure below -- a timeout or an AI error
@@ -1046,13 +1037,10 @@ async def export_answer_pdf(request: Request):
     book_id = request.path_params["book_id"]
     book = _book_or_404(user["id"], book_id)
 
-    try:
-        body = await request.json()
-    except Exception:
-        raise ApiError(status_code=400, detail="Invalid JSON body.")
+    body = await _json_body(request)
 
-    question = (body.get("question") or "").strip()
-    answer = (body.get("answer") or "").strip()
+    question = _text(body, "question", 4000)
+    answer = _text(body, "answer", 20000)
     raw_sources = body.get("sources") or []
 
     if not question or not answer:
@@ -1116,10 +1104,7 @@ async def create_quiz(request: Request):
     if not chapters:
         raise ApiError(status_code=409, detail="Divide this book into chapters first.")
 
-    try:
-        body = await request.json()
-    except Exception:
-        raise ApiError(status_code=400, detail="Invalid JSON body.")
+    body = await _json_body(request)
 
     chapter_indices = body.get("chapter_indices")
     difficulty = body.get("difficulty")
@@ -1170,10 +1155,7 @@ async def save_quiz_attempt_endpoint(request: Request):
     book_id = request.path_params["book_id"]
     book = _book_or_404(user["id"], book_id)
 
-    try:
-        body = await request.json()
-    except Exception:
-        raise ApiError(status_code=400, detail="Invalid JSON body.")
+    body = await _json_body(request)
 
     questions = body.get("questions")
     answers = body.get("answers")
@@ -1279,10 +1261,7 @@ async def generate_flashcards_endpoint(request: Request):
     if not chapters:
         raise ApiError(status_code=409, detail="Divide this book into chapters first.")
 
-    try:
-        body = await request.json()
-    except Exception:
-        raise ApiError(status_code=400, detail="Invalid JSON body.")
+    body = await _json_body(request)
 
     chapter_indices = body.get("chapter_indices")
     num_cards = body.get("num_cards")
@@ -1331,10 +1310,7 @@ async def review_flashcard_endpoint(request: Request):
     book_id = request.path_params["book_id"]
     _book_or_404(user["id"], book_id)
 
-    try:
-        body = await request.json()
-    except Exception:
-        raise ApiError(status_code=400, detail="Invalid JSON body.")
+    body = await _json_body(request)
 
     card_id = body.get("card_id")
     quality = body.get("quality")
@@ -1421,12 +1397,9 @@ async def add_note_endpoint(request: Request):
     book_id = request.path_params["book_id"]
     book = _book_or_404(user["id"], book_id)
 
-    try:
-        body = await request.json()
-    except Exception:
-        raise ApiError(status_code=400, detail="Invalid JSON body.")
+    body = await _json_body(request)
 
-    text = (body.get("text") or "").strip()
+    text = _text(body, "text", 10000)
     if not text:
         raise ApiError(status_code=400, detail="Note text is required.")
 
@@ -1465,13 +1438,10 @@ async def delete_note_endpoint(request: Request):
 async def request_book_endpoint(request: Request):
     user = require_user(request)
 
-    try:
-        body = await request.json()
-    except Exception:
-        raise ApiError(status_code=400, detail="Invalid JSON body.")
+    body = await _json_body(request)
 
-    url = (body.get("url") or "").strip()
-    note = (body.get("note") or "").strip()[:500]
+    url = _text(body, "url", 2000)
+    note = _text(body, "note", 5000)[:500]
     if not url:
         raise ApiError(status_code=400, detail="Please enter the book's URL.")
     if not (url.startswith("http://") or url.startswith("https://")):
@@ -1549,6 +1519,24 @@ _MAX_INTERACTION_DRUGS = 15  # mirrors interaction_flow.MAX_DRUGS
 # "Request failed (502)" with nothing to act on. Failing ourselves, in
 # time, means the reason always comes from us.
 _DRUG_TOTAL_BUDGET_SECONDS = 110
+
+
+# Client-supplied conversation history is trimmed per turn to these.
+_HISTORY_Q_CHARS = 4000
+_HISTORY_A_CHARS = 12000
+
+
+def _text(body: dict, key: str, max_len: int) -> str:
+    """A string field: missing -> "", stripped; 400 if it isn't a string or is longer than max_len."""
+    value = body.get(key)
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ApiError(status_code=400, detail=f"Invalid {key}.")
+    value = value.strip()
+    if len(value) > max_len:
+        raise ApiError(status_code=400, detail=f"That {key} is too long (max {max_len} characters).")
+    return value
 
 
 async def _json_body(request: Request) -> dict:
@@ -1678,7 +1666,7 @@ async def drug_resolve(request: Request):
     """
     require_user(request)
     body = await _json_body(request)
-    name = (body.get("name") or "").strip()
+    name = _text(body, "name", 200)
     if not name:
         raise ApiError(status_code=400, detail="Type a drug name first.")
     sections = await _fetch_label(name)
@@ -1754,8 +1742,8 @@ async def drug_ask(request: Request):
     user = require_user(request)
     body = await _json_body(request)
 
-    name = (body.get("drug") or "").strip()
-    question = (body.get("question") or "").strip()
+    name = _text(body, "drug", 200)
+    question = _text(body, "question", 4000)
     if not name:
         raise ApiError(status_code=400, detail="Which drug is the question about?")
     if not question:
@@ -1774,7 +1762,7 @@ async def drug_ask(request: Request):
         q, a = turn.get("question"), turn.get("answer")
         if not isinstance(q, str) or not isinstance(a, str):
             raise ApiError(status_code=400, detail="Invalid history entry.")
-        history.append({"question": q, "answer": a})
+        history.append({"question": q[:_HISTORY_Q_CHARS], "answer": a[:_HISTORY_A_CHARS]})
 
     sections = await _fetch_label(name)
     resolved = sections.get("_name") or name
@@ -1841,7 +1829,7 @@ async def _lexi_monograph(drug: str) -> dict:
 async def lexidrug_open(request: Request):
     require_user(request)
     body = await _json_body(request)
-    drug = (body.get("drug") or "").strip()
+    drug = _text(body, "drug", 200)
     if not drug:
         raise ApiError(status_code=400, detail="Type a drug name first.")
     if len(drug) > 80:
@@ -1853,8 +1841,8 @@ async def lexidrug_open(request: Request):
 async def lexidrug_ask(request: Request):
     user = require_user(request)
     body = await _json_body(request)
-    drug = (body.get("drug") or "").strip()
-    question = (body.get("question") or "").strip()
+    drug = _text(body, "drug", 200)
+    question = _text(body, "question", 4000)
     if not drug:
         raise ApiError(status_code=400, detail="Which drug is the question about?")
     if not question:
@@ -1867,7 +1855,7 @@ async def lexidrug_ask(request: Request):
     for turn in raw_history[-lexidrug.MAX_HISTORY_TURNS:]:
         if not isinstance(turn, dict) or not isinstance(turn.get("question"), str) or not isinstance(turn.get("answer"), str):
             raise ApiError(status_code=400, detail="Invalid history entry.")
-        history.append({"question": turn["question"], "answer": turn["answer"]})
+        history.append({"question": turn["question"][:_HISTORY_Q_CHARS], "answer": turn["answer"][:_HISTORY_A_CHARS]})
 
     entry = await _lexi_monograph(drug)  # cached after /open, so normally instant
 
@@ -1953,7 +1941,7 @@ async def ask_library(request: Request):
 async def ask_multi(request: Request):
     user = require_user(request)
     body = await _json_body(request)
-    question = (body.get("question") or "").strip()
+    question = _text(body, "question", 4000)
     raw_ids = body.get("book_ids")
     if not question:
         raise ApiError(status_code=400, detail="Question can't be empty.")
@@ -2011,7 +1999,7 @@ async def ask_multi(request: Request):
     for turn in raw_history[-pdf_qa.MAX_HISTORY_TURNS:]:
         if not isinstance(turn, dict) or not isinstance(turn.get("question"), str) or not isinstance(turn.get("answer"), str):
             raise ApiError(status_code=400, detail="Invalid history entry.")
-        history.append({"question": turn["question"], "answer": turn["answer"]})
+        history.append({"question": turn["question"][:_HISTORY_Q_CHARS], "answer": turn["answer"][:_HISTORY_A_CHARS]})
 
     try:
         with subscriptions.metered(user["id"], "questions"):  # one question, however many books
@@ -2689,7 +2677,7 @@ async def web_site_test(request: Request):
     _require_web_admin(request)
     site_id = _web_site_id(request)
     body = await _json_body(request)
-    query = (body.get("query") or "").strip()[:200]
+    query = _text(body, "query", 200)[:200]
     if not query:
         raise ApiError(status_code=400, detail="Type something to search for.")
     results = await _web_call(asyncio.wait_for(web_sources.search(site_id, query), timeout=90))
@@ -2797,6 +2785,64 @@ routes = [
 ]
 
 
+# Every request body is limited -- the JSON ones were read whole into
+# memory with no cap (a multi-GB "note" was accepted). Uploads have their
+# own per-chunk and per-file limits and are exempt.
+_MAX_BODY_BYTES = 2 * 1024 * 1024
+_UNLIMITED_BODY_PATHS = re.compile(r"^/api/(uploads/[^/]+/chunk|upload|shared/upload)$")
+
+
+class _BodyTooLarge(Exception):
+    pass
+
+
+class BodySizeLimitMiddleware:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or _UNLIMITED_BODY_PATHS.match(scope.get("path", "")):
+            return await self.app(scope, receive, send)
+        for name, value in scope.get("headers") or []:
+            if name == b"content-length":
+                try:
+                    too_big = int(value) > _MAX_BODY_BYTES
+                except ValueError:
+                    too_big = True
+                if too_big:
+                    return await self._reject(send)
+        received = 0
+        started = False
+
+        async def limited_receive():
+            nonlocal received
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > _MAX_BODY_BYTES:
+                    raise _BodyTooLarge()
+            return message
+
+        async def tracking_send(message):
+            nonlocal started
+            if message["type"] == "http.response.start":
+                started = True
+            await send(message)
+
+        try:
+            await self.app(scope, limited_receive, tracking_send)
+        except _BodyTooLarge:
+            if not started:
+                await self._reject(send)
+
+    @staticmethod
+    async def _reject(send):
+        body = b'{"detail":"That request is too large."}'
+        await send({"type": "http.response.start", "status": 413,
+                    "headers": [(b"content-type", b"application/json"), (b"content-length", str(len(body)).encode())]})
+        await send({"type": "http.response.body", "body": body})
+
+
 class NoCacheStaticMiddleware(BaseHTTPMiddleware):
     """
     Forces every /webapp/* response (index.html, style.css, app.js) to be
@@ -2851,5 +2897,5 @@ _WEBAPP_CSP = "; ".join([
 app = Starlette(
     routes=routes,
     exception_handlers={HTTPException: _api_error_handler},
-    middleware=[Middleware(NoCacheStaticMiddleware)],
+    middleware=[Middleware(BodySizeLimitMiddleware), Middleware(NoCacheStaticMiddleware)],
 )
