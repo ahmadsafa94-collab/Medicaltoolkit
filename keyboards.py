@@ -624,5 +624,6 @@ def admin_test_menu_kb() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="📝 Chapter summary", callback_data="admin:testrun:summary")],
             [InlineKeyboardButton(text="❓ Chapter quiz", callback_data="admin:testrun:quiz")],
             [InlineKeyboardButton(text="🧠 Mnemonics", callback_data="admin:testrun:mnemonics")],
+            [InlineKeyboardButton(text="🔑 Check API keys", callback_data="admin:testrun:keys")],
         ]
     )

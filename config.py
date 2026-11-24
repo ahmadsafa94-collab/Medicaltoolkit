@@ -5,6 +5,11 @@ load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
+# Only needed for an Anthropic API key that is NOT scoped to a workspace
+# (Anthropic then requires the workspace on every request). The ID is shown
+# in the Anthropic Console under Settings -> Workspaces. Leave unset for a
+# normal workspace-scoped key.
+ANTHROPIC_WORKSPACE_ID = os.environ.get("ANTHROPIC_WORKSPACE_ID", "").strip()
 VOYAGE_API_KEY = os.environ["VOYAGE_API_KEY"]
 # Optional but strongly recommended in production: without a key openFDA
 # allows 1,000 requests/day per server IP (each drug lookup can use up to

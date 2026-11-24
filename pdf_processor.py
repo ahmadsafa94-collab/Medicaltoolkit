@@ -26,6 +26,7 @@ import cost_ledger
 from config import (
     ANTHROPIC_API_KEY,
     ANTHROPIC_CLIENT_TIMEOUT_SECONDS,
+    ANTHROPIC_WORKSPACE_ID,
     CLAUDE_MODEL,
     MAX_BOOK_PAGES,
     MAX_PAGES_PER_PASS,
@@ -35,7 +36,13 @@ from config import (
 # long for a Telegram bot to sit silently on a stalled request. This is one
 # half of the fix for uploads that appeared to hang forever; the other half
 # is the overall asyncio.wait_for() around process_pdf() in bot.py.
-client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=ANTHROPIC_CLIENT_TIMEOUT_SECONDS)
+client = anthropic.Anthropic(
+    api_key=ANTHROPIC_API_KEY,
+    timeout=ANTHROPIC_CLIENT_TIMEOUT_SECONDS,
+    # An org-level key (not scoped to a workspace) is refused unless every
+    # request names the workspace -- see config.ANTHROPIC_WORKSPACE_ID.
+    default_headers={"anthropic-workspace-id": ANTHROPIC_WORKSPACE_ID} if ANTHROPIC_WORKSPACE_ID else None,
+)
 
 logger = logging.getLogger(__name__)
 

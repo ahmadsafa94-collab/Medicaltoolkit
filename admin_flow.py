@@ -417,6 +417,12 @@ async def handle_test_run(callback: CallbackQuery):
             result = await asyncio.to_thread(chapter_ai.quiz_chapter, "Test Chapter", _TEST_CHAPTER_TEXT, False, 2)
         elif feature == "mnemonics":
             result = await asyncio.to_thread(chapter_ai.generate_mnemonics, "Test Chapter", _TEST_CHAPTER_TEXT)
+        elif feature == "keys":
+            import health_check
+
+            report = health_check.format_results(await health_check.run_checks())
+            await callback.message.answer(f"🔑 API key check ({time.monotonic() - start:.1f}s)\n\n{report}")
+            return
         else:
             await callback.message.answer("Unknown test.")
             return

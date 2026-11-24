@@ -93,6 +93,7 @@ import drug_qa_flow
 import flashcard_flow
 import flashcards
 import glossary
+import health_check
 import library
 import message_translation
 import name_resolver
@@ -1504,6 +1505,10 @@ async def main():
     # first to trigger it and waited for it. Languages with nothing
     # missing cost nothing, so this is usually a no-op.
     asyncio.create_task(asyncio.to_thread(ui_text.warm_known_languages))
+    # One line per external service in the log ("KEY CHECK OK/FAIL ..."),
+    # so a bad key or empty balance shows up at deploy time, not as a
+    # user's failed request.
+    asyncio.create_task(health_check.log_startup_checks())
 
     server_config = uvicorn.Config(webapp_app, host="0.0.0.0", port=PORT, log_level="info")
     server = uvicorn.Server(server_config)
