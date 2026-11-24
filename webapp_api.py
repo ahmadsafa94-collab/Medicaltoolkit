@@ -1982,7 +1982,11 @@ async def shared_delete_book(request: Request):
 # to check the PDF and register it. The old /api/upload stays for clients
 # still running a cached older app.js.
 
-UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024
+# 4 MB parts, sent 4 at a time by the client: on a mobile link a dropped
+# connection loses at most one small part, and more parallel streams use a
+# high-latency route (far from the Amsterdam server) better than fewer.
+UPLOAD_CHUNK_BYTES = 4 * 1024 * 1024
+_WRITE_BUFFER_BYTES = 1024 * 1024
 _UPLOAD_TTL_SECONDS = 2 * 3600
 _MAX_OPEN_UPLOADS_PER_USER = 3
 _uploads: dict[str, dict] = {}
@@ -2043,7 +2047,7 @@ async def upload_start(request: Request):
     upload_id = uuid.uuid4().hex
     _uploads[upload_id] = {
         "user_id": user["id"], "path": path, "size": size, "title": title, "target": target,
-        "specialty": specialty, "received": set(), "touched": time.time(),
+        "specialty": specialty, "received": set(), "touched": time.time(), "started": time.time(),
         "chunks": -(-size // UPLOAD_CHUNK_BYTES),
     }
     return JSONResponse({"upload_id": upload_id, "chunk_size": UPLOAD_CHUNK_BYTES, "chunks": _uploads[upload_id]["chunks"]})
@@ -2070,15 +2074,24 @@ async def upload_chunk(request: Request):
     offset = index * UPLOAD_CHUNK_BYTES
     expected = min(UPLOAD_CHUNK_BYTES, up["size"] - offset)
     written = 0
+    buf = bytearray()
     fd = os.open(up["path"], os.O_WRONLY)
     try:
+        # Network pieces arrive in ~64 KB bits; they're gathered into 1 MB
+        # writes so the disk isn't hit (and a thread hop isn't paid) per bit.
         async for piece in request.stream():
             if not piece:
                 continue
-            if written + len(piece) > expected:
+            if written + len(buf) + len(piece) > expected:
                 raise ApiError(status_code=400, detail="Chunk is larger than expected.")
-            await asyncio.to_thread(os.pwrite, fd, piece, offset + written)
-            written += len(piece)
+            buf += piece
+            if len(buf) >= _WRITE_BUFFER_BYTES:
+                await asyncio.to_thread(os.pwrite, fd, bytes(buf), offset + written)
+                written += len(buf)
+                buf.clear()
+        if buf:
+            await asyncio.to_thread(os.pwrite, fd, bytes(buf), offset + written)
+            written += len(buf)
     finally:
         os.close(fd)
     if written != expected:
@@ -2096,6 +2109,11 @@ async def upload_finish(request: Request):
     if missing:
         raise ApiError(status_code=409, detail=f"{missing} part(s) of the file are still missing. Please retry.")
     _uploads.pop(upload_id, None)
+    secs = max(0.001, time.time() - up["started"])
+    logger.info(
+        "Upload by %s: %.1f MB in %.0f s (%.2f MB/s, %d parts)",
+        user["id"], up["size"] / 2**20, secs, up["size"] / 2**20 / secs, up["chunks"],
+    )
 
     try:
         page_count = await asyncio.to_thread(open_check, up["path"])
@@ -2126,6 +2144,26 @@ async def upload_finish(request: Request):
     return JSONResponse(_public_book(book_id, library.get_book(user["id"], book_id)))
 
 
+def _read_app_version() -> int:
+    """The app.js?v=N cache-buster in index.html -- bumped on every front-end change."""
+    try:
+        with open(os.path.join(_WEBAPP_DIR, "index.html"), encoding="utf-8") as f:
+            m = re.search(r"app\.js\?v=(\d+)", f.read())
+        return int(m.group(1)) if m else 0
+    except OSError:
+        return 0
+
+
+async def app_version(request: Request):
+    """
+    Lets an already-open mini app notice that a newer version was deployed.
+    Telegram keeps a mini app's page alive between opens, so without this a
+    user can keep running yesterday's code for hours -- which is exactly
+    how a fixed uploader went untested: every attempt still used the old one.
+    """
+    return JSONResponse({"version": _read_app_version()})
+
+
 async def upload_cancel(request: Request):
     user = require_user(request)
     upload_id, up = _owned_upload(request, user["id"])
@@ -2137,6 +2175,7 @@ async def upload_cancel(request: Request):
 routes = [
     Route("/api/books", list_books, methods=["GET"]),
     Route("/api/upload", upload_book, methods=["POST"]),
+    Route("/api/version", app_version, methods=["GET"]),
     Route("/api/uploads", upload_start, methods=["POST"]),
     Route("/api/uploads/{upload_id}/chunk", upload_chunk, methods=["PUT"]),
     Route("/api/uploads/{upload_id}/finish", upload_finish, methods=["POST"]),

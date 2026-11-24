@@ -469,8 +469,47 @@ document.getElementById("file-input").addEventListener("change", (e) => {
 // far-away connection much better than one, and a part that fails is
 // retried on its own instead of the whole book starting over.
 
-const UPLOAD_PARALLEL = 3;
-const UPLOAD_RETRIES = 4;
+const UPLOAD_PARALLEL = 4;
+const UPLOAD_RETRIES = 5;
+
+// --- stay on the latest deployed version -------------------------------
+// Telegram keeps a mini app's page alive between opens, so a user can run
+// an old app.js for hours after a deploy. The page compares its own
+// version (the ?v= it was loaded with) with the server's and reloads when
+// it's behind -- checked when the app comes back to the foreground and
+// right before an upload starts.
+const APP_VERSION = (() => {
+  const src = (document.currentScript && document.currentScript.src) || "";
+  const m = src.match(/[?&]v=(\d+)/);
+  return m ? parseInt(m[1], 10) : 0;
+})();
+
+async function reloadIfOutdated() {
+  try {
+    const { version } = await api("/api/version");
+    if (version && APP_VERSION && version > APP_VERSION) {
+      window.location.reload();
+      return true;
+    }
+  } catch (_) { /* offline or server busy: keep going on this version */ }
+  return false;
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") reloadIfOutdated();
+});
+
+// "12.4 / 85.0 MB · 1.8 MB/s · ~41 s left" -- so a slow upload shows
+// whether it's moving, and how fast the connection really is.
+function uploadProgressText(fraction, bytesDone, total, startedAt) {
+  const mb = (b) => (b / 1048576).toFixed(1);
+  const secs = (Date.now() - startedAt) / 1000;
+  if (fraction >= 1) return "Checking the file…";
+  if (secs < 1.5 || bytesDone <= 0) return `Uploading… ${mb(bytesDone)} / ${mb(total)} MB`;
+  const rate = bytesDone / secs;
+  const left = Math.max(0, (total - bytesDone) / rate);
+  const eta = left > 90 ? `~${Math.round(left / 60)} min left` : `~${Math.round(left)} s left`;
+  return `Uploading… ${mb(bytesDone)} / ${mb(total)} MB · ${(rate / 1048576).toFixed(1)} MB/s · ${eta}`;
+}
 
 function putChunk(url, blob, onBytes) {
   return new Promise((resolve, reject) => {
@@ -493,6 +532,20 @@ function putChunk(url, blob, onBytes) {
 }
 
 async function chunkedUpload(file, { target = "shelf", title, specialty, onProgress }) {
+  if (await reloadIfOutdated()) throw new Error("The app was just updated -- please start the upload again.");
+  // Keep the screen on: Android pauses a backgrounded WebView, and a
+  // sleeping screen is the usual reason a long upload "stops".
+  let wakeLock = null;
+  try { if (navigator.wakeLock) wakeLock = await navigator.wakeLock.request("screen"); } catch (_) { /* not supported */ }
+  try {
+    return await _chunkedUpload(file, { target, title, specialty, onProgress });
+  } finally {
+    try { if (wakeLock) await wakeLock.release(); } catch (_) { /* already released */ }
+  }
+}
+
+async function _chunkedUpload(file, { target, title, specialty, onProgress }) {
+  const startedAt = Date.now();
   const start = await api("/api/uploads", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -500,7 +553,11 @@ async function chunkedUpload(file, { target = "shelf", title, specialty, onProgr
   });
   const { upload_id: id, chunk_size: size, chunks } = start;
   const loaded = new Array(chunks).fill(0);
-  const report = () => onProgress && onProgress(loaded.reduce((a, b) => a + b, 0) / file.size);
+  const report = () => {
+    if (!onProgress) return;
+    const done = loaded.reduce((a, b) => a + b, 0);
+    onProgress(done / file.size, uploadProgressText(done / file.size, done, file.size, startedAt));
+  };
 
   let next = 0;
   const worker = async () => {
@@ -529,7 +586,7 @@ async function chunkedUpload(file, { target = "shelf", title, specialty, onProgr
     api(`/api/uploads/${id}`, { method: "DELETE" }).catch(() => {});
     throw e;
   }
-  if (onProgress) onProgress(1);
+  if (onProgress) onProgress(1, "Checking the file…");
   return api(`/api/uploads/${id}/finish`, { method: "POST" });
 }
 
@@ -547,10 +604,9 @@ function uploadFile(file) {
   chunkedUpload(file, {
     target: "shelf",
     title: file.name.replace(/\.pdf$/i, ""),
-    onProgress: (f) => {
-      const pct = Math.round(f * 100);
-      bar.style.width = pct + "%";
-      status.textContent = pct < 100 ? `Uploading… ${pct}%` : "Checking the file…";
+    onProgress: (f, text) => {
+      bar.style.width = Math.round(f * 100) + "%";
+      status.textContent = text;
     },
   })
     .then((data) => {
@@ -2860,10 +2916,9 @@ function askAdminUpload(file) {
     target: "shared",
     specialty: askSpecialty,
     title: file.name.replace(/\.pdf$/i, "").replace(/_/g, " "),
-    onProgress: (f) => {
-      const pct = Math.round(f * 100);
-      bar.style.width = pct + "%";
-      status.textContent = pct < 100 ? `Uploading… ${pct}%` : "Checking the file…";
+    onProgress: (f, text) => {
+      bar.style.width = Math.round(f * 100) + "%";
+      status.textContent = text;
     },
   })
     .then(() => done())
