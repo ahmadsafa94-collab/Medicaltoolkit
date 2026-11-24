@@ -2680,10 +2680,32 @@ class NoCacheStaticMiddleware(BaseHTTPMiddleware):
     """
     async def dispatch(self, request, call_next):
         response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "no-referrer"
         if request.url.path.startswith("/webapp/") or request.url.path == "/webapp":
             response.headers["Cache-Control"] = "no-store, must-revalidate"
             response.headers["Pragma"] = "no-cache"
+            # Scripts only from this server and Telegram's SDK, and no eval:
+            # an injected attribute or a hostile PDF font can't run code, and
+            # nothing can be sent anywhere but back here. No frame-ancestors:
+            # Telegram's web clients show the app in an iframe.
+            response.headers["Content-Security-Policy"] = _WEBAPP_CSP
         return response
+
+
+_WEBAPP_CSP = "; ".join([
+    "default-src 'self'",
+    "script-src 'self' https://telegram.org",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob:",
+    "font-src 'self'",
+    "connect-src 'self'",
+    "worker-src 'self' blob:",
+    "frame-src 'none'",
+    "object-src 'none'",
+    "base-uri 'none'",
+    "form-action 'self'",
+])
 
 
 app = Starlette(

@@ -46,6 +46,8 @@ const MAX_FLASHCARD_CARDS = 50;
 // API helper
 // ---------------------------------------------------------------------
 
+let sessionExpiredShown = false;
+
 async function api(path, opts = {}) {
   const headers = Object.assign({ "X-Telegram-Init-Data": INIT_DATA }, opts.headers || {});
   const res = await fetch(path, Object.assign({}, opts, { headers }));
@@ -64,14 +66,32 @@ async function api(path, opts = {}) {
     const err = new Error(message);
     err.status = res.status;
     err.detail = detail;
+    if (res.status === 401 && INIT_DATA && !sessionExpiredShown) {
+      sessionExpiredShown = true;
+      err.message = "Your session has expired. Close the app and open it again from the bot.";
+    }
     throw err;
   }
   return data;
 }
 
 function alertMsg(msg) {
-  if (tg && tg.showAlert) tg.showAlert(msg);
-  else window.alert(msg);
+  const m = String(msg || "Something went wrong.").slice(0, 250);
+  try {
+    if (tg && tg.showAlert) return tg.showAlert(m);
+  } catch (_) { /* popup already open, or an old client */ }
+  try { window.alert(m); } catch (_) {}
+}
+
+// tg.showConfirm, but it can't throw and never leaves the caller hanging.
+function confirmMsg(msg) {
+  const m = String(msg || "Are you sure?").slice(0, 250);
+  return new Promise((resolve) => {
+    try {
+      if (tg && tg.showConfirm) return tg.showConfirm(m, (ok) => resolve(!!ok));
+    } catch (_) {}
+    try { resolve(window.confirm(m)); } catch (_) { resolve(false); }
+  });
 }
 
 // ---------------------------------------------------------------------
@@ -94,7 +114,7 @@ function showView(id, { pushHistory = true } = {}) {
   views.forEach((v) => (document.getElementById(v).hidden = v !== id));
   if (pushHistory) {
     if (ROOT_VIEWS.includes(id)) viewStack = [id];
-    else viewStack.push(id);
+    else if (viewStack[viewStack.length - 1] !== id) viewStack.push(id);
   }
   syncTabBar(id);
   updateBackButton();
@@ -149,12 +169,16 @@ let shelfCount = 0;
 // pre-check can't drift from what the server enforces.
 let maxUploadMb = 500;
 
+let shelfLoadSeq = 0;
+
 async function loadShelf() {
   const grid = document.getElementById("shelf-grid");
   const empty = document.getElementById("shelf-empty");
-  grid.innerHTML = "";
+  const seq = ++shelfLoadSeq;
   try {
     const { books, shelf_limit, shelf_used, max_upload_mb } = await api("/api/books");
+    if (seq !== shelfLoadSeq) return;  // a newer load is on its way
+    grid.innerHTML = "";
     shelfLimit = shelf_limit ?? null;
     if (max_upload_mb) maxUploadMb = max_upload_mb;
     // From the server, not books.length: paid 📚 Requested Books sit on the
@@ -272,10 +296,10 @@ function bookTile(book, { shared = false } = {}) {
   return wrap;
 }
 
+// Safe for text AND for double- or single-quoted attribute values: titles
+// come from uploaded file names, and a '"' there used to end the attribute.
 function escapeHtml(s) {
-  const d = document.createElement("div");
-  d.textContent = s;
-  return d.innerHTML;
+  return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 }
 
 // ---------------------------------------------------------------------
@@ -438,21 +462,14 @@ function confirmDeleteBook(book) {
       alertMsg("Couldn't delete this book: " + e.message);
       return;
     }
-    if (currentBook && currentBook.book_id === book.book_id) {
-      showView("view-shelf", { pushHistory: false });
-      viewStack = ["view-shelf"];
-    }
+    if (currentBook && currentBook.book_id === book.book_id) showView("view-shelf");
     loadShelf();
   };
-  const message = `Delete "${book.title}"? This can't be undone.`;
+  // Long titles are shortened: Telegram refuses a dialog over 256 characters,
+  // which used to make such a book impossible to delete.
+  const shortTitle = book.title.length > 120 ? book.title.slice(0, 117) + "…" : book.title;
   hideActionSheet();
-  if (tg && tg.showConfirm) {
-    tg.showConfirm(message, (ok) => {
-      if (ok) doDelete();
-    });
-  } else if (window.confirm(message)) {
-    doDelete();
-  }
+  confirmMsg(`Delete "${shortTitle}"? This can't be undone.`).then((ok) => { if (ok) doDelete(); });
 }
 
 // ---------------------------------------------------------------------
@@ -466,10 +483,12 @@ document.getElementById("btn-bookmarks").addEventListener("click", () => {
   loadBookmarks();
 });
 
+let bookmarksLoadSeq = 0;
+
 async function loadBookmarks() {
   const list = document.getElementById("bookmarks-list");
   const empty = document.getElementById("bookmarks-empty");
-  list.innerHTML = "";
+  const seq = ++bookmarksLoadSeq;
   let books;
   try {
     ({ books } = await api("/api/books?all=1"));
@@ -477,6 +496,8 @@ async function loadBookmarks() {
     alertMsg("Couldn't load bookmarks: " + e.message);
     return;
   }
+  if (seq !== bookmarksLoadSeq) return;
+  list.innerHTML = "";
   const bookmarked = books.filter((b) => b.bookmark_page);
   empty.hidden = bookmarked.length > 0;
   bookmarked.forEach((book) => {
@@ -497,8 +518,7 @@ async function loadBookmarks() {
 }
 
 async function openBookAtPage(bookId, page) {
-  await openBook(bookId);
-  await openReader(page);
+  if (await openBook(bookId)) await openReader(page);
 }
 
 // A citation tapped in an answer: open that book at the cited page, show
@@ -632,7 +652,18 @@ const APP_VERSION = (() => {
   return m ? parseInt(m[1], 10) : 0;
 })();
 
+// Something the user would lose on a reload: an upload or a question in
+// flight, or text typed into a question box.
+function userIsBusy() {
+  if (uploadsInFlight > 0 || askBusy || drugsBusy || (typeof lexiBusy !== "undefined" && lexiBusy)) return true;
+  return ["ask-question", "lookup-question", "lexi-question", "web-text", "web-secret"].some((id) => {
+    const el = document.getElementById(id);
+    return el && el.value.trim();
+  });
+}
+
 async function reloadIfOutdated() {
+  if (userIsBusy()) return false;  // try again next time the app comes back
   try {
     const { version } = await api("/api/version");
     if (version && APP_VERSION && version > APP_VERSION) {
@@ -679,8 +710,19 @@ function putChunk(url, blob, onBytes) {
   });
 }
 
-async function chunkedUpload(file, { target = "shelf", title, specialty, onProgress }) {
+let uploadsInFlight = 0;
+
+async function chunkedUpload(file, opts) {
   if (await reloadIfOutdated()) throw new Error("The app was just updated -- please start the upload again.");
+  uploadsInFlight++;
+  try {
+    return await _chunkedUpload(file, opts);
+  } finally {
+    uploadsInFlight--;
+  }
+}
+
+async function _chunkedUpload(file, { target = "shelf", title, specialty, onProgress }) {
   // Keep the screen on: Android pauses a backgrounded WebView, and a
   // sleeping screen is the usual reason a long upload "stops".
   let wakeLock = null;
@@ -758,14 +800,12 @@ function uploadFile(file) {
     },
   })
     .then((data) => {
-      showView("view-shelf", { pushHistory: false });
-      viewStack = ["view-shelf"];
+      showView("view-shelf");
       loadShelf().then(() => openBook(data.book_id));
     })
     .catch((e) => {
+      showView("view-shelf");
       alertMsg(e.message === "Network error" ? "Upload failed -- check your connection and try again." : e.message);
-      showView("view-shelf", { pushHistory: false });
-      viewStack = ["view-shelf"];
     });
 }
 
@@ -776,17 +816,21 @@ function uploadFile(file) {
 let currentBook = null;
 
 async function openBook(bookId) {
+  let book;
   try {
-    currentBook = await api(`/api/books/${bookId}`);
+    book = await api(`/api/books/${bookId}`);
   } catch (e) {
     alertMsg("Couldn't open that book: " + e.message);
-    return;
+    return false;
   }
+  currentBook = book;
+  panelSeq++;
   flashcardChapterFilter = null;  // a chapter index from a previously-open book wouldn't mean anything here
   renderBookHeader();
   document.getElementById("book-panel").hidden = true;
   document.getElementById("book-panel").innerHTML = "";
   showView("view-book");
+  return true;
 }
 
 function isSpecialtyBook(book) {
@@ -844,7 +888,10 @@ function renderBookHeader() {
   else { badge.textContent = ""; }
 }
 
+let panelSeq = 0;  // bumped whenever the book panel or the open book changes
+
 function panel(html) {
+  panelSeq++;
   const p = document.getElementById("book-panel");
   p.hidden = false;
   p.innerHTML = html;
@@ -867,24 +914,46 @@ document.querySelectorAll(".action-btn").forEach((btn) => {
 // Generic job polling
 // ---------------------------------------------------------------------
 
-function pollJob(bookId, jobType, { onProgress, onDone, onError }) {
+// The callbacks run only while the same book and the same panel are still
+// on screen: a job finishing after the user moved on (another book, a quiz
+// started meanwhile) must not redraw -- or act on -- what is there now.
+function pollJob(bookId, jobType, { onProgress, onDone, onError, screenBound = true }) {
+  const myPanel = panelSeq;
+  const current = () => !screenBound || (currentBook && currentBook.book_id === bookId && panelSeq === myPanel);
+  const safely = (fn, arg) => {
+    if (!fn || !current()) return;
+    Promise.resolve()
+      .then(() => fn(arg))
+      .catch((e) => alertMsg(e.message));
+  };
+  let failures = 0;
   const tick = async () => {
     let job;
     try {
       job = await api(`/api/books/${bookId}/jobs/${jobType}`);
+      failures = 0;
     } catch (e) {
-      onError(e.message);
+      // One dropped request isn't a failed job: the server keeps working.
+      if (++failures < 4 && e.status !== 401 && e.status !== 404) {
+        setTimeout(tick, 2500);
+      } else {
+        safely(onError, e.message);
+      }
+      return;
+    }
+    if (!current() && job.status === "running") {
+      setTimeout(tick, 1500);  // keep following quietly; nothing is drawn while away
       return;
     }
     if (job.status === "running") {
-      if (onProgress) onProgress(job.progress);
+      safely(onProgress, job.progress);
       setTimeout(tick, 1500);
     } else if (job.status === "done") {
-      onDone(job.result);
+      safely(onDone, job.result);
     } else if (job.status === "error") {
-      onError(job.error || "Something went wrong.");
+      safely(onError, job.error || "Something went wrong.");
     } else {
-      onError("No job in progress.");
+      safely(onError, "No job in progress.");
     }
   };
   tick();
@@ -1003,6 +1072,8 @@ async function openPdfWithRetry(url, attempts = 3) {
         disableAutoFetch: true,
         disableStream: true,
         rangeChunkSize: 1024 * 1024,
+        // A crafted font in a PDF could otherwise run code (CVE-2024-4367).
+        isEvalSupported: false,
       });
       return await task.promise;
     } catch (e) {
@@ -1015,16 +1086,30 @@ async function openPdfWithRetry(url, attempts = 3) {
   throw lastErr;
 }
 
+let readerSeq = 0;
+
 async function openReader(targetPage) {
+  const seq = ++readerSeq;
+  const bookId = currentBook.book_id;
+  // The previous book's document is released now, not kept driving the
+  // pager (and holding memory) while the new one loads.
+  const old = readerState.pdf;
+  readerState.pdf = null;
+  readerState.pending = false;
+  if (old) old.destroy();
   if (readerSource && readerSource.page !== targetPage) readerSource = null;
   document.getElementById("reader-source").hidden = true;
   showView("view-reader");
   document.getElementById("reader-page-label").textContent = "Loading…";
   document.getElementById("reader-goto-row").hidden = true;
   try {
-    pdfjsLib.GlobalWorkerOptions.workerSrc =
-      "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
-    readerState.pdf = await openPdfWithRetry(`/api/books/${currentBook.book_id}/file`);
+    pdfjsLib.GlobalWorkerOptions.workerSrc = "vendor/pdf.worker.min.js";
+    const pdf = await openPdfWithRetry(`/api/books/${bookId}/file`);
+    if (seq !== readerSeq) {  // another book was opened meanwhile
+      pdf.destroy();
+      return;
+    }
+    readerState.pdf = pdf;
     // targetPage (from a bookmark tap) wins; otherwise resume from the
     // book's own bookmark if one is set, otherwise page 1.
     readerState.pageNum = targetPage || currentBook.bookmark_page || 1;
@@ -1032,23 +1117,37 @@ async function openReader(targetPage) {
     updateZoomLabel();
     document.getElementById("reader-notes-panel").hidden = true;
     try {
-      const result = await api(`/api/books/${currentBook.book_id}/notes`);
+      const result = await api(`/api/books/${bookId}/notes`);
       readerState.notes = result.notes;
     } catch (_) {
       readerState.notes = [];  // non-fatal -- the reader still works without notes loaded
     }
+    if (seq !== readerSeq) return;
     renderReaderPage();
   } catch (e) {
+    if (seq !== readerSeq) return;
     alertMsg("Couldn't open the reader: " + e.message);
     goBack();
   }
 }
 
+// A flip or zoom while a page is still drawing is remembered and drawn
+// right after, so the page on screen always ends up matching the label,
+// the bookmark button and the notes.
 async function renderReaderPage() {
-  if (!readerState.pdf || readerState.rendering) return;
+  if (!readerState.pdf) return;
+  if (readerState.rendering) {
+    readerState.pending = true;
+    return;
+  }
   readerState.rendering = true;
   try {
-    await _renderReaderPage();
+    do {
+      readerState.pending = false;
+      const pdf = readerState.pdf;
+      if (!pdf) break;
+      await _renderReaderPage(pdf, readerState.pageNum);
+    } while (readerState.pending);
   } catch (e) {
     // A failed page fetch used to leave `rendering` stuck at true, so the
     // reader froze on "Loading…" with a blank page for good.
@@ -1058,10 +1157,10 @@ async function renderReaderPage() {
   }
 }
 
-async function getPageWithRetry(num, attempts = 3) {
+async function getPageWithRetry(pdf, num, attempts = 3) {
   for (let i = 0; ; i++) {
     try {
-      return await readerState.pdf.getPage(num);
+      return await pdf.getPage(num);
     } catch (e) {
       if (i >= attempts - 1) throw e;
       document.getElementById("reader-page-label").textContent = "Reconnecting…";
@@ -1070,8 +1169,8 @@ async function getPageWithRetry(num, attempts = 3) {
   }
 }
 
-async function _renderReaderPage() {
-  const page = await getPageWithRetry(readerState.pageNum);
+async function _renderReaderPage(pdf, num) {
+  const page = await getPageWithRetry(pdf, num);
   const canvas = document.getElementById("reader-canvas");
   const ctx = canvas.getContext("2d");
   const containerWidth = document.getElementById("reader-canvas-wrap").clientWidth - 16;
@@ -1121,8 +1220,7 @@ async function _renderReaderPage() {
 
   showReaderSource();
   highlightSourceOnPage();
-  document.getElementById("reader-page-label").textContent =
-    `Page ${readerState.pageNum} / ${readerState.pdf.numPages}`;
+  document.getElementById("reader-page-label").textContent = `Page ${num} / ${pdf.numPages}`;
   updateBookmarkButton();
   updateNotesButton();
   if (!document.getElementById("reader-notes-panel").hidden) renderNotesPanel();
@@ -2240,11 +2338,7 @@ function renderFlashcardsMenu() {
   const deleteBtn = document.getElementById("flash-delete");
   if (deleteBtn) {
     deleteBtn.addEventListener("click", async () => {
-      if (tg && tg.showConfirm) {
-        tg.showConfirm("Delete this whole flashcard deck?", (ok) => { if (ok) deleteFlashcardDeck(); });
-      } else if (window.confirm("Delete this whole flashcard deck?")) {
-        deleteFlashcardDeck();
-      }
+      if (await confirmMsg("Delete this whole flashcard deck?")) deleteFlashcardDeck();
     });
   }
 
@@ -2563,12 +2657,15 @@ async function checkInteractions() {
   renderInteractionChips();
   result.hidden = false;
   result.innerHTML = `<p class="muted">Checking ${interactionDrugs.length} drugs against each other's FDA labels…</p>`;
+  const myCheck = genId();
   try {
     const { answer, drugs } = await api("/api/drugs/interactions", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ names: interactionDrugs, topic_id: (interactionTopicId = genId()) }),
+      body: JSON.stringify({ names: interactionDrugs, topic_id: (interactionTopicId = myCheck) }),
     });
+    // Another saved check was opened (or the list cleared) meanwhile.
+    if (interactionTopicId !== myCheck) return;
     // The server resolves each name to the label's own spelling; show that
     // back so it is clear which products were actually read.
     if (Array.isArray(drugs) && drugs.length) {
@@ -2577,6 +2674,7 @@ async function checkInteractions() {
     }
     renderInteractionResult(interactionDrugs, answer);
   } catch (e) {
+    if (interactionTopicId !== myCheck) return;  // the screen has moved on to another check
     if (e.status === 404) {
       // Every chip was confirmed when it was added, so reaching here means
       // a label that existed a moment ago no longer resolves. Drop the one
@@ -2760,46 +2858,52 @@ async function askLookup() {
   drugsBusy = true;
   const askBtn = document.getElementById("lookup-ask");
   askBtn.disabled = true;
-  lookupThread.push({ q: question, a: "…reading the label…" });
+  const thread = lookupThread;
+  const topicId = lookupTopicId || (lookupTopicId = genId());
+  const askedDrug = lookupDrug;
+  const turn = { q: question, a: "…reading the label…" };
+  const history = thread.map((t) => ({ question: t.q, answer: t.a }));
+  thread.push(turn);
   input.value = "";
   renderLookupThread();
+  let suggestionsShown = false;
 
   try {
     const { answer, drug } = await api("/api/drugs/ask", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        drug: lookupDrug,
+        drug: askedDrug,
         question,
-        // Everything answered so far, minus the placeholder just pushed.
-        history: lookupThread.slice(0, -1).map((t) => ({ question: t.q, answer: t.a })),
-        topic_id: lookupTopicId || (lookupTopicId = genId()),
+        history,  // everything answered so far in this thread
+        topic_id: topicId,
       }),
     });
-    if (drug && drug !== lookupDrug) {
+    Object.assign(turn, { a: answer, done: true });
+    if (thread === lookupThread && drug && drug !== lookupDrug) {
       lookupDrug = drug;
       renderLookupState();
     }
-    lookupThread[lookupThread.length - 1].a = answer;
-    lookupThread[lookupThread.length - 1].done = true;
   } catch (e) {
     // The failed turn is dropped rather than left in the thread: it would
     // otherwise be replayed as history on the next question, teaching the
     // model that an error message is a valid answer.
-    lookupThread.pop();
-    if (e.status === 404) {
+    const i = thread.indexOf(turn);
+    if (i >= 0) thread.splice(i, 1);
+    if (e.status === 404 && thread === lookupThread) {
       const panel = document.getElementById("lookup-thread");
       renderNameSuggestions(panel, e, (name) => {
         setLookupDrug(name);
         document.getElementById("lookup-question").value = question;
       });
+      suggestionsShown = true;
     } else {
       alertMsg(e.message);
     }
   } finally {
     drugsBusy = false;
     askBtn.disabled = false;
-    renderLookupThread();
+    if (!suggestionsShown) renderLookupThread();
   }
 }
 
@@ -2886,23 +2990,23 @@ async function askLexi() {
   lexiBusy = true;
   const askBtn = document.getElementById("lexi-ask");
   askBtn.disabled = true;
-  lexiThread.push({ q: question, a: "…reading the Lexidrug monograph…" });
+  const thread = lexiThread;
+  const turn = { q: question, a: "…reading the Lexidrug monograph…" };
+  const history = thread.map((t) => ({ question: t.q, answer: t.a }));
+  thread.push(turn);
   input.value = "";
   renderLexiState();
   try {
     const { answer } = await api("/api/lexidrug/ask", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        drug: lexiDrug,
-        question,
-        history: lexiThread.slice(0, -1).map((t) => ({ question: t.q, answer: t.a })),
-      }),
+      body: JSON.stringify({ drug: lexiDrug, question, history }),
     });
-    lexiThread[lexiThread.length - 1].a = answer;
+    turn.a = answer;
   } catch (e) {
-    lexiThread.pop(); // never replay an error as history
-    input.value = question;
+    const i = thread.indexOf(turn);
+    if (i >= 0) thread.splice(i, 1); // never replay an error as history
+    if (thread === lexiThread && !input.value) input.value = question;
     alertMsg(e.message);
   } finally {
     lexiBusy = false;
@@ -3245,7 +3349,7 @@ function askAnswerHtml(text, sources) {
       (s) =>
         `<span class="src-line" data-n="${s.n}"><span class="n">[${s.n}]</span>` +
         (s.url
-          ? `<span>🌐 <strong>${escapeHtml(s.title)}</strong> — ${escapeHtml(sourcePreview(s.text))}</span></span>`
+          ? `<span>🌐 <strong>${escapeHtml(s.title)}</strong> <span class="muted">(${escapeHtml(hostOf(s.url))})</span> — ${escapeHtml(sourcePreview(s.text))}</span></span>`
           : `<span><strong>${escapeHtml(s.title)}</strong>, p.${s.page} — ${escapeHtml(sourcePreview(s.text))}</span></span>`)
     )
     .join("");
@@ -3359,7 +3463,12 @@ async function askSend() {
 
   askBusy = true;
   const n = askSelected.size;
-  askThread.push({ q: question, a: `…searching ${n} book${n === 1 ? "" : "s"}…` });
+  // The answer belongs to this thread and this turn, even if the user opens
+  // another topic or starts a new one while it is on its way.
+  const thread = askThread;
+  const turn = { q: question, a: `…searching ${n} book${n === 1 ? "" : "s"}…` };
+  const history = thread.map((t) => ({ question: t.q, answer: t.a }));
+  thread.push(turn);
   input.value = "";
   renderAskThread();
   renderAskSelection();
@@ -3371,14 +3480,15 @@ async function askSend() {
         book_ids: Array.from(askSelected),
         question,
         topic_id: askTopicId || (askTopicId = genId()),
-        history: askThread.slice(0, -1).map((t) => ({ question: t.q, answer: t.a })),
+        history,
       }),
     });
     const note = skipped && skipped.length ? `\n\n(Couldn't search: ${skipped.join(", ")}.)` : "";
-    askThread[askThread.length - 1] = { q: question, a: answer + note, sources: sources || [] };
+    Object.assign(turn, { a: answer + note, sources: sources || [] });
   } catch (e) {
-    askThread.pop();  // never replay an error as history
-    input.value = question;
+    const i = thread.indexOf(turn);
+    if (i >= 0) thread.splice(i, 1);  // never replay an error as history
+    if (thread === askThread && !input.value) input.value = question;
     alertMsg(e.message);
     if (e.status === 404 || e.status === 409) loadAskLibrary({ quiet: true });
   } finally {
@@ -3404,9 +3514,11 @@ async function askIndexOwn(bookId) {
     return finish(e.message);
   }
   pollJob(bookId, "index", {
+    screenBound: false,  // runs from the Ask tab, whatever book was last opened
     onProgress: (p) => {
       const b = askLib && askLib.my_books.find((x) => x.book_id === bookId);
-      if (b) { b.progress = p; renderAskLibrary(); }
+      // Not while the admin is typing a new title: a redraw would wipe it.
+      if (b) { b.progress = p; if (!askEditingId) renderAskLibrary(); }
     },
     onDone: () => { askSelected.add(bookId); finish(); },
     onError: (msg) => finish(msg),
@@ -3418,10 +3530,7 @@ async function askIndexOwn(bookId) {
 // window.confirm is unreliable inside Telegram's WebView (it can silently
 // return false), so Telegram's own dialog is used when there is one.
 function askConfirm(message) {
-  return new Promise((resolve) => {
-    if (tg && tg.showConfirm) tg.showConfirm(message, (ok) => resolve(!!ok));
-    else resolve(window.confirm(message));
-  });
+  return confirmMsg(message);
 }
 
 async function askAdminCall(path, opts, { confirmText } = {}) {
@@ -3847,8 +3956,17 @@ let webBusy = false;
 let webRefreshTimer = null;
 
 function openExternal(url) {
-  if (tg && tg.openLink) tg.openLink(url);
-  else window.open(url, "_blank", "noopener");
+  let u;
+  try { u = new URL(url); } catch (_) { return; }
+  if (u.protocol !== "https:" && u.protocol !== "http:") return;
+  try {
+    if (tg && tg.openLink) return tg.openLink(u.href);
+  } catch (_) {}
+  window.open(u.href, "_blank", "noopener");
+}
+
+function hostOf(url) {
+  try { return new URL(url).hostname.replace(/^www\./, ""); } catch (_) { return ""; }
 }
 
 async function loadWebSites() {
@@ -3974,9 +4092,7 @@ async function webSiteClick(e) {
       await loadWebSites();
       alertMsg("Logged in again and saved.");
     } else if (b.dataset.webDel) {
-      const ok = await new Promise((res) =>
-        tg && tg.showConfirm ? tg.showConfirm("Delete this website and its saved login?", res) : res(window.confirm("Delete?"))
-      );
+      const ok = await confirmMsg("Delete this website and its saved login?");
       if (!ok) return;
       await api(`/api/admin/web/sites/${id}`, { method: "DELETE" });
       await loadWebSites();
@@ -4056,7 +4172,8 @@ function webAction(body) {
 }
 
 function webType(secret) {
-  const input = document.getElementById("web-text");
+  if (webBusy) return;  // keep the text in the box until the browser is free
+  const input = document.getElementById(secret ? "web-secret" : "web-text");
   const text = input.value;
   if (!text) return alertMsg("Type the text into the box first, then tap the button.");
   input.value = "";
@@ -4127,6 +4244,9 @@ function wireWebSources() {
   document.getElementById("web-type-secret").addEventListener("click", () => webType(true));
   document.getElementById("web-text").addEventListener("keydown", (e) => {
     if (e.key === "Enter") { e.preventDefault(); webType(false); }
+  });
+  document.getElementById("web-secret").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); webType(true); }
   });
   document.querySelectorAll("#view-web [data-key]").forEach((b) =>
     b.addEventListener("click", () => webAction({ type: "key", key: b.dataset.key }))

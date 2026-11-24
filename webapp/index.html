@@ -15,35 +15,13 @@
     changes style.css or app.js, or the fix for THIS bug silently stops
     covering your NEXT change.
   -->
-  <link rel="stylesheet" href="style.css?v=22" />
-  <link rel="stylesheet" href="fonts.css?v=22" />
-  <link rel="stylesheet" href="themes.css?v=22" />
+  <link rel="stylesheet" href="style.css?v=23" />
+  <link rel="stylesheet" href="fonts.css?v=23" />
+  <link rel="stylesheet" href="themes.css?v=23" />
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
-  <script>
-    // Sky (light) or Midnight (dark), following the user's Telegram theme;
-    // ?theme=<name> overrides it for testing.
-    (function () {
-      var root = document.documentElement, forced = null;
-      try { forced = new URLSearchParams(location.search).get("theme"); } catch (e) {}
-      var tg = window.Telegram && window.Telegram.WebApp;
-      function apply() {
-        var dark = tg && tg.colorScheme
-          ? tg.colorScheme === "dark"
-          : !!(window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
-        var theme = forced || (dark ? "midnight" : "sky");
-        root.setAttribute("data-theme", theme);
-        if (tg) {
-          try {
-            tg.setHeaderColor(theme === "midnight" ? "#12223b" : "#bfe0fb");
-            tg.setBackgroundColor(theme === "midnight" ? "#0c1524" : "#f2f8fe");
-          } catch (e) {}
-        }
-      }
-      apply();
-      if (tg && tg.onEvent) tg.onEvent("themeChanged", apply);
-    })();
-  </script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script src="theme.js?v=23"></script>
+  <!-- pdf.js 3.11.174 (Apache-2.0), self-hosted: same bytes as cdnjs (SRI-checked). -->
+  <script src="vendor/pdf.min.js"></script>
 </head>
 <body>
 
@@ -375,9 +353,14 @@
     <div class="web-type">
       <input id="web-text" class="drug-input" type="text" autocomplete="off" autocapitalize="off"
              spellcheck="false" placeholder="Text for the selected field" />
+      <div class="drug-input-row">
+        <input id="web-secret" class="drug-input" type="password" autocomplete="new-password"
+               placeholder="Password (hidden, stored encrypted)" />
+        <button id="web-type-secret" class="mini-btn">🔒 Type</button>
+      </div>
       <div class="web-type-btns">
         <button id="web-type" class="mini-btn">⌨️ Type</button>
-        <button id="web-type-secret" class="mini-btn">🔒 Type as password</button>
+
         <button class="mini-btn" data-key="Enter">↵ Enter</button>
         <button class="mini-btn" data-key="Tab">⇥ Tab</button>
         <button class="mini-btn" data-key="Backspace">⌫</button>
@@ -464,6 +447,6 @@
     <button class="tab" data-tab="view-drugs"><span>💊</span><small>Drugs</small></button>
   </nav>
 
-  <script src="app.js?v=22"></script>
+  <script src="app.js?v=23"></script>
 </body>
 </html>
