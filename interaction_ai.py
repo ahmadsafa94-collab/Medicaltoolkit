@@ -28,6 +28,7 @@ import logging
 import re
 
 import cost_ledger
+import interaction_rules
 import name_resolver
 import rxclass
 from config import CLAUDE_MODEL
@@ -80,6 +81,11 @@ def _label_context(drug: dict, scale: float = 1.0) -> str:
     if classes:
         lines.append("-- Drug classes (FDA label classes and NIH RxClass; for matching class-level statements) --")
         lines.extend(f"- {c}" for c in classes)
+
+    profile = interaction_rules.fda_profile(drug)
+    if profile:
+        lines.append(f"-- FDA table of CYP/transporter interacting drugs (as of {interaction_rules.FDA_AS_OF}) --")
+        lines.extend(profile)
 
     found = False
     for label in _RELEVANT_FIELD_LABELS:
@@ -152,12 +158,17 @@ def analyze_interactions(drugs: list[dict], language: str = "English") -> str:
     # a 15-drug check stays a sensible size.
     scale = min(1.0, 5 / len(drugs))
     context = "\n\n".join(_label_context(d, scale) for d in drugs)
+    findings = interaction_rules.findings(drugs)
 
     system_prompt = (
         f"You are checking for interactions between these medications: {names}. Below, for EACH drug, "
         "is text from its own official FDA label (openFDA): Drug Interactions, Contraindications, Boxed "
         "Warning, the interaction-relevant sentences of its Warnings and its Metabolism/Pharmacokinetics "
-        "sections, and its drug classes (the FDA's label classes and the NIH's RxClass). Rules:\n"
+        "sections, its drug classes (the FDA's label classes and the NIH's RxClass), and its entry in the "
+        "FDA's table of drugs that interact with CYP enzymes and transporters (which gives potency: "
+        "strong/moderate/weak inhibitor or inducer, sensitive substrate). Above the label material are "
+        "PRE-COMPUTED FINDINGS, matched exactly from that FDA table and from the expert-panel list of 15 "
+        "high-priority interactions. Rules:\n"
         "1. Use ONLY the material below -- never your own memorized knowledge of these drugs, even if "
         "confident. It is the authoritative, current source here.\n"
         "2. Check EVERY pair. A pair interacts when either label names the other drug, or names a class "
@@ -166,6 +177,14 @@ def analyze_interactions(drugs: list[dict], language: str = "English") -> str:
         "Inhibitor'; or A is 'metabolized by CYP2D6' and B's label calls it a strong CYP2D6 inhibitor; or "
         "both labels warn of QT prolongation, serotonin syndrome, bleeding, CNS/respiratory depression, "
         "hyperkalemia etc. (an additive effect). Say which way you matched it.\n"
+        "2b. Every PRE-COMPUTED FINDING is established: each one MUST appear in a pair block (several "
+        "findings for one pair go in the same block). A high-priority finding sets the minimum severity "
+        "it states; the labels can only raise it (e.g. to 🔴 when a label says contraindicated). For an "
+        "FDA-table finding, grade by the labels' wording when they address it (a label's 'avoid strong "
+        "CYP3A inhibitors' + the table saying the other drug IS a strong CYP3A inhibitor = that label's "
+        "severity); otherwise use 'Possible — not graded by the labels' and state the expected size of the "
+        "effect from the table's definitions (strong inhibitor + sensitive substrate: exposure up 5-fold "
+        "or more).\n"
         "3. Severity -- take it from the label's own wording, never invent it:\n"
         "   🔴 Contraindicated: 'contraindicated', 'do not use/coadminister'.\n"
         "   🟠 Major: 'avoid', a boxed warning about the combination, or wording like serious, "
@@ -174,8 +193,9 @@ def analyze_interactions(drugs: list[dict], language: str = "English") -> str:
         "   🟢 Minor: the label says the effect is not clinically significant or needs no action.\n"
         "   When the match is only an inference from classes/metabolism (no label states this "
         "combination or its class), write 'Possible — not graded by the labels' instead of a colour, "
-        "and say what would make it clinically relevant. The FDA class does not tell potency: do not "
-        "call an inhibitor 'strong'/'moderate' unless a label says so.\n"
+        "and say what would make it clinically relevant. RxClass/label classes do not tell potency: "
+        "call an inhibitor or inducer 'strong'/'moderate'/'weak' only when a label or the FDA CYP table "
+        "says so.\n"
         "4. Exact format (Markdown, for a phone screen):\n"
         "**Bottom line:** one or two sentences: the most important finding(s) and what to do.\n"
         "Then one block per interacting pair, most severe first:\n"
@@ -185,17 +205,19 @@ def analyze_interactions(drugs: list[dict], language: str = "English") -> str:
         "- **What can happen:** <the clinical effect the label describes>\n"
         "- **What to do:** <the label's management advice: avoid, dose change, monitoring; "
         "'Not stated in the labels' if absent>\n"
-        "- **Source:** <which drug's label and section, or 'class data (RxClass)'>\n"
+        "- **Source:** <which drug's label and section; 'FDA CYP table'; 'High-priority DDI list'; or "
+        "'class data (RxClass)'>\n"
         "Finally, one line: **No interaction found in the labels:** <the remaining pairs, "
         "comma-separated> (omit if none). Do not write a block for those pairs.\n"
         "5. Be concise: short phrases, no repetition, no preamble.\n"
         f"6. Write the whole answer in {language}, including the field names (Severity, Mechanism...). "
         "Drug names and abbreviations normally left in English (CYP3A4, QT, INR) stay as they are; keep "
         "the colour emoji.\n"
-        "7. End with one short line: based on each drug's FDA label and class data only -- not a "
+        "7. End with one short line: based on FDA labels, the FDA CYP table and class data only -- not a "
         "substitute for a dedicated interaction database or a pharmacist; a label not mentioning "
         "something does not rule out an interaction.\n"
-        f"\nFDA LABEL MATERIAL:\n{context}"
+        + (f"\nPRE-COMPUTED FINDINGS:\n{findings}\n" if findings else "\nPRE-COMPUTED FINDINGS: none.\n")
+        + f"\nFDA LABEL MATERIAL:\n{context}"
     )
 
     try:

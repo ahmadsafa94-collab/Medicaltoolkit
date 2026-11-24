@@ -1,0 +1,1857 @@
+{
+ "as_of": "05/29/2026",
+ "definitions": {
+  "inducer": "strong: lowers the AUC of sensitive substrates by >=80%; moderate: >=50 to <80%; weak: >=20 to <50%",
+  "inhibitor": "strong: raises the AUC of sensitive substrates >=5-fold; moderate: >=2 to <5-fold; weak: >=1.25 to <2-fold",
+  "substrate": "sensitive: AUC rises >=5-fold with a strong inhibitor; moderate sensitive: >=2 to <5-fold"
+ },
+ "drugs": {
+  "abiraterone": {
+   "inhibits": {
+    "2D6": "moderate"
+   },
+   "notes": []
+  },
+  "acyclovir": {
+   "inhibits": {
+    "1A2": "weak"
+   },
+   "notes": []
+  },
+  "adagrasib": {
+   "inhibits": {
+    "3A": "strong"
+   },
+   "notes": []
+  },
+  "adefovir": {
+   "notes": [
+    "1"
+   ],
+   "transporter_substrate": [
+    "OAT1"
+   ]
+  },
+  "alfentanil": {
+   "notes": [],
+   "substrate_of": {
+    "3A": "sensitive"
+   }
+  },
+  "allopurinol": {
+   "inhibits": {
+    "1A2": "weak"
+   },
+   "notes": []
+  },
+  "alosetron": {
+   "notes": [],
+   "substrate_of": {
+    "1A2": "sensitive"
+   }
+  },
+  "alprazolam": {
+   "notes": [],
+   "substrate_of": {
+    "3A": "moderate sensitive"
+   }
+  },
+  "amiodarone": {
+   "inhibits": {
+    "2C9": "moderate",
+    "2D6": "weak",
+    "3A": "weak"
+   },
+   "notes": [],
+   "transporter_inhibits": [
+    "P-gp"
+   ]
+  },
+  "apalutamide": {
+   "induces": {
+    "2C19": "moderate",
+    "2C9": "weak",
+    "3A": "strong"
+   },
+   "notes": []
+  },
+  "aprepitant": {
+   "inhibits": {
+    "3A": "moderate"
+   },
+   "notes": []
+  },
+  "armodafinil": {
+   "induces": {
+    "3A": "weak"
+   },
+   "notes": []
+  },
+  "atazanavir and ritonavir": {
+   "notes": [],
+   "transporter_inhibits": [
+    "OATP1B1",
+    "OATP1B3"
+   ]
+  },
+  "atomoxetine": {
+   "notes": [],
+   "substrate_of": {
+    "2D6": "sensitive"
+   }
+  },
+  "atorvastatin": {
+   "notes": [],
+   "substrate_of": {
+    "3A": "moderate sensitive"
+   },
+   "transporter_substrate": [
+    "OATP1B1",
+    "OATP1B3"
+   ]
+  },
+  "avanafil": {
+   "notes": [],
+   "substrate_of": {
+    "3A": "sensitive"
+   }
+  },
+  "baricitinib": {
+   "notes": [],
+   "transporter_substrate": [
+    "OAT3"
+   ]
+  },
+  "belumosudil": {
+   "notes": [],
+   "transporter_inhibits": [
+    "P-gp",
+    "BCRP"
+   ]
+  },
+  "bosentan": {
+   "induces": {
+    "3A": "moderate"
+   },
+   "notes": [],
+   "transporter_substrate": [
+    "OATP1B1",
+    "OATP1B3"
+   ]
+  },
+  "brigatinib": {
+   "notes": [],
+   "substrate_of": {
+    "3A": "moderate sensitive"
+   }
+  },
+  "budesonide": {
+   "notes": [],
+   "substrate_of": {
+    "3A": "sensitive"
+   }
+  },
+  "bumetanide": {
+   "notes": [],
+   "transporter_substrate": [
+    "OAT3"
+   ]
+  },
+  "bupropion": {
+   "inhibits": {
+    "2D6": "strong"
+   },
+   "notes": [
+    "2"
+   ],
+   "substrate_of": {
+    "2B6": "sensitive"
+   }
+  },
+  "buspirone": {
+   "notes": [],
+   "substrate_of": {
+    "3A": "sensitive"
+   }
+  },
+  "caffeine": {
+   "notes": [],
+   "substrate_of": {
+    "1A2": "sensitive"
+   }
+  },
+  "capmatinib": {
+   "inhibits": {
+    "1A2": "moderate"
+   },
+   "notes": [],
+   "transporter_inhibits": [
+    "P-gp",
+    "BCRP"
+   ]
+  },
+  "carbamazepine": {
+   "induces": {
+    "2B6": "strong",
+    "2C9": "weak",
+    "3A": "strong"
+   },
+   "notes": []
+  },
+  "cefaclor": {
+   "notes": [],
+   "transporter_substrate": [
+    "OAT3"
+   ]
+  },
+  "ceftizoxime": {
+   "notes": [],
+   "transporter_substrate": [
+    "OAT3"
+   ]
+  },
+  "celecoxib": {
+   "inhibits": {
+    "2D6": "weak"
+   },
+   "notes": [
+    "3"
+   ],
+   "substrate_of": {
+    "2C9": "sensitive"
+   }
+  },
+  "cenobamate": {
+   "induces": {
+    "3A": "moderate"
+   },
+   "inhibits": {
+    "2C19": "moderate"
+   },
+   "notes": [
+    "4"
+   ]
+  },
+  "ceritinib": {
+   "inhibits": {
+    "2C9": "weak",
+    "3A": "strong"
+   },
+   "notes": []
+  },
+  "chlorzoxazone": {
+   "inhibits": {
+    "3A": "weak"
+   },
+   "notes": []
+  },
+  "cilostazol": {
+   "inhibits": {
+    "3A": "weak"
+   },
+   "notes": []
+  },
+  "cimetidine": {
+   "inhibits": {
+    "1A2": "weak",
+    "2D6": "weak",
+    "3A": "weak"
+   },
+   "notes": [],
+   "transporter_inhibits": [
+    "OCT2",
+    "MATE1",
+    "MATE2-K"
+   ]
+  },
+  "cinacalcet": {
+   "inhibits": {
+    "2D6": "moderate"
+   },
+   "notes": []
+  },
+  "ciprofloxacin": {
+   "inhibits": {
+    "1A2": "moderate",
+    "3A": "moderate"
+   },
+   "notes": [
+    "20"
+   ],
+   "transporter_substrate": [
+    "OAT1",
+    "OAT3"
+   ]
+  },
+  "clarithromycin": {
+   "inhibits": {
+    "3A": "strong"
+   },
+   "notes": [],
+   "transporter_inhibits": [
+    "P-gp",
+    "OATP1B1",
+    "OATP1B3"
+   ]
+  },
+  "clobazam": {
+   "inhibits": {
+    "2D6": "weak"
+   },
+   "notes": []
+  },
+  "clopidogrel": {
+   "inhibits": {
+    "2B6": "weak",
+    "2C8": "moderate"
+   },
+   "notes": []
+  },
+  "clotrimazole": {
+   "inhibits": {
+    "3A": "weak"
+   },
+   "notes": []
+  },
+  "clozapine": {
+   "notes": [],
+   "substrate_of": {
+    "1A2": "moderate sensitive"
+   }
+  },
+  "cobicistat": {
+   "inhibits": {
+    "2D6": "weak",
+    "3A": "strong"
+   },
+   "notes": [],
+   "transporter_inhibits": [
+    "P-gp"
+   ]
+  },
+  "colchicine": {
+   "notes": [],
+   "substrate_of": {
+    "3A": "moderate sensitive"
+   }
+  },
+  "conivaptan": {
+   "inhibits": {
+    "3A": "moderate"
+   },
+   "notes": [
+    "5"
+   ],
+   "substrate_of": {
+    "3A": "sensitive"
+   }
+  },
+  "crizotinib": {
+   "inhibits": {
+    "3A": "moderate"
+   },
+   "notes": []
+  },
+  "curcumin": {
+   "notes": [],
+   "transporter_inhibits": [
+    "BCRP"
+   ]
+  },
+  "cyclosporine": {
+   "inhibits": {
+    "3A": "weak"
+   },
+   "notes": [],
+   "transporter_inhibits": [
+    "P-gp",
+    "BCRP",
+    "OATP1B1",
+    "OATP1B3"
+   ]
+  },
+  "dabigatran etexilate": {
+   "notes": [],
+   "transporter_substrate": [
+    "P-gp"
+   ]
+  },
+  "dabrafenib": {
+   "induces": {
+    "2C9": "weak",
+    "3A": "moderate"
+   },
+   "notes": []
+  },
+  "danicopan": {
+   "notes": [],
+   "transporter_inhibits": [
+    "P-gp",
+    "BCRP"
+   ]
+  },
+  "darifenacin": {
+   "notes": [],
+   "substrate_of": {
+    "3A": "sensitive"
+   }
+  },
+  "darolutamide": {
+   "notes": [],
+   "transporter_inhibits": [
+    "BCRP",
+    "OATP1B1",
+    "OATP1B3"
+   ]
+  },
+  "darunavir": {
+   "notes": [
+    "6"
+   ],
+   "substrate_of": {
+    "3A": "sensitive"
+   }
+  },
+  "dasatinib": {
+   "notes": [],
+   "substrate_of": {
+    "3A": "sensitive"
+   }
+  },
+  "deferasirox": {
+   "inhibits": {
+    "2C8": "moderate"
+   },
+   "notes": []
+  },
+  "desipramine": {
+   "notes": [],
+   "substrate_of": {
+    "2D6": "sensitive"
+   }
+  },
+  "desloratadine": {
+   "notes": [],
+   "substrate_of": {
+    "2C8": "moderate sensitive"
+   }
+  },
+  "dextromethorphan": {
+   "notes": [],
+   "substrate_of": {
+    "2D6": "sensitive"
+   }
+  },
+  "diazepam": {
+   "notes": [],
+   "substrate_of": {
+    "2C19": "moderate sensitive"
+   }
+  },
+  "digoxin": {
+   "notes": [],
+   "transporter_substrate": [
+    "P-gp"
+   ]
+  },
+  "diltiazem": {
+   "inhibits": {
+    "3A": "moderate"
+   },
+   "notes": [
+    "7"
+   ]
+  },
+  "diosmin": {
+   "inhibits": {
+    "2C9": "weak"
+   },
+   "notes": []
+  },
+  "disulfiram": {
+   "inhibits": {
+    "2C9": "weak"
+   },
+   "notes": []
+  },
+  "docetaxel": {
+   "notes": [],
+   "transporter_substrate": [
+    "OATP1B1",
+    "OATP1B3"
+   ]
+  },
+  "dolutegravir": {
+   "notes": [],
+   "transporter_inhibits": [
+    "OCT2"
+   ]
+  },
+  "dronedarone": {
+   "inhibits": {
+    "3A": "moderate"
+   },
+   "notes": [],
+   "substrate_of": {
+    "3A": "sensitive"
+   },
+   "transporter_inhibits": [
+    "P-gp"
+   ]
+  },
+  "duloxetine": {
+   "inhibits": {
+    "2D6": "moderate"
+   },
+   "notes": [],
+   "substrate_of": {
+    "1A2": "sensitive"
+   }
+  },
+  "edoxaban": {
+   "notes": [],
+   "transporter_substrate": [
+    "P-gp"
+   ]
+  },
+  "efavirenz": {
+   "induces": {
+    "2B6": "moderate",
+    "2C19": "moderate",
+    "3A": "moderate"
+   },
+   "notes": [],
+   "substrate_of": {
+    "2B6": "moderate sensitive"
+   }
+  },
+  "elagolix": {
+   "induces": {
+    "3A": "weak"
+   },
+   "notes": [],
+   "transporter_substrate": [
+    "OATP1B1",
+    "OATP1B3"
+   ]
+  },
+  "eletriptan": {
+   "notes": [],
+   "substrate_of": {
+    "3A": "sensitive"
+   }
+  },
+  "eliglustat": {
+   "notes": [],
+   "substrate_of": {
+    "2D6": "sensitive",
+    "3A": "moderate sensitive"
+   }
+  },
+  "eltrombopag": {
+   "notes": [],
+   "transporter_inhibits": [
+    "BCRP"
+   ]
+  },
+  "elvitegravir and ritonavir": {
+   "inhibits": {
+    "3A": "strong"
+   },
+   "notes": []
+  },
+  "entrectinib": {
+   "inhibits": {
+    "3A": "weak"
+   },
+   "notes": [],
+   "substrate_of": {
+    "3A": "sensitive"
+   }
+  },
+  "enzalutamide": {
+   "induces": {
+    "2C19": "moderate",
+    "2C9": "moderate",
+    "3A": "strong"
+   },
+   "notes": []
+  },
+  "eplerenone": {
+   "notes": [],
+   "substrate_of": {
+    "3A": "sensitive"
+   }
+  },
+  "erythromycin": {
+   "inhibits": {
+    "3A": "moderate"
+   },
+   "notes": [],
+   "transporter_inhibits": [
+    "P-gp"
+   ]
+  },
+  "escitalopram": {
+   "inhibits": {
+    "2D6": "weak"
+   },
+   "notes": []
+  },
+  "etravirine": {
+   "induces": {
+    "3A": "moderate"
+   },
+   "notes": []
+  },
+  "everolimus": {
+   "notes": [],
+   "substrate_of": {
+    "3A": "sensitive"
+   }
+  },
+  "famotidine": {
+   "notes": [],
+   "transporter_substrate": [
+    "OAT3"
+   ]
+  },
+  "febuxostat": {
+   "notes": [],
+   "transporter_inhibits": [
+    "BCRP"
+   ]
+  },
+  "felbamate": {
+   "inhibits": {
+    "2C19": "moderate"
+   },
+   "notes": []
+  },
+  "felodipine": {
+   "notes": [],
+   "substrate_of": {
+    "3A": "sensitive"
+   }
+  },
+  "fexofenadine": {
+   "notes": [],
+   "transporter_substrate": [
+    "OATP1B1",
+    "OATP1B3",
+    "P-gp"
+   ]
+  },
+  "fezolinetant": {
+   "notes": [],
+   "substrate_of": {
+    "1A2": "sensitive"
+   }
+  },
+  "fluconazole": {
+   "inhibits": {
+    "2C19": "strong",
+    "2C9": "moderate",
+    "3A": "moderate"
+   },
+   "notes": []
+  },
+  "fluoxetine": {
+   "inhibits": {
+    "2C19": "strong",
+    "2D6": "strong"
+   },
+   "notes": []
+  },
+  "fluvastatin": {
+   "inhibits": {
+    "2C9": "weak"
+   },
+   "notes": []
+  },
+  "fluvoxamine": {
+   "inhibits": {
+    "1A2": "strong",
+    "2C19": "strong",
+    "2C9": "weak",
+    "2D6": "weak",
+    "3A": "weak"
+   },
+   "notes": [
+    "8"
+   ]
+  },
+  "fosaprepitant": {
+   "inhibits": {
+    "3A": "weak"
+   },
+   "notes": []
+  },
+  "fostamatinib": {
+   "notes": [],
+   "substrate_of": {
+    "3A": "moderate sensitive"
+   },
+   "transporter_inhibits": [
+    "P-gp",
+    "BCRP"
+   ]
+  },
+  "furosemide": {
+   "notes": [],
+   "transporter_substrate": [
+    "OAT1",
+    "OAT3"
+   ]
+  },
+  "gemfibrozil": {
+   "inhibits": {
+    "2C8": "strong"
+   },
+   "notes": [],
+   "transporter_inhibits": [
+    "OAT3",
+    "OATP1B1",
+    "OATP1B3"
+   ]
+  },
+  "glimepiride": {
+   "notes": [],
+   "substrate_of": {
+    "2C9": "moderate sensitive"
+   }
+  },
+  "glyburide": {
+   "notes": [],
+   "transporter_substrate": [
+    "OATP1B1",
+    "OATP1B3"
+   ]
+  },
+  "grapefruit juice": {
+   "inhibits": {
+    "3A": "moderate"
+   },
+   "notes": [
+    "9"
+   ]
+  },
+  "ibrutinib": {
+   "notes": [],
+   "substrate_of": {
+    "3A": "sensitive"
+   }
+  },
+  "idelalisib": {
+   "inhibits": {
+    "3A": "strong"
+   },
+   "notes": []
+  },
+  "imatinib": {
+   "inhibits": {
+    "3A": "moderate"
+   },
+   "notes": []
+  },
+  "imipramine": {
+   "notes": [],
+   "substrate_of": {
+    "2D6": "moderate sensitive"
+   }
+  },
+  "indinavir": {
+   "notes": [
+    "6"
+   ],
+   "substrate_of": {
+    "3A": "sensitive"
+   }
+  },
+  "indinavir and ritonavir": {
+   "inhibits": {
+    "3A": "strong"
+   },
+   "notes": []
+  },
+  "isavuconazole": {
+   "induces": {
+    "2B6": "weak"
+   },
+   "inhibits": {
+    "3A": "moderate"
+   },
+   "notes": [],
+   "substrate_of": {
+    "3A": "sensitive"
+   },
+   "transporter_inhibits": [
+    "OCT2",
+    "MATE1",
+    "MATE2-K"
+   ]
+  },
+  "istradefylline": {
+   "inhibits": {
+    "3A": "weak"
+   },
+   "notes": []
+  },
+  "itraconazole": {
+   "inhibits": {
+    "3A": "strong"
+   },
+   "notes": [],
+   "transporter_inhibits": [
+    "P-gp"
+   ]
+  },
+  "ivabradine": {
+   "notes": [],
+   "substrate_of": {
+    "3A": "sensitive"
+   }
+  },
+  "ivacaftor": {
+   "inhibits": {
+    "3A": "weak"
+   },
+   "notes": []
+  },
+  "ivosidenib": {
+   "induces": {
+    "3A": "strong"
+   },
+   "notes": [
+    "10"
+   ]
+  },
+  "ketoconazole": {
+   "inhibits": {
+    "3A": "strong"
+   },
+   "notes": [],
+   "transporter_inhibits": [
+    "P-gp"
+   ]
+  },
+  "labetalol": {
+   "inhibits": {
+    "2D6": "weak"
+   },
+   "notes": []
+  },
+  "lansoprazole": {
+   "notes": [
+    "11"
+   ],
+   "substrate_of": {
+    "2C19": "moderate sensitive"
+   }
+  },
+  "lapatinib": {
+   "notes": [],
+   "transporter_inhibits": [
+    "P-gp"
+   ]
+  },
+  "larotrectinib": {
+   "inhibits": {
+    "3A": "weak"
+   },
+   "notes": [],
+   "substrate_of": {
+    "3A": "moderate sensitive"
+   }
+  },
+  "lazertinib": {
+   "inhibits": {
+    "3A": "weak"
+   },
+   "notes": [],
+   "transporter_inhibits": [
+    "BCRP"
+   ]
+  },
+  "lemborexant": {
+   "induces": {
+    "2B6": "weak"
+   },
+   "notes": [],
+   "substrate_of": {
+    "3A": "sensitive"
+   }
+  },
+  "leniolisib": {
+   "notes": [],
+   "substrate_of": {
+    "3A": "moderate sensitive"
+   },
+   "transporter_inhibits": [
+    "BCRP",
+    "OATP1B"
+   ]
+  },
+  "lomitapide": {
+   "inhibits": {
+    "3A": "weak"
+   },
+   "notes": [],
+   "substrate_of": {
+    "3A": "sensitive"
+   }
+  },
+  "loperamide": {
+   "notes": [],
+   "substrate_of": {
+    "2C8": "moderate sensitive",
+    "3A": "moderate sensitive"
+   },
+   "transporter_substrate": [
+    "P-gp"
+   ]
+  },
+  "lopinavir and ritonavir": {
+   "inhibits": {
+    "3A": "strong"
+   },
+   "notes": [],
+   "transporter_inhibits": [
+    "P-gp",
+    "OATP1B1",
+    "OATP1B3"
+   ]
+  },
+  "lorcaserin": {
+   "inhibits": {
+    "2D6": "moderate"
+   },
+   "notes": []
+  },
+  "lorlatinib": {
+   "induces": {
+    "2B6": "weak",
+    "2C9": "weak",
+    "3A": "moderate"
+   },
+   "notes": []
+  },
+  "lovastatin": {
+   "notes": [],
+   "substrate_of": {
+    "3A": "sensitive"
+   },
+   "transporter_substrate": [
+    "OATP1B1"
+   ]
+  },
+  "lumacaftor and ivacaftor": {
+   "induces": {
+    "3A": "strong"
+   },
+   "notes": []
+  },
+  "lurasidone": {
+   "notes": [],
+   "substrate_of": {
+    "3A": "sensitive"
+   }
+  },
+  "maraviroc": {
+   "notes": [],
+   "substrate_of": {
+    "3A": "sensitive"
+   }
+  },
+  "melatonin": {
+   "notes": [],
+   "substrate_of": {
+    "1A2": "sensitive"
+   }
+  },
+  "metformin": {
+   "notes": [],
+   "transporter_substrate": [
+    "MATE1",
+    "MATE2-K",
+    "OCT2"
+   ]
+  },
+  "methotrexate": {
+   "notes": [],
+   "transporter_substrate": [
+    "OAT3"
+   ]
+  },
+  "methoxsalen": {
+   "inhibits": {
+    "1A2": "moderate"
+   },
+   "notes": []
+  },
+  "metoprolol": {
+   "notes": [],
+   "substrate_of": {
+    "2D6": "moderate sensitive"
+   }
+  },
+  "mexiletine": {
+   "inhibits": {
+    "1A2": "moderate"
+   },
+   "notes": []
+  },
+  "miconazole": {
+   "inhibits": {
+    "2C9": "moderate"
+   },
+   "notes": []
+  },
+  "midazolam": {
+   "notes": [],
+   "substrate_of": {
+    "3A": "sensitive"
+   }
+  },
+  "mirabegron": {
+   "inhibits": {
+    "2D6": "moderate"
+   },
+   "notes": []
+  },
+  "mitotane": {
+   "induces": {
+    "3A": "strong"
+   },
+   "notes": []
+  },
+  "mobocertinib": {
+   "induces": {
+    "3A": "weak"
+   },
+   "notes": [],
+   "substrate_of": {
+    "3A": "sensitive"
+   }
+  },
+  "modafinil": {
+   "induces": {
+    "3A": "weak"
+   },
+   "notes": [
+    "12"
+   ]
+  },
+  "momelotinib": {
+   "notes": [],
+   "transporter_inhibits": [
+    "BCRP"
+   ]
+  },
+  "montelukast": {
+   "notes": [],
+   "substrate_of": {
+    "2C8": "moderate sensitive"
+   }
+  },
+  "naloxegol": {
+   "notes": [],
+   "substrate_of": {
+    "3A": "sensitive"
+   }
+  },
+  "nebivolol": {
+   "notes": [],
+   "substrate_of": {
+    "2D6": "sensitive"
+   }
+  },
+  "nefazodone": {
+   "inhibits": {
+    "3A": "strong"
+   },
+   "notes": []
+  },
+  "nelfinavir": {
+   "inhibits": {
+    "3A": "strong"
+   },
+   "notes": []
+  },
+  "nevirapine": {
+   "induces": {
+    "2B6": "weak"
+   },
+   "notes": []
+  },
+  "nisoldipine": {
+   "notes": [],
+   "substrate_of": {
+    "3A": "sensitive"
+   }
+  },
+  "nortriptyline": {
+   "notes": [],
+   "substrate_of": {
+    "2D6": "moderate sensitive"
+   }
+  },
+  "omeprazole": {
+   "inhibits": {
+    "2C19": "weak"
+   },
+   "notes": [],
+   "substrate_of": {
+    "2C19": "sensitive"
+   }
+  },
+  "oral contraceptives": {
+   "inhibits": {
+    "1A2": "moderate"
+   },
+   "notes": []
+  },
+  "oseltamivir carboxylate": {
+   "notes": [
+    "1"
+   ],
+   "transporter_substrate": [
+    "OAT3"
+   ]
+  },
+  "oteseconazole": {
+   "notes": [],
+   "transporter_inhibits": [
+    "BCRP"
+   ]
+  },
+  "paclitaxel": {
+   "notes": [],
+   "transporter_substrate": [
+    "OATP1B1",
+    "OATP1B3"
+   ]
+  },
+  "paritaprevir and ritonavir and (ombitasvir and/or dasabuvir)": {
+   "inhibits": {
+    "3A": "strong"
+   },
+   "notes": []
+  },
+  "paroxetine": {
+   "inhibits": {
+    "2D6": "strong"
+   },
+   "notes": []
+  },
+  "peginterferon alpha-2a": {
+   "inhibits": {
+    "1A2": "weak"
+   },
+   "notes": []
+  },
+  "penicillin g": {
+   "notes": [],
+   "transporter_substrate": [
+    "OAT3"
+   ]
+  },
+  "perphenazine": {
+   "notes": [],
+   "substrate_of": {
+    "2D6": "sensitive"
+   }
+  },
+  "pexidartinib": {
+   "induces": {
+    "3A": "moderate"
+   },
+   "notes": []
+  },
+  "phenobarbital": {
+   "induces": {
+    "3A": "moderate"
+   },
+   "notes": []
+  },
+  "phenytoin": {
+   "induces": {
+    "1A2": "moderate",
+    "2C19": "moderate",
+    "3A": "strong"
+   },
+   "notes": [],
+   "substrate_of": {
+    "2C9": "moderate sensitive"
+   }
+  },
+  "pimozide": {
+   "notes": [],
+   "substrate_of": {
+    "2D6": "moderate sensitive",
+    "3A": "moderate sensitive"
+   }
+  },
+  "pioglitazone": {
+   "notes": [],
+   "substrate_of": {
+    "2C8": "moderate sensitive"
+   }
+  },
+  "piperine": {
+   "inhibits": {
+    "1A2": "weak",
+    "2C9": "moderate"
+   },
+   "notes": []
+  },
+  "pirfenidone": {
+   "notes": [],
+   "substrate_of": {
+    "1A2": "moderate sensitive"
+   }
+  },
+  "pirtobrutinib": {
+   "inhibits": {
+    "2C19": "weak",
+    "2C8": "moderate",
+    "3A": "weak"
+   },
+   "notes": [],
+   "transporter_inhibits": [
+    "BCRP",
+    "P-gp"
+   ]
+  },
+  "pitavastatin": {
+   "notes": [],
+   "transporter_substrate": [
+    "OATP1B1",
+    "OATP1B3"
+   ]
+  },
+  "posaconazole": {
+   "inhibits": {
+    "3A": "strong"
+   },
+   "notes": []
+  },
+  "pralsetinib": {
+   "notes": [],
+   "substrate_of": {
+    "3A": "moderate sensitive"
+   }
+  },
+  "pravastatin": {
+   "notes": [],
+   "transporter_substrate": [
+    "OATP1B1",
+    "OATP1B3"
+   ]
+  },
+  "primidone": {
+   "induces": {
+    "3A": "moderate"
+   },
+   "notes": []
+  },
+  "probenecid": {
+   "notes": [],
+   "transporter_inhibits": [
+    "OAT1",
+    "OAT3"
+   ]
+  },
+  "propafenone": {
+   "notes": [],
+   "substrate_of": {
+    "2D6": "moderate sensitive"
+   },
+   "transporter_inhibits": [
+    "P-gp"
+   ]
+  },
+  "propranolol": {
+   "notes": [],
+   "substrate_of": {
+    "2D6": "moderate sensitive"
+   }
+  },
+  "pyrimethamine": {
+   "notes": [],
+   "transporter_inhibits": [
+    "MATE1",
+    "MATE2-K"
+   ]
+  },
+  "quetiapine": {
+   "notes": [],
+   "substrate_of": {
+    "3A": "sensitive"
+   }
+  },
+  "quinidine": {
+   "inhibits": {
+    "2D6": "strong"
+   },
+   "notes": [],
+   "transporter_inhibits": [
+    "P-gp"
+   ]
+  },
+  "r-venlafaxine": {
+   "notes": [],
+   "substrate_of": {
+    "2D6": "sensitive"
+   }
+  },
+  "rabeprazole": {
+   "notes": [],
+   "substrate_of": {
+    "2C19": "moderate sensitive"
+   }
+  },
+  "ramelteon": {
+   "notes": [],
+   "substrate_of": {
+    "1A2": "sensitive"
+   }
+  },
+  "ranitidine": {
+   "inhibits": {
+    "3A": "weak"
+   },
+   "notes": []
+  },
+  "ranolazine": {
+   "inhibits": {
+    "3A": "weak"
+   },
+   "notes": [],
+   "transporter_inhibits": [
+    "P-gp",
+    "OCT2",
+    "MATE1",
+    "MATE2-K"
+   ]
+  },
+  "repaglinide": {
+   "notes": [],
+   "substrate_of": {
+    "2C8": "sensitive"
+   },
+   "transporter_substrate": [
+    "OATP1B1",
+    "OATP1B3"
+   ]
+  },
+  "repotrectinib": {
+   "induces": {
+    "3A": "moderate"
+   },
+   "notes": [],
+   "substrate_of": {
+    "3A": "sensitive"
+   }
+  },
+  "resmetirom": {
+   "inhibits": {
+    "2C8": "weak"
+   },
+   "notes": [],
+   "substrate_of": {
+    "2C8": "moderate sensitive"
+   },
+   "transporter_inhibits": [
+    "BCRP",
+    "OATP1B"
+   ],
+   "transporter_substrate": [
+    "OATP1B"
+   ]
+  },
+  "rifampin": {
+   "induces": {
+    "1A2": "moderate",
+    "2B6": "moderate",
+    "2C19": "strong",
+    "2C8": "moderate",
+    "2C9": "moderate",
+    "3A": "strong"
+   },
+   "notes": [
+    "13"
+   ],
+   "transporter_inhibits": [
+    "OATP1B1",
+    "OATP1B3"
+   ]
+  },
+  "rilpivirine": {
+   "notes": [],
+   "substrate_of": {
+    "3A": "moderate sensitive"
+   }
+  },
+  "ritonavir": {
+   "induces": {
+    "2B6": "weak",
+    "2C19": "weak",
+    "2C9": "weak"
+   },
+   "inhibits": {
+    "3A": "strong"
+   },
+   "notes": [
+    "14",
+    "15",
+    "16"
+   ]
+  },
+  "rivaroxaban": {
+   "notes": [],
+   "substrate_of": {
+    "3A": "moderate sensitive"
+   }
+  },
+  "rolapitant": {
+   "inhibits": {
+    "2D6": "moderate"
+   },
+   "notes": [
+    "17"
+   ],
+   "transporter_inhibits": [
+    "P-gp",
+    "BCRP"
+   ]
+  },
+  "rosiglitazone": {
+   "notes": [],
+   "substrate_of": {
+    "2C8": "moderate sensitive"
+   }
+  },
+  "rosuvastatin": {
+   "notes": [],
+   "transporter_substrate": [
+    "BCRP",
+    "OATP1B1",
+    "OATP1B3"
+   ]
+  },
+  "rufinamide": {
+   "induces": {
+    "3A": "weak"
+   },
+   "notes": []
+  },
+  "s-mephenytoin": {
+   "notes": [],
+   "substrate_of": {
+    "2C19": "sensitive"
+   }
+  },
+  "s-venlafaxine": {
+   "notes": [],
+   "substrate_of": {
+    "2D6": "moderate sensitive"
+   }
+  },
+  "saquinavir": {
+   "notes": [
+    "6"
+   ],
+   "substrate_of": {
+    "3A": "sensitive"
+   }
+  },
+  "saquinavir and ritonavir": {
+   "inhibits": {
+    "3A": "strong"
+   },
+   "notes": [],
+   "transporter_inhibits": [
+    "P-gp"
+   ]
+  },
+  "selexipag": {
+   "notes": [
+    "21"
+   ],
+   "substrate_of": {
+    "2C8": "sensitive"
+   }
+  },
+  "selpercatinib": {
+   "inhibits": {
+    "2C8": "moderate",
+    "3A": "weak"
+   },
+   "notes": [],
+   "substrate_of": {
+    "3A": "moderate sensitive"
+   }
+  },
+  "sertraline": {
+   "inhibits": {
+    "2D6": "weak"
+   },
+   "notes": []
+  },
+  "sevabertinib": {
+   "inhibits": {
+    "3A": "weak"
+   },
+   "notes": [],
+   "substrate_of": {
+    "3A": "moderate sensitive"
+   }
+  },
+  "sildenafil": {
+   "notes": [],
+   "substrate_of": {
+    "3A": "sensitive"
+   }
+  },
+  "simvastatin": {
+   "notes": [],
+   "substrate_of": {
+    "3A": "sensitive"
+   },
+   "transporter_substrate": [
+    "OATP1B1",
+    "OATP1B3"
+   ]
+  },
+  "sirolimus": {
+   "notes": [],
+   "substrate_of": {
+    "3A": "sensitive"
+   }
+  },
+  "sofosbuvir and velpatasvir and voxilaprevir": {
+   "notes": [],
+   "transporter_inhibits": [
+    "P-gp",
+    "BCRP",
+    "OATP1B1",
+    "OATP1B3"
+   ]
+  },
+  "sotorasib": {
+   "induces": {
+    "3A": "moderate"
+   },
+   "notes": []
+  },
+  "st. john’s wort": {
+   "induces": {
+    "3A": "strong"
+   },
+   "notes": [
+    "18"
+   ]
+  },
+  "sulfasalazine": {
+   "notes": [],
+   "transporter_substrate": [
+    "BCRP"
+   ]
+  },
+  "tacrolimus": {
+   "notes": [],
+   "substrate_of": {
+    "3A": "sensitive"
+   }
+  },
+  "tadalafil": {
+   "notes": [],
+   "substrate_of": {
+    "3A": "moderate sensitive"
+   }
+  },
+  "taletrectinib": {
+   "notes": [],
+   "substrate_of": {
+    "3A": "moderate sensitive"
+   }
+  },
+  "tasimelteon": {
+   "notes": [],
+   "substrate_of": {
+    "1A2": "sensitive"
+   }
+  },
+  "tazemetostat": {
+   "induces": {
+    "3A": "weak"
+   },
+   "inhibits": {
+    "2C8": "weak"
+   },
+   "notes": [],
+   "substrate_of": {
+    "3A": "moderate sensitive"
+   }
+  },
+  "telithromycin": {
+   "inhibits": {
+    "3A": "strong"
+   },
+   "notes": []
+  },
+  "tenofovir": {
+   "inhibits": {
+    "2B6": "weak"
+   },
+   "notes": [
+    "1"
+   ],
+   "transporter_substrate": [
+    "OAT1"
+   ]
+  },
+  "terbinafine": {
+   "inhibits": {
+    "2D6": "strong"
+   },
+   "notes": []
+  },
+  "teriflunomide": {
+   "induces": {
+    "1A2": "moderate"
+   },
+   "inhibits": {
+    "2C8": "moderate"
+   },
+   "notes": [],
+   "transporter_inhibits": [
+    "BCRP",
+    "OATP1B1",
+    "OAT3"
+   ]
+  },
+  "theophylline": {
+   "notes": [],
+   "substrate_of": {
+    "1A2": "moderate sensitive"
+   }
+  },
+  "ticagrelor": {
+   "inhibits": {
+    "3A": "weak"
+   },
+   "notes": [],
+   "substrate_of": {
+    "3A": "sensitive"
+   },
+   "transporter_inhibits": [
+    "BCRP"
+   ]
+  },
+  "ticlopidine": {
+   "inhibits": {
+    "2B6": "weak",
+    "2C19": "strong"
+   },
+   "notes": []
+  },
+  "tipranavir": {
+   "notes": [
+    "6"
+   ],
+   "substrate_of": {
+    "3A": "sensitive"
+   }
+  },
+  "tipranavir and ritonavir": {
+   "inhibits": {
+    "3A": "strong"
+   },
+   "notes": []
+  },
+  "tizanidine": {
+   "notes": [],
+   "substrate_of": {
+    "1A2": "sensitive"
+   }
+  },
+  "tobacco (smoking)": {
+   "induces": {
+    "1A2": "moderate"
+   },
+   "notes": []
+  },
+  "tolbutamide": {
+   "notes": [],
+   "substrate_of": {
+    "2C9": "moderate sensitive"
+   }
+  },
+  "tolterodine": {
+   "notes": [],
+   "substrate_of": {
+    "2D6": "sensitive"
+   }
+  },
+  "tolvaptan": {
+   "notes": [],
+   "substrate_of": {
+    "3A": "sensitive"
+   }
+  },
+  "tramadol": {
+   "notes": [],
+   "substrate_of": {
+    "2D6": "moderate sensitive"
+   }
+  },
+  "triazolam": {
+   "notes": [],
+   "substrate_of": {
+    "3A": "sensitive"
+   }
+  },
+  "trimethoprim": {
+   "inhibits": {
+    "2C8": "weak"
+   },
+   "notes": [],
+   "transporter_inhibits": [
+    "MATE1",
+    "MATE2-K"
+   ]
+  },
+  "trimipramine": {
+   "notes": [],
+   "substrate_of": {
+    "2D6": "moderate sensitive"
+   }
+  },
+  "tucatinib": {
+   "inhibits": {
+    "2C8": "weak",
+    "3A": "strong"
+   },
+   "notes": [],
+   "substrate_of": {
+    "2C8": "moderate sensitive"
+   },
+   "transporter_inhibits": [
+    "P-gp"
+   ]
+  },
+  "vadadustat": {
+   "notes": [],
+   "transporter_inhibits": [
+    "BCRP",
+    "OAT3"
+   ]
+  },
+  "vandetanib": {
+   "notes": [],
+   "transporter_inhibits": [
+    "MATE1",
+    "MATE2-K"
+   ]
+  },
+  "vardenafil": {
+   "notes": [],
+   "substrate_of": {
+    "3A": "sensitive"
+   }
+  },
+  "vemurafenib": {
+   "induces": {
+    "3A": "weak"
+   },
+   "inhibits": {
+    "1A2": "moderate",
+    "2D6": "weak"
+   },
+   "notes": []
+  },
+  "venetoclax": {
+   "notes": [],
+   "substrate_of": {
+    "3A": "sensitive"
+   }
+  },
+  "verapamil": {
+   "inhibits": {
+    "3A": "moderate"
+   },
+   "notes": [],
+   "transporter_inhibits": [
+    "P-gp"
+   ]
+  },
+  "voriconazole": {
+   "inhibits": {
+    "2B6": "weak",
+    "2C19": "moderate",
+    "2C9": "weak",
+    "3A": "strong"
+   },
+   "notes": [],
+   "substrate_of": {
+    "2C19": "moderate sensitive"
+   }
+  },
+  "warfarin": {
+   "notes": [
+    "19"
+   ],
+   "substrate_of": {
+    "2C9": "moderate sensitive"
+   }
+  },
+  "zanubrutinib": {
+   "induces": {
+    "2C19": "weak",
+    "3A": "weak"
+   },
+   "notes": [],
+   "substrate_of": {
+    "3A": "moderate sensitive"
+   }
+  },
+  "zileuton": {
+   "inhibits": {
+    "1A2": "weak"
+   },
+   "notes": []
+  },
+  "zongertinib": {
+   "notes": [],
+   "transporter_inhibits": [
+    "BCRP"
+   ]
+  }
+ },
+ "footnotes": {
+  "1": "These drugs are active moieties of their corresponding pro-drugs, adefovir dipivoxil, oseltamivir, tenofovir alafenamide fumarate (TAF), and tenofovir disoproxil fumarate (TDF). Those pro-drugs are substrates of P-gp.",
+  "10": "Based on PBPK simulation",
+  "11": "S-lansoprazole is a sensitive substrate in CYP2C19 extensive metabolizer subjects.",
+  "12": "Based on effect of 200 mg/day modafinil. A higher dosage (400 mg/day) modafinil had larger induction effect on CYP3A.",
+  "13": "Single dose",
+  "14": "Ritonavir is approved for use in combination with other anti-HIV or anti-HCV drugs. Caution should be used when extrapolating the observed effect of ritonavir alone to the effect of anti-HIV or anti-HCV combination regimens on CYP3A activities.",
+  "15": "Moderate inducer of CYP1A2 with dosage of 800 mg/day ritonavir (not with other anti-HIV drugs). Effect on CYP1A2 at lower dosages of ritonavir is unknown.",
+  "16": "Weak inducer of CYP2B6, CYP2C9, and CYP2C19. Classification is based on studies conducted with ritonavir itself (not with other anti-HIV drugs) at dosages of 100-200 mg/day, although larger effects have been reported in literature for high dosages of ritonavir.",
+  "17": "Intravenously administered rolapitant does not inhibit BCRP and P-gp.",
+  "18": "The effect of St. John’s wort varies widely and is preparation dependent.",
+  "19": "S-warfarin",
+  "2": "Bupropion itself is not a sensitive substrate. It is metabolized by multiple enzymes including CYP2B6 that is only responsible for the formation of hydroxybupropion, an active metabolite. Thus, the considerations of drug interactions with CYP2B6 modulators should take into account plasma concentration changes of both buproprion and hydroxybupropion.",
+  "20": "Ciprofloxacin is generally classified a moderate CYP 1A2 inhibitor based on totality of evidence; however, it can sometimes behave like a strong inhibitor (i.e., increase AUC more than 5-fold) when it interacts with certain CYP 1A2 substrates that are considered highly sensitive (e.g., tizanidine).",
+  "21": "Selexipag is a prodrug. it is the selexipag active metabolite ACT-333679 that is a sensitive substrate of CYP2C8. Selexipag and ACT-333679 are also substrates of OATP1B transporter",
+  "3": "Listed based on pharmacogenetic studies.",
+  "4": "The classification is based on 200 mg daily dose. The effect potentially could be stronger at 400 mg/day.",
+  "5": "The classification is based on studies conducted with intravenously administered conivaptan.",
+  "6": "Usually administered to patients in combination with ritonavir, a strong CYP3A inhibitor.",
+  "7": "Diltiazem increased AUC of certain sensitive CYP3A substrates (e.g., buspirone) more than 5-fold.",
+  "8": "Fluvoxamine increased the AUC of certain sensitive CYP3A substrates more than 2-fold (e.g., increased the AUC of buspirone 2.35-fold)",
+  "9": "The effect of grapefruit juice varies widely among brands and is concentration-, dose-, and preparation-dependent. Studies have shown that it can be classified as a “strong CYP3A inhibitor” when a certain preparation was used (e.g., high dose, double strength) or more commonly as a “moderate CYP3A inhibitor” when another preparation was used (e.g., low dose, single strength)."
+ },
+ "source": "https://www.fda.gov/drugs/drug-interactions-labeling/healthcare-professionals-fdas-examples-drugs-interact-cyp-enzymes-and-transporter-systems"
+}
