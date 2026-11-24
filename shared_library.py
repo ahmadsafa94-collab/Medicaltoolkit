@@ -177,6 +177,11 @@ def rename_book(book_id: str, title) -> str:
     return title
 
 
+def set_chapters(book_id: str, chapters: list[dict]) -> bool:
+    """Chapter ranges shared by every user who opens this book (computed once, see webapp_api)."""
+    return _update(book_id, chapters=chapters)
+
+
 def mark_indexed(book_id: str, num_chunks: int) -> bool:
     return _update(book_id, qa_indexed=True, num_chunks=num_chunks, index_error=None, index_model=VOYAGE_MODEL)
 
@@ -200,6 +205,35 @@ def remove_book(book_id: str) -> dict | None:
     return book
 
 
+_SUGGESTIONS_PATH = os.path.join(SHARED_DIR, "suggestions.json")
+MAX_SUGGESTIONS_PER_DAY = 5
+
+
+def add_suggestion(user_id: int, who: str, specialty: str | None, title: str, note: str) -> dict:
+    """Record a customer's book suggestion. Raises SharedLibraryError past the daily cap."""
+    title = " ".join(str(title or "").split())[:200]
+    note = str(note or "").strip()[:1000]
+    if not title:
+        raise SharedLibraryError("Type the book's title (and author, if you know it).")
+    with _lock:
+        try:
+            with open(_SUGGESTIONS_PATH, encoding="utf-8") as f:
+                items = json.load(f)
+        except (OSError, ValueError):
+            items = []
+        day_ago = time.time() - 86400
+        if sum(1 for s in items if s["user_id"] == user_id and s["ts"] > day_ago) >= MAX_SUGGESTIONS_PER_DAY:
+            raise SharedLibraryError("Thanks! You've sent the most suggestions for today -- try again tomorrow.")
+        item = {"ts": time.time(), "user_id": user_id, "who": who, "specialty": specialty, "title": title, "note": note}
+        items.append(item)
+        os.makedirs(SHARED_DIR, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=SHARED_DIR, suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(items[-2000:], f)
+        os.replace(tmp, _SUGGESTIONS_PATH)
+    return item
+
+
 def catalog() -> list[dict]:
     """
     What the mini app shows: every specialty with its books, in name order.
@@ -215,6 +249,7 @@ def catalog() -> list[dict]:
                 "page_count": b["page_count"],
                 "qa_indexed": bool(b.get("qa_indexed")),
                 "index_error": b.get("index_error"),
+                "has_chapters": bool(b.get("chapters")),
             }
             for bid, b in data["books"].items()
             if b["specialty"] == name

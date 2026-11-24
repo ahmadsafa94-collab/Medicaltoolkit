@@ -15,7 +15,7 @@
     changes style.css or app.js, or the fix for THIS bug silently stops
     covering your NEXT change.
   -->
-  <link rel="stylesheet" href="style.css?v=16" />
+  <link rel="stylesheet" href="style.css?v=17" />
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 </head>
@@ -27,12 +27,25 @@
       <h1>📚 Book Shelf</h1>
       <button id="btn-bookmarks" class="link-btn">🔖 Bookmarks</button>
     </header>
-    <button id="btn-request-book" class="link-btn shelf-request-btn">📚 Request a Book</button>
-    <div id="shelf-empty" class="empty-state" hidden>
-      <p>No books yet.</p>
-      <p class="muted">Tap + to upload your first PDF.</p>
+    <div class="subtabs shelf-tabs">
+      <button class="subtab is-active" data-shelftab="mine">📚 My books</button>
+      <button class="subtab" data-shelftab="spec">🏥 Specialty books</button>
     </div>
-    <div id="shelf-grid" class="shelf-grid"></div>
+    <div id="shelf-pane-mine">
+      <button id="btn-request-book" class="link-btn shelf-request-btn">📚 Request a Book</button>
+      <div id="shelf-empty" class="empty-state" hidden>
+        <p>No books yet.</p>
+        <p class="muted">Tap + to upload your first PDF.</p>
+      </div>
+      <div id="shelf-grid" class="shelf-grid"></div>
+    </div>
+    <div id="shelf-pane-spec" hidden>
+      <div class="shelf-spec-bar">
+        <select id="shelf-specialty" class="ask-select"></select>
+      </div>
+      <p id="shelf-spec-empty" class="empty-state" hidden>No books in this specialty yet.</p>
+      <div id="shelf-spec-grid" class="shelf-grid"></div>
+    </div>
     <button id="btn-add-book" class="fab" title="Add a book">+</button>
     <input id="file-input" type="file" accept="application/pdf" hidden />
   </section>
@@ -135,6 +148,18 @@
 
       <p class="ask-heading">🏥 Specialty library</p>
       <select id="ask-specialty" class="ask-select"></select>
+      <div class="ask-spec-actions">
+        <button id="ask-tick-all" class="mini-btn">☑️ Tick all</button>
+        <button id="ask-suggest" class="mini-btn">💡 Suggest a book</button>
+      </div>
+      <div id="ask-suggest-form" class="suggest-form" hidden>
+        <input id="ask-suggest-title" type="text" maxlength="200" placeholder="Book title and author" />
+        <textarea id="ask-suggest-note" rows="2" maxlength="1000" placeholder="Why it's useful, edition… (optional)"></textarea>
+        <div class="flash-review-row">
+          <button id="ask-suggest-send" class="btn">Send suggestion</button>
+          <button id="ask-suggest-cancel" class="btn secondary">Cancel</button>
+        </div>
+      </div>
       <div id="ask-shared-books" class="check-list"></div>
 
       <p class="ask-heading">📚 My books</p>
@@ -259,6 +284,10 @@
       <button id="reader-bookmark" class="tool-btn" title="Bookmark this page">🔖 Bookmark</button>
       <button id="reader-notes" class="tool-btn" title="Notes on this page">📝 Notes</button>
     </div>
+    <div id="reader-source" class="reader-source" hidden>
+      <div class="reader-source-head"><strong id="reader-source-label">📌 Source</strong><button id="reader-source-close" class="mini-btn">✕</button></div>
+      <div id="reader-source-text" class="rich"></div>
+    </div>
     <div id="reader-goto-row" class="name-editor" hidden>
       <input id="reader-goto-input" type="number" min="1" placeholder="Page number" />
       <button id="reader-goto-go" class="btn">Go</button>
@@ -309,6 +338,6 @@
     <button class="tab" data-tab="view-drugs"><span>💊</span><small>Drugs</small></button>
   </nav>
 
-  <script src="app.js?v=16"></script>
+  <script src="app.js?v=17"></script>
 </body>
 </html>

@@ -585,3 +585,50 @@ body.has-tabbar { padding-bottom: 60px; }
   flex: 1; min-width: 0; padding: 7px 9px; border-radius: 8px; font: inherit; font-size: 14px;
   border: 1px solid rgba(128, 128, 128, 0.35); background: var(--bg); color: var(--text);
 }
+
+/* ---------- Mixed Persian/Arabic + English text ----------
+   richText() renders each line as its own block with dir= set by the
+   line's dominant script, so a Persian sentence that starts with "SSRI"
+   still runs right-to-left and aligns right. */
+.rich > div { min-height: 1em; overflow-wrap: anywhere; }
+.rich > div[dir="rtl"] { text-align: right; }
+.rich > div[dir="ltr"] { text-align: left; }
+.rich .gap { min-height: 0.6em; }
+.rich .cite-marker { unicode-bidi: isolate; cursor: pointer; }
+.rich strong { font-weight: 700; }
+#ask-thread .qa-msg.a, #lookup-thread .qa-msg.a, #lexi-thread .qa-msg.a, #qa-log .qa-msg.a, #interaction-result .qa-msg { white-space: normal; }
+.qa-msg.q { unicode-bidi: plaintext; text-align: start; }
+.quiz-question, .quiz-option, .flash-front, .flash-back { unicode-bidi: plaintext; text-align: start; }
+.qa-sources .src-line { cursor: pointer; }
+.qa-sources .src-line span:last-child { unicode-bidi: plaintext; }
+
+/* ---------- + button above the tab bar (it sat underneath it) ---------- */
+body.has-tabbar .fab { bottom: calc(76px + env(safe-area-inset-bottom, 0px)); }
+.fab { z-index: 60; }
+
+/* ---------- Shelf tabs ---------- */
+.shelf-tabs { padding-top: 4px; padding-bottom: 8px; }
+.shelf-spec-bar { padding: 0 16px 8px; }
+.book-cover.has-img { padding: 0; overflow: hidden; }
+.book-cover.has-img img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+/* ---------- Ask tab extras ---------- */
+.ask-spec-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.ask-spec-actions .mini-btn {
+  padding: 6px 10px; border-radius: 8px; font: inherit; font-size: 13px; cursor: pointer;
+  border: 1px solid rgba(128, 128, 128, 0.28); background: var(--bg); color: var(--link);
+}
+.suggest-form { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+.suggest-form input, .suggest-form textarea {
+  width: 100%; box-sizing: border-box; padding: 8px 10px; border-radius: 8px; font: inherit; font-size: 14px;
+  border: 1px solid rgba(128, 128, 128, 0.3); background: var(--bg); color: var(--text);
+}
+
+/* ---------- Reader: the cited passage ---------- */
+.reader-source {
+  margin: 6px 12px; padding: 10px 12px; border-radius: 10px; font-size: 13px; line-height: 1.5;
+  background: var(--secondary-bg); border-left: 4px solid var(--button); max-height: 30vh; overflow-y: auto;
+}
+.reader-source-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 4px; }
+.reader-source .mini-btn { border: 0; background: none; color: var(--hint); font-size: 16px; cursor: pointer; }
+.textLayer span.src-hl { background: rgba(255, 213, 0, 0.45); border-radius: 2px; }

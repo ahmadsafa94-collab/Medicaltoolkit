@@ -119,7 +119,7 @@ function goBack() {
     viewStack.pop();
     const prev = viewStack[viewStack.length - 1];
     showView(prev, { pushHistory: false });
-    if (prev === "view-shelf") loadShelf();
+    if (prev === "view-shelf") setShelfTab(shelfTab);
   }
 }
 
@@ -177,19 +177,66 @@ async function loadShelf() {
 // Builds the shelf as explicit rows of SHELF_COLS books, with a wood
 // "shelf-ledge" div after each row -- see style.css's .shelf-row/.shelf-ledge
 // comment for why this is done in JS rather than a CSS background trick.
-function renderShelf(grid, books) {
+function renderShelf(grid, books, { shared = false } = {}) {
   for (let i = 0; i < books.length; i += SHELF_COLS) {
     const row = document.createElement("div");
     row.className = "shelf-row";
-    books.slice(i, i + SHELF_COLS).forEach((book) => row.appendChild(bookTile(book)));
+    books.slice(i, i + SHELF_COLS).forEach((book) => row.appendChild(bookTile(book, { shared })));
     grid.appendChild(row);
     const ledge = document.createElement("div");
     ledge.className = "shelf-ledge";
     grid.appendChild(ledge);
   }
+  loadCoverThumbs(grid);
 }
 
-function bookTile(book) {
+// --- Shelf tabs: 📚 My books | 🏥 Specialty books ------------------------
+// Specialty books open exactly like an uploaded book (reader, chapters,
+// summaries, Ask AI, quizzes, flashcards, notes) -- the server keeps a
+// per-user reference to the shared copy, see webapp_api._book_or_404.
+
+let shelfTab = "mine";
+let shelfSpecialty = null;
+let shelfCatalog = null;
+
+function setShelfTab(tab) {
+  shelfTab = tab;
+  document.querySelectorAll("#view-shelf .subtab").forEach((t) => t.classList.toggle("is-active", t.dataset.shelftab === tab));
+  document.getElementById("shelf-pane-mine").hidden = tab !== "mine";
+  document.getElementById("shelf-pane-spec").hidden = tab !== "spec";
+  document.getElementById("btn-add-book").hidden = tab !== "mine";
+  if (tab === "spec") loadSpecialtyShelf();
+  else loadShelf();
+}
+
+async function loadSpecialtyShelf() {
+  try {
+    shelfCatalog = (await api("/api/ask/library")).specialties;
+  } catch (e) {
+    return alertMsg("Couldn't load the specialty books: " + e.message);
+  }
+  const select = document.getElementById("shelf-specialty");
+  const names = shelfCatalog.map((x) => x.name);
+  if (!names.includes(shelfSpecialty)) shelfSpecialty = askSpecialty && names.includes(askSpecialty) ? askSpecialty : names[0] || null;
+  select.hidden = !names.length;
+  select.innerHTML = shelfCatalog
+    .map((x) => `<option value="${escapeHtml(x.name)}" ${x.name === shelfSpecialty ? "selected" : ""}>${escapeHtml(x.name)} (${x.books.length})</option>`)
+    .join("");
+  renderSpecialtyShelf();
+}
+
+function renderSpecialtyShelf() {
+  const grid = document.getElementById("shelf-spec-grid");
+  const empty = document.getElementById("shelf-spec-empty");
+  grid.innerHTML = "";
+  const spec = (shelfCatalog || []).find((x) => x.name === shelfSpecialty);
+  const books = spec ? spec.books : [];
+  empty.hidden = books.length > 0;
+  empty.textContent = shelfCatalog && shelfCatalog.length ? "No books in this specialty yet." : "No specialty libraries yet.";
+  renderShelf(grid, books, { shared: true });
+}
+
+function bookTile(book, { shared = false } = {}) {
   const wrap = document.createElement("div");
   wrap.className = "book-tile-wrap";
 
@@ -197,11 +244,18 @@ function bookTile(book) {
   btn.className = "book-tile";
   const dot = book.qa_indexed ? '<span class="status-dot" title="Indexed for AI Q&A"></span>' : "";
   const coverStyle = book.cover_color ? ` style="background:${book.cover_color}"` : "";
+  // The real cover (page 1) replaces the 📘 placeholder once it loads --
+  // see loadCoverThumbs. A chosen cover colour still shows until then.
   btn.innerHTML = `
-    <div class="book-cover"${coverStyle}>📘${dot}</div>
+    <div class="book-cover"${coverStyle} data-cover="${book.book_id}" data-shared="${shared ? 1 : 0}">📘${dot}</div>
     <div class="book-title-label">${escapeHtml(book.title)}</div>
   `;
   btn.addEventListener("click", () => openBook(book.book_id));
+  if (shared) {
+    // Specialty books are the library's: no rename/colour/delete menu.
+    wrap.appendChild(btn);
+    return wrap;
+  }
 
   const menuBtn = document.createElement("button");
   menuBtn.className = "book-menu-btn";
@@ -221,6 +275,54 @@ function escapeHtml(s) {
   const d = document.createElement("div");
   d.textContent = s;
   return d.innerHTML;
+}
+
+// ---------------------------------------------------------------------
+// Rich text for AI answers: right-to-left lines, bold, bullets, citations
+// ---------------------------------------------------------------------
+// A Persian/Arabic answer is full of English terms (SSRI, CBT, ESRD), and
+// a whole bubble given one direction lays such lines out backwards and
+// aligned to the wrong side. Each line is therefore its own block whose
+// direction follows the line's DOMINANT script (counting letters, not just
+// the first one -- "- SSRI ها خط اول..." is a right-to-left line).
+// Markdown the model writes (**bold**, "- " bullets, # headings) is
+// rendered instead of shown as raw asterisks.
+
+const RTL_CHARS = /[\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF]/g;
+const LTR_CHARS = /[A-Za-z\u00C0-\u024F\u0400-\u04FF]/g;
+
+function lineDir(line, fallback) {
+  const rtl = (line.match(RTL_CHARS) || []).length;
+  const ltr = (line.match(LTR_CHARS) || []).length;
+  if (!rtl && !ltr) return fallback;
+  return rtl >= ltr ? "rtl" : "ltr";
+}
+
+function inlineMarkdown(escapedLine) {
+  return escapedLine
+    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    .replace(/(^|[^*])\*\*(?=\s|$)/g, "$1")       // a dangling ** left over by the model
+    .replace(/\[(\d+)\]/g, (m, n) => `<span class="cite-marker" data-n="${n}">[${n}]</span>`);
+}
+
+function richText(text) {
+  const lines = String(text || "").replace(/\r/g, "").split("\n");
+  const whole = lineDir(text || "", "ltr");
+  let prev = whole;
+  const out = lines.map((raw) => {
+    let line = raw.replace(/\s+$/, "");
+    if (!line.trim()) return `<div class="gap"></div>`;
+    const dir = lineDir(line, prev);
+    prev = dir;
+    let html;
+    const heading = line.match(/^\s*#{1,4}\s+(.*)$/);
+    const bullet = line.match(/^(\s*)[-*•]\s+(.*)$/);
+    if (heading) html = `<strong>${inlineMarkdown(escapeHtml(heading[1]))}</strong>`;
+    else if (bullet) html = `${bullet[1] ? "&nbsp;&nbsp;" : ""}• ${inlineMarkdown(escapeHtml(bullet[2]))}`;
+    else html = inlineMarkdown(escapeHtml(line));
+    return `<div dir="${dir}">${html}</div>`;
+  });
+  return `<div class="rich" dir="${whole}">${out.join("")}</div>`;
 }
 
 // ---------------------------------------------------------------------
@@ -371,7 +473,7 @@ async function loadBookmarks() {
   list.innerHTML = "";
   let books;
   try {
-    ({ books } = await api("/api/books"));
+    ({ books } = await api("/api/books?all=1"));
   } catch (e) {
     alertMsg("Couldn't load bookmarks: " + e.message);
     return;
@@ -398,6 +500,53 @@ async function loadBookmarks() {
 async function openBookAtPage(bookId, page) {
   await openBook(bookId);
   await openReader(page);
+}
+
+// A citation tapped in an answer: open that book at the cited page, show
+// the quoted passage above the page, and highlight it on the page itself.
+// Works for specialty books too (the server opens them on first use).
+let readerSource = null;   // {page, text, n} while a cited passage is being shown
+
+async function openSource(bookId, page, text, n) {
+  readerSource = { page, text: text || "", n };
+  if (!currentBook || currentBook.book_id !== bookId) {
+    try {
+      currentBook = await api(`/api/books/${bookId}`);
+    } catch (e) {
+      readerSource = null;
+      return alertMsg("Couldn't open that book: " + e.message);
+    }
+    renderBookHeader();
+  }
+  await openReader(page);
+}
+
+function showReaderSource() {
+  const box = document.getElementById("reader-source");
+  if (!readerSource || readerSource.page !== readerState.pageNum) {
+    box.hidden = true;
+    return;
+  }
+  document.getElementById("reader-source-label").textContent =
+    `📌 Source${readerSource.n ? ` [${readerSource.n}]` : ""} · page ${readerSource.page}`;
+  document.getElementById("reader-source-text").innerHTML = richText(readerSource.text);
+  box.hidden = false;
+}
+
+// Best effort: mark the text-layer pieces of this page that belong to the
+// quoted passage. Pieces are matched on normalised words, so line breaks
+// and hyphenation in the PDF don't stop the match.
+function highlightSourceOnPage() {
+  if (!readerSource || readerSource.page !== readerState.pageNum) return;
+  const norm = (t) => t.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+  const excerpt = " " + norm(readerSource.text.replace(/…$/, "")) + " ";
+  if (excerpt.trim().length < 12) return;
+  document.querySelectorAll("#reader-text-layer span").forEach((span) => {
+    const t = norm(span.textContent || "");
+    if (t.length >= 4 && excerpt.includes(" " + t + " ")) span.classList.add("src-hl");
+  });
+  const first = document.querySelector("#reader-text-layer span.src-hl");
+  if (first) first.scrollIntoView({ block: "center", behavior: "smooth" });
 }
 
 // ---------------------------------------------------------------------
@@ -800,6 +949,8 @@ const ZOOM_MIN = 0.5;
 const ZOOM_MAX = 3;
 
 async function openReader(targetPage) {
+  if (readerSource && readerSource.page !== targetPage) readerSource = null;
+  document.getElementById("reader-source").hidden = true;
   showView("view-reader");
   document.getElementById("reader-page-label").textContent = "Loading…";
   document.getElementById("reader-goto-row").hidden = true;
@@ -881,6 +1032,8 @@ async function renderReaderPage() {
     }
   }
 
+  showReaderSource();
+  highlightSourceOnPage();
   document.getElementById("reader-page-label").textContent =
     `Page ${readerState.pageNum} / ${readerState.pdf.numPages}`;
   updateBookmarkButton();
@@ -1231,7 +1384,7 @@ async function runSummarize(body) {
     },
     onDone: (text) => {
       result.innerHTML = `
-        <div style="white-space:pre-wrap; margin-top:10px;">${escapeHtml(text)}</div>
+        <div style="margin-top:10px;">${richText(text)}</div>
         <button class="btn secondary" id="summarize-export" style="margin-top:12px;">📄 Export as PDF</button>
       `;
       document.getElementById("summarize-export").addEventListener("click", (e) =>
@@ -1436,13 +1589,12 @@ async function openQaSession(sessionId) {
 // bottom of the bubble -- exactly the footnote-style citation the mini
 // app's Ask AI panel is meant to show.
 function renderAnswerHtml(text, sources) {
-  const escaped = escapeHtml(text);
-  const withMarkers = escaped.replace(/\[(\d+)\]/g, (m, n) => `<span class="cite-marker" data-n="${n}">[${n}]</span>`);
-  if (!sources || !sources.length) return withMarkers;
+  const body = richText(text);
+  if (!sources || !sources.length) return body;
   const lines = sources
-    .map((s) => `<span class="src-line"><span class="n">[${s.n}]</span><span>p.${s.page} — ${escapeHtml(s.text)}</span></span>`)
+    .map((s) => `<span class="src-line" data-n="${s.n}"><span class="n">[${s.n}]</span><span>p.${s.page} — ${escapeHtml(s.text)}</span></span>`)
     .join("");
-  return `${withMarkers}<span class="qa-sources">${lines}</span>`;
+  return `${body}<span class="qa-sources">${lines}</span>`;
 }
 
 function renderQaLog() {
@@ -1450,7 +1602,7 @@ function renderQaLog() {
   if (!log) return;
   log.innerHTML = qaHistory
     .map((m, i) => {
-      if (m.role === "q") return `<div class="qa-msg q">${escapeHtml(m.text)}</div>`;
+      if (m.role === "q") return `<div class="qa-msg q" dir="auto">${escapeHtml(m.text)}</div>`;
       // m.sources is only set once a real answer has come back (it's absent
       // on the "…thinking…" placeholder and on an "Error: ..." bubble), so
       // it doubles as the signal that there's a finished answer to export.
@@ -1469,12 +1621,15 @@ function renderQaLog() {
 // scratch by panel()/renderAskUI() and wouldn't keep a directly-attached
 // listener) since bubbles are re-rendered wholesale on every turn.
 document.getElementById("view-book").addEventListener("click", (e) => {
-  const marker = e.target.closest(".cite-marker");
+  const marker = e.target.closest(".cite-marker, .src-line");
   if (!marker) return;
   const bubble = marker.closest(".qa-msg");
+  if (!bubble) return;
   const msg = qaHistory[parseInt(bubble.dataset.msgIndex, 10)];
   const source = msg && msg.sources && msg.sources.find((s) => String(s.n) === marker.dataset.n);
-  if (source) alertMsg(`[${source.n}] Page ${source.page}:\n\n${source.text}`);
+  // Opens the book at the cited page with the quoted passage shown and
+  // highlighted, instead of an alert with a 150-character snippet.
+  if (source) openSource(currentBook.book_id, source.page, source.text, source.n);
 });
 
 // Same delegation pattern as the citation-marker handler above, for the
@@ -2311,7 +2466,7 @@ async function checkInteractions() {
     }
     result.innerHTML =
       `<p class="muted">${escapeHtml(interactionDrugs.join(" · "))}</p>` +
-      `<div class="qa-msg a">${escapeHtml(answer)}</div>`;
+      `<div class="qa-msg a">${richText(answer)}</div>`;
   } catch (e) {
     if (e.status === 404) {
       // Every chip was confirmed when it was added, so reaching here means
@@ -2353,8 +2508,8 @@ function renderLookupThread() {
   box.innerHTML = lookupThread
     .map(
       (t) =>
-        `<div class="qa-msg q">${escapeHtml(t.q)}</div>` +
-        `<div class="qa-msg a">${escapeHtml(t.a)}</div>`
+        `<div class="qa-msg q" dir="auto">${escapeHtml(t.q)}</div>` +
+        `<div class="qa-msg a">${richText(t.a)}</div>`
     )
     .join("");
   box.scrollTop = box.scrollHeight;
@@ -2483,7 +2638,7 @@ function renderLexiState() {
   document.getElementById("lexi-ask-panel").hidden = !lexiDrug;
   const box = document.getElementById("lexi-thread");
   box.innerHTML = lexiThread
-    .map((t) => `<div class="qa-msg q">${escapeHtml(t.q)}</div><div class="qa-msg a">${escapeHtml(t.a)}</div>`)
+    .map((t) => `<div class="qa-msg q" dir="auto">${escapeHtml(t.q)}</div><div class="qa-msg a">${richText(t.a)}</div>`)
     .join("");
   box.scrollTop = box.scrollHeight;
 }
@@ -2577,7 +2732,7 @@ function wireDrugsTab() {
   document.querySelectorAll("#tabbar .tab").forEach((t) => {
     t.addEventListener("click", () => {
       showView(t.dataset.tab);
-      if (t.dataset.tab === "view-shelf") loadShelf();
+      if (t.dataset.tab === "view-shelf") setShelfTab(shelfTab);
       if (t.dataset.tab === "view-ask") loadAskLibrary();
     });
   });
@@ -2701,6 +2856,7 @@ function askRowHtml(b, { shared }) {
   const admin = shared && askLib.is_admin;
   const del = admin ? `<button class="mini-btn" data-del="${b.book_id}" title="Remove from library">🗑</button>` : "";
   const edit = admin ? `<button class="mini-btn" data-rename="${b.book_id}" title="Edit title">✏️</button>` : "";
+  const open = `<button class="mini-btn" data-open="${b.book_id}" title="Open the book">📖</button>`;
   const cover = coverButtonHtml(b.book_id, shared);
   if (admin && askEditingId === b.book_id) {
     // Inline title editor (window.prompt is unreliable inside Telegram).
@@ -2715,7 +2871,7 @@ function askRowHtml(b, { shared }) {
     const checked = askSelected.has(b.book_id) ? "checked" : "";
     return (
       `<label class="check-row"><input type="checkbox" data-id="${b.book_id}" ${checked} />${cover}` +
-      `<span class="check-title">${escapeHtml(b.title)}</span><span class="check-meta">${pages}</span>${edit}${del}</label>`
+      `<span class="check-title">${escapeHtml(b.title)}</span><span class="check-meta">${pages}</span>${open}${edit}${del}</label>`
     );
   }
   // Not answerable yet: say why, and offer the one thing that fixes it.
@@ -2733,7 +2889,7 @@ function askRowHtml(b, { shared }) {
   }
   return (
     `<div class="check-row is-disabled"><input type="checkbox" disabled />${cover}` +
-    `<span class="check-title">${escapeHtml(b.title)}</span>${meta}${action}${edit}${del}</div>`
+    `<span class="check-title">${escapeHtml(b.title)}</span>${meta}${action}${open}${edit}${del}</div>`
   );
 }
 
@@ -2785,7 +2941,17 @@ function renderAskLibrary() {
   renderAskSelection();
 }
 
+function renderAskSpecActions() {
+  const spec = askLib && askLib.specialties.find((x) => x.name === askSpecialty);
+  const ready = spec ? spec.books.filter((b) => b.qa_indexed) : [];
+  const btn = document.getElementById("ask-tick-all");
+  btn.hidden = ready.length === 0;
+  btn.textContent = ready.length && ready.every((b) => askSelected.has(b.book_id)) ? "☐ Untick all" : "☑️ Tick all";
+  document.getElementById("ask-suggest").hidden = !askLib;
+}
+
 function renderAskSelection() {
+  renderAskSpecActions();
   const n = askSelected.size;
   document.getElementById("ask-selected").textContent = n
     ? `${n} book${n === 1 ? "" : "s"} ticked.`
@@ -2795,26 +2961,25 @@ function renderAskSelection() {
 }
 
 function askAnswerHtml(text, sources) {
-  const escaped = escapeHtml(text);
-  const withMarkers = escaped.replace(/\[(\d+)\]/g, (m, n) => `<span class="cite-marker">[${n}]</span>`);
-  if (!sources || !sources.length) return withMarkers;
+  const body = richText(text);
+  if (!sources || !sources.length) return body;
   const lines = sources
     .map(
       (s) =>
-        `<span class="src-line"><span class="n">[${s.n}]</span>` +
+        `<span class="src-line" data-n="${s.n}"><span class="n">[${s.n}]</span>` +
         `<span><strong>${escapeHtml(s.title)}</strong>, p.${s.page} — ${escapeHtml(s.text)}</span></span>`
     )
     .join("");
-  return `${withMarkers}<span class="qa-sources">${lines}</span>`;
+  return `${body}<span class="qa-sources">${lines}</span>`;
 }
 
 function renderAskThread() {
   const box = document.getElementById("ask-thread");
   box.innerHTML = askThread
     .map(
-      (t) =>
-        `<div class="qa-msg q">${escapeHtml(t.q)}</div>` +
-        `<div class="qa-msg a">${t.sources ? askAnswerHtml(t.a, t.sources) : escapeHtml(t.a)}</div>`
+      (t, i) =>
+        `<div class="qa-msg q" dir="auto">${escapeHtml(t.q)}</div>` +
+        `<div class="qa-msg a" data-turn="${i}">${t.sources ? askAnswerHtml(t.a, t.sources) : escapeHtml(t.a)}</div>`
     )
     .join("");
   box.scrollTop = box.scrollHeight;
@@ -2983,8 +3148,23 @@ async function fetchImage(path) {
   return URL.createObjectURL(await res.blob());
 }
 
+function setCoverImage(el, url) {
+  if (el.classList.contains("book-cover")) {
+    const dot = el.querySelector(".status-dot");
+    el.classList.add("has-img");
+    el.innerHTML = `<img src="${url}" alt="" />`;
+    if (dot) el.appendChild(dot);
+  } else {
+    el.innerHTML = `<img src="${url}" alt="" />`;
+  }
+}
+
 function loadCoverThumbs(root) {
-  root.querySelectorAll("button.cover-btn").forEach((btn) => {
+  root.querySelectorAll("[data-cover]").forEach((btn) => {
+    const cached = coverUrls.get(coverKey(btn.dataset.cover, btn.dataset.shared === "1"));
+    if (cached) setCoverImage(btn, cached);
+  });
+  root.querySelectorAll("[data-cover]").forEach((btn) => {
     const key = coverKey(btn.dataset.cover, btn.dataset.shared === "1");
     if (coverUrls.has(key) || coverQueue.some((q) => q.key === key)) return;
     coverQueue.push({ key, id: btn.dataset.cover, shared: btn.dataset.shared === "1" });
@@ -2999,8 +3179,8 @@ function pumpCovers() {
     fetchImage(coverPath(job.id, job.shared, "thumb"))
       .then((url) => {
         coverUrls.set(job.key, url);
-        document.querySelectorAll(`button.cover-btn[data-cover="${job.id}"][data-shared="${job.shared ? 1 : 0}"]`)
-          .forEach((b) => { b.innerHTML = `<img src="${url}" alt="" />`; });
+        document.querySelectorAll(`[data-cover="${job.id}"][data-shared="${job.shared ? 1 : 0}"]`)
+          .forEach((b) => setCoverImage(b, url));
       })
       .catch(() => coverUrls.set(job.key, null))  // keep the 📘 placeholder; don't retry every render
       .finally(() => { coverActive--; pumpCovers(); });
@@ -3041,6 +3221,49 @@ function askSaveRename(id) {
   });
 }
 
+// Tick every searchable book of the specialty on screen (up to the limit).
+function askTickAll() {
+  const spec = askLib && askLib.specialties.find((x) => x.name === askSpecialty);
+  if (!spec) return;
+  const ready = spec.books.filter((b) => b.qa_indexed).map((b) => b.book_id);
+  const allTicked = ready.length && ready.every((id) => askSelected.has(id));
+  if (allTicked) {
+    ready.forEach((id) => askSelected.delete(id));  // second tap unticks them again
+  } else {
+    for (const id of ready) {
+      if (askSelected.size >= askLib.max_books) {
+        alertMsg(`Ticked as many as fit -- up to ${askLib.max_books} books can be asked at once.`);
+        break;
+      }
+      askSelected.add(id);
+    }
+  }
+  renderAskLibrary();
+}
+
+async function askSendSuggestion() {
+  const title = document.getElementById("ask-suggest-title").value.trim();
+  const note = document.getElementById("ask-suggest-note").value.trim();
+  if (!title) return alertMsg("Type the book's title (and author, if you know it).");
+  const btn = document.getElementById("ask-suggest-send");
+  btn.disabled = true;
+  try {
+    await api("/api/suggest-book", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ specialty: askSpecialty, title, note }),
+    });
+    document.getElementById("ask-suggest-title").value = "";
+    document.getElementById("ask-suggest-note").value = "";
+    document.getElementById("ask-suggest-form").hidden = true;
+    alertMsg("Thanks! Your suggestion was sent to the admin.");
+  } catch (e) {
+    alertMsg(e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 function wireAskTab() {
   const view = document.getElementById("view-ask");
 
@@ -3075,9 +3298,24 @@ function wireAskTab() {
       e.preventDefault();
       return showCover(coverBtn.dataset.cover, coverBtn.dataset.shared === "1", coverBtn.dataset.title);
     }
+    const cite = e.target.closest("#ask-thread .cite-marker, #ask-thread .src-line");
+    if (cite) {
+      const turn = askThread[parseInt(cite.closest(".qa-msg").dataset.turn, 10)];
+      const src = turn && turn.sources && turn.sources.find((x) => String(x.n) === cite.dataset.n);
+      if (src) openSource(src.book_id, src.page, src.text, src.n);
+      return;
+    }
     const btn = e.target.closest("button.mini-btn");
     if (!btn) return;
     e.preventDefault();
+    if (btn.dataset.open) return openBook(btn.dataset.open);
+    if (btn.id === "ask-tick-all") return askTickAll();
+    if (btn.id === "ask-suggest") {
+      const form = document.getElementById("ask-suggest-form");
+      form.hidden = !form.hidden;
+      if (!form.hidden) document.getElementById("ask-suggest-title").focus();
+      return;
+    }
     if (btn.dataset.rename) {
       askEditingId = btn.dataset.rename;
       renderAskLibrary();
@@ -3109,6 +3347,15 @@ function wireAskTab() {
   });
 
   document.getElementById("ask-send").addEventListener("click", askSend);
+  document.getElementById("ask-suggest-send").addEventListener("click", askSendSuggestion);
+  document.getElementById("ask-suggest-cancel").addEventListener("click", () => {
+    document.getElementById("ask-suggest-form").hidden = true;
+  });
+  document.getElementById("reader-source-close").addEventListener("click", () => {
+    readerSource = null;
+    document.getElementById("reader-source").hidden = true;
+    document.querySelectorAll("#reader-text-layer span.src-hl").forEach((x) => x.classList.remove("src-hl"));
+  });
   view.addEventListener("keydown", (e) => {
     const input = e.target.closest("input[data-rename-input]");
     if (!input) return;
@@ -3176,6 +3423,13 @@ function wireAskTab() {
   }
   wireDrugsTab();
   wireAskTab();
+  document.querySelectorAll("#view-shelf .subtab").forEach((t) =>
+    t.addEventListener("click", () => setShelfTab(t.dataset.shelftab))
+  );
+  document.getElementById("shelf-specialty").addEventListener("change", (e) => {
+    shelfSpecialty = e.target.value;
+    renderSpecialtyShelf();
+  });
   // "?tab=ask" is how the chat's "Ask several books" button lands here.
   if (new URLSearchParams(window.location.search).get("tab") === "ask") {
     showView("view-ask");

@@ -79,7 +79,7 @@ def _plan_summary_text(user_id: int) -> str:
             counted = library.count_toward_shelf_limit(user_id)
             lines.append("")
             lines.append(f"Book Shelf: {counted}/{shelf_cap} books")
-            if len(library.list_books(user_id)) > counted:
+            if len(library.own_books(user_id)) > counted:
                 lines.append("  (books you purchased don't count toward this)")
     lines.append("")
     lines.append(f"Language: {sub.get('language', 'English')}")

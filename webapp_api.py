@@ -224,6 +224,20 @@ def get_job(book_id: str, job_type: str) -> dict | None:
 # ---------------------------------------------------------------------------
 
 def _book_or_404(user_id: int, book_id: str) -> dict:
+    """
+    A book this user may use: one of their own, or a specialty-library book.
+    A specialty book is served through the user's reference to it (created
+    on first use, refreshed from the shared copy every time), so every
+    per-book endpoint below works on it unchanged.
+    """
+    if shared_library.is_shared_id(book_id):
+        shared = shared_library.get_book(book_id)
+        if shared is None:
+            # Removed from the library by the admin: drop the stale
+            # reference (never the file -- it's already gone).
+            library.remove_book(user_id, book_id, delete_file=False)
+            raise ApiError(status_code=404, detail="This book was removed from the library.")
+        return library.upsert_shared_ref(user_id, book_id, shared)
     book = library.get_book(user_id, book_id)
     if book is None:
         raise ApiError(status_code=404, detail="Book not found.")
@@ -239,7 +253,10 @@ def _public_book(book_id: str, book: dict) -> dict:
 
 async def list_books(request: Request):
     user = require_user(request)
-    books = library.list_books(user["id"])
+    # Specialty books have their own shelf tab; ?all=1 (the Bookmarks list)
+    # includes them, since a bookmark in one should be findable too.
+    all_books = request.query_params.get("all") == "1"
+    books = library.list_books(user["id"]) if all_books else library.own_books(user["id"])
     # shelf_limit/shelf_used let the mini app show the upgrade prompt on the
     # "+" button instead of letting a free user pick a file, upload it, and
     # only then be refused. null limit = unlimited (Premium). shelf_used is
@@ -269,7 +286,8 @@ async def get_book(request: Request):
 async def rename_book(request: Request):
     user = require_user(request)
     book_id = request.path_params["book_id"]
-    _book_or_404(user["id"], book_id)
+    if library.is_shared_ref(_book_or_404(user["id"], book_id)):
+        raise ApiError(status_code=403, detail="Specialty-library books are named by the admin.")
 
     try:
         body = await request.json()
@@ -311,6 +329,14 @@ async def delete_book(request: Request):
     user = require_user(request)
     book_id = request.path_params["book_id"]
     book = _book_or_404(user["id"], book_id)
+
+    if library.is_shared_ref(book):
+        # Only this user's reference (and their notes/history) goes; the
+        # file, index and cover belong to the specialty library.
+        library.remove_book(user["id"], book_id, delete_file=False)
+        library.delete_qa_sessions_for_book(user["id"], book_id)
+        library.delete_quiz_attempts_for_book(user["id"], book_id)
+        return JSONResponse({"deleted": True, "book_id": book_id})
 
     library.remove_book(user["id"], book_id, delete_file=True)
     pdf_qa.delete_index(book_id)
@@ -543,6 +569,11 @@ async def _run_chapter_division(user_id: int, book_id: str, pdf_path: str):
     chapters = await asyncio.to_thread(detect_chapters_cached, pdf_path, progress)
     ranges = compute_chapter_ranges(chapters, page_count)
     library.set_chapters(user_id, book_id, ranges)
+    # A specialty book divided by one user is divided for everyone after.
+    if shared_library.is_shared_id(book_id):
+        shared = shared_library.get_book(book_id)
+        if shared is not None and not shared.get("chapters"):
+            shared_library.set_chapters(book_id, ranges)
     return ranges
 
 
@@ -784,6 +815,19 @@ async def index_book(request: Request):
     user = require_user(request)
     book_id = request.path_params["book_id"]
     book = _book_or_404(user["id"], book_id)
+
+    if library.is_shared_ref(book):
+        # A specialty book's index is the library's, built once for everyone.
+        # Never rebuild it per user; report its state through the same job
+        # entry the client polls.
+        if book.get("qa_indexed"):
+            _jobs[_job_key(book_id, "index")] = {
+                "status": "done", "result": {"num_chunks": book.get("num_chunks", 0)}, "error": None, "progress": None,
+            }
+            return JSONResponse({"started": True})
+        if (get_job(book_id, "index") or {}).get("status") == "running":
+            return JSONResponse({"started": True})
+        return JSONResponse({"started": _start_shared_index(book_id)})
 
     async def job():
         def progress(text):
@@ -1772,7 +1816,7 @@ async def ask_library(request: Request):
             "page_count": b.get("page_count"),
             "qa_indexed": bool(b.get("qa_indexed")),
         }
-        for bid, b in library.list_books(user["id"]).items()
+        for bid, b in library.own_books(user["id"]).items()
     ]
     my_books.sort(key=lambda b: b["title"].lower())
     return JSONResponse(
@@ -1872,6 +1916,18 @@ def _start_shared_index(book_id: str) -> bool:
             shared_library.set_index_error(book_id, "Indexing failed unexpectedly.")
             raise
         shared_library.mark_indexed(book_id, num_chunks)
+        # Divide it into chapters once, for every user who opens it --
+        # otherwise each would pay (and wait) for the same division.
+        if not (shared_library.get_book(book_id) or {}).get("chapters"):
+            set_job_progress(book_id, "index", "Finding chapters...")
+            try:
+                chapters = await asyncio.wait_for(
+                    asyncio.to_thread(detect_chapters_cached, book["pdf_path"]),
+                    timeout=scaled_timeout(CHAPTER_DIVISION_TIMEOUT_SECONDS, book.get("page_count") or 0),
+                )
+                shared_library.set_chapters(book_id, compute_chapter_ranges(chapters, book.get("page_count") or 1))
+            except Exception:
+                logger.exception("Chapter division for shared book %s failed (non-fatal)", book_id)
         return {"num_chunks": num_chunks}
 
     shared_library.set_index_error(book_id, None)
@@ -2217,6 +2273,32 @@ async def shared_rename(request: Request):
     return JSONResponse({"title": title, "specialties": _shared_catalog()})
 
 
+async def suggest_book(request: Request):
+    """A customer suggests a book for a specialty library; it's saved and sent to every admin."""
+    user = require_user(request)
+    body = await _json_body(request)
+    username = user.get("username")
+    who = f"@{username}" if username else f"id {user['id']}"
+    specialty = body.get("specialty") if isinstance(body.get("specialty"), str) else None
+    try:
+        item = shared_library.add_suggestion(user["id"], who, specialty, body.get("title"), body.get("note"))
+    except shared_library.SharedLibraryError as e:
+        raise ApiError(status_code=400, detail=str(e))
+    text = (
+        f"💡 Book suggestion from {who}"
+        + (f" for {item['specialty']}" if item["specialty"] else "")
+        + f":\n\n📖 {item['title']}"
+        + (f"\n📝 {item['note']}" if item["note"] else "")
+        + f"\n\nReply: /replyuser {user['id']} <message>"
+    )
+    for admin_id in ADMIN_USER_IDS:
+        try:
+            await tg_bot.send_message(chat_id=admin_id, text=text)
+        except TelegramAPIError:
+            logger.exception("Couldn't forward a book suggestion to admin %s", admin_id)
+    return JSONResponse({"sent": True})
+
+
 routes = [
     Route("/api/books", list_books, methods=["GET"]),
     Route("/api/upload", upload_book, methods=["POST"]),
@@ -2260,6 +2342,7 @@ routes = [
     Route("/api/drugs/ask", drug_ask, methods=["POST"]),
     Route("/api/ask/library", ask_library, methods=["GET"]),
     Route("/api/ask/multi", ask_multi, methods=["POST"]),
+    Route("/api/suggest-book", suggest_book, methods=["POST"]),
     Route("/api/shared/specialties", shared_add_specialty, methods=["POST"]),
     Route("/api/shared/specialties/remove", shared_remove_specialty, methods=["POST"]),
     Route("/api/shared/upload", shared_upload, methods=["POST"]),

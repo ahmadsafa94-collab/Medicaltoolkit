@@ -108,7 +108,61 @@ def list_books(user_id: int) -> dict:
 # free-plan shelf cap: the user paid real money for that specific book, so it
 # must never be what pushes them over the limit or blocks their next upload.
 # They still sit on the shelf like any other book -- they just don't count.
-SHELF_LIMIT_EXEMPT_SOURCES = {"request"}
+SHELF_LIMIT_EXEMPT_SOURCES = {"request", "shared"}
+
+# A specialty-library book a user has opened gets an entry here too, under
+# the SAME id as the shared book, with source="shared". That is what lets
+# every per-book feature (reader, chapters, summaries, Ask AI, quizzes,
+# flashcards, notes, bookmarks) work on it unchanged. The entry is only a
+# reference: the file and the search index belong to shared_library, and
+# removing the reference must never delete either (see webapp_api.delete_book).
+SHARED_SOURCE = "shared"
+
+# Fields owned by the shared book, refreshed from it on every access; all
+# other fields (bookmark, chapters the user divided, cover colour) are the
+# user's own.
+_SHARED_FIELDS = ("title", "pdf_path", "page_count", "qa_indexed", "num_chunks", "index_model")
+
+
+def is_shared_ref(entry: dict | None) -> bool:
+    return bool(entry) and entry.get("source") == SHARED_SOURCE
+
+
+def own_books(user_id: int) -> dict:
+    """The user's own uploads/deliveries -- what the 📚 My books shelf shows (no specialty references)."""
+    return {bid: b for bid, b in _load(user_id).items() if not is_shared_ref(b)}
+
+
+def upsert_shared_ref(user_id: int, book_id: str, shared: dict) -> dict:
+    """
+    Make sure this user has an up-to-date reference to a shared book and
+    return it. Writes only when something changed, since the reader calls
+    this on every page-range request.
+    """
+    registry = _load(user_id)
+    entry = registry.get(book_id)
+    if entry is None:
+        entry = {
+            "uploaded_at": time.time(),
+            "source": SHARED_SOURCE,
+            "chapters": None,
+            "chapters_status": "none",
+            "chapters_error": None,
+            "bookmark_page": None,
+            "cover_color": None,
+        }
+    wanted = {k: shared.get(k) for k in _SHARED_FIELDS}
+    wanted["qa_indexed"] = bool(shared.get("qa_indexed"))
+    if shared.get("chapters") and not entry.get("chapters"):
+        wanted["chapters"] = shared["chapters"]
+        wanted["chapters_status"] = "done"
+        wanted["chapters_error"] = None
+    if book_id in registry and all(entry.get(k) == v for k, v in wanted.items()):
+        return entry
+    entry.update(wanted)
+    registry[book_id] = entry
+    _save(user_id, registry)
+    return entry
 
 
 def count_toward_shelf_limit(user_id: int) -> int:

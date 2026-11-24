@@ -671,7 +671,7 @@ async def answer_question(
 
     return {
         "answer": answer_text,
-        "sources": [{"n": n, "page": m["page"], "text": m["text"][:150]} for n, m in numbered],
+        "sources": [{"n": n, "page": m["page"], "text": m["text"][:300]} for n, m in numbered],
     }
 
 
@@ -830,7 +830,7 @@ async def answer_question_multi(
     return {
         "answer": answer_text,
         "sources": [
-            {"n": n, "page": m["page"], "text": m["text"][:150], "book_id": m["book_id"], "title": m["title"]}
+            {"n": n, "page": m["page"], "text": m["text"][:300], "book_id": m["book_id"], "title": m["title"]}
             for n, m in numbered
         ],
         "skipped": skipped,
