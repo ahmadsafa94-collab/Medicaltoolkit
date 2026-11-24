@@ -474,8 +474,26 @@ def admin_menu_kb() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="🐞 Reported problems", callback_data="admin:reports")],
             [InlineKeyboardButton(text="🤝 Top Referrers", callback_data="admin:referrals")],
             [InlineKeyboardButton(text="📚 Book Requests", callback_data="admin:bookrequests")],
+            [InlineKeyboardButton(text="🏥 Specialty libraries", callback_data="admin:shlib")],
         ]
     )
+
+
+def specialty_key(name: str) -> str:
+    """A short, stable id for a specialty in callback_data (names can be long or non-Latin; the limit is 64 bytes)."""
+    import hashlib
+
+    return hashlib.sha1(name.lower().encode()).hexdigest()[:10]
+
+
+def admin_specialties_kb(catalog: list[dict]) -> InlineKeyboardMarkup:
+    """One button per specialty (with its book count), plus "New specialty"."""
+    rows = [
+        [InlineKeyboardButton(text=f"🏥 {s['name']} ({len(s['books'])})", callback_data=f"admin:shspec:{specialty_key(s['name'])}")]
+        for s in catalog
+    ]
+    rows.append([InlineKeyboardButton(text="➕ New specialty", callback_data="admin:shnew")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def book_request_offer_kb(request_id: str, price_usd: float, stars: int) -> InlineKeyboardMarkup:

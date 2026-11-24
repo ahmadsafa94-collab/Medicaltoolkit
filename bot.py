@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 
 import uvicorn
 from aiogram import Dispatcher, F
@@ -23,6 +24,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.exceptions import TelegramBadRequest, TelegramAPIError
 from aiogram.types import (
+    ErrorEvent,
     Message,
     InlineQuery,
     InlineQueryResultArticle,
@@ -41,6 +43,7 @@ from config import (
     MAX_SHELF_UPLOAD_BYTES,
     MAX_UPLOAD_BYTES,
     PDF_PROCESSING_TIMEOUT_SECONDS,
+    QA_INDEXING_TIMEOUT_SECONDS,
     scaled_timeout,
     WEBAPP_URL,
     PORT,
@@ -94,6 +97,8 @@ import flashcard_flow
 import flashcards
 import glossary
 import health_check
+import shared_library
+import webapp_api
 import library
 import message_translation
 import name_resolver
@@ -192,8 +197,21 @@ flashcard_flow.register_flashcard_handlers(dp)
 notes_flow.register_notes_handlers(dp)
 
 
+def _update_summary(update) -> str:
+    """Who did what, in one short line -- the full Update repr is thousands of characters of None fields."""
+    if update.message:
+        m = update.message
+        what = m.text or m.caption or ("document " + (m.document.file_name or "") if m.document else "message")
+        return f"user {m.from_user.id if m.from_user else '?'} sent: {what[:120]}"
+    if update.callback_query:
+        return f"user {update.callback_query.from_user.id} tapped: {update.callback_query.data}"
+    if update.pre_checkout_query:
+        return f"user {update.pre_checkout_query.from_user.id} checkout: {update.pre_checkout_query.invoice_payload}"
+    return f"update {update.update_id} ({update.event_type})"
+
+
 @dp.errors()
-async def global_error_handler(event, exception):
+async def global_error_handler(error: ErrorEvent):
     """
     Last-resort safety net: logs the FULL traceback for any exception that
     escapes an individual handler, so a bug never just silently disappears
@@ -202,9 +220,14 @@ async def global_error_handler(event, exception):
     the bot chat (🛠 Admin Panel -> Recent errors) without needing Railway
     log access.
     """
-    logger.exception("Unhandled exception in update %s: %s", event, exception)
+    # aiogram 3 hands an error handler ONE ErrorEvent (.update, .exception).
+    # This used to take (event, exception), so it raised a TypeError of its
+    # own every time and no handler crash ever reached the log or 🪵 Recent
+    # errors properly.
+    event, exception = error.update, error.exception
+    logger.error("Unhandled exception in update %s", event.update_id, exc_info=exception)
     try:
-        admin_log.record_error(exception, context=str(event))
+        admin_log.record_error(exception, context=_update_summary(event))
     except Exception:
         logger.exception("Failed to record error to admin_log (non-fatal)")
     return True  # mark as handled so aiogram doesn't re-raise
@@ -958,6 +981,101 @@ async def handle_section_tap(callback: CallbackQuery):
     if table_entries:
         drug_name = sections.get("_name", "Drug")
         await send_table_entries(callback.message, drug_name, table_entries)
+
+
+@dp.message(F.document, admin_flow.AdminStates.awaiting_shared_pdf)
+async def handle_shared_pdf_document(message: Message, state: FSMContext):
+    """
+    An admin adding a book to a specialty library by sending it in chat
+    (admin panel -> 🏥 Specialty libraries -> pick one; see admin_flow).
+    Registered on `dp`, ahead of the general upload handler, for the same
+    reason as handle_book_delivery_document below: otherwise the PDF would
+    land on the admin's own shelf instead.
+
+    The state is kept afterwards, so several PDFs can be sent in a row;
+    each is indexed in the background and reported when ready.
+    """
+    uid = message.from_user.id
+    if not subscriptions.is_admin(uid):
+        await state.clear()
+        return
+    specialty = (await state.get_data()).get("specialty")
+    existing = next((s for s in shared_library.list_specialties() if specialty and s.lower() == specialty.lower()), None)
+    if not existing:
+        await state.clear()
+        await message.answer("That specialty no longer exists. Open /admin -> 🏥 Specialty libraries again.")
+        return
+
+    doc = message.document
+    file_name = doc.file_name or "book.pdf"
+    if doc.mime_type != "application/pdf" and not file_name.lower().endswith(".pdf"):
+        await message.answer("That doesn't look like a PDF. Send a .pdf file, or /done to finish.")
+        return
+    if doc.file_size and doc.file_size > MAX_UPLOAD_BYTES:
+        await message.answer(
+            f"That file is {doc.file_size / 1024 / 1024:.1f}MB -- over Telegram's "
+            f"{MAX_UPLOAD_BYTES // 1024 // 1024}MB limit for files sent to a bot. Upload it from the mini "
+            "app's 💬 Ask tab instead (🛠 Manage specialty libraries -> Upload a PDF)."
+        )
+        return
+
+    title = " ".join((message.caption or os.path.splitext(file_name)[0].replace("_", " ")).split())[:200] or "Untitled book"
+    book_id = shared_library.new_book_id()
+    os.makedirs(shared_library.BOOKS_DIR, exist_ok=True)
+    dest = os.path.join(shared_library.BOOKS_DIR, f"{book_id}.pdf")
+    status = await message.answer(f"📥 {title}: downloading...")
+    try:
+        file = await bot.get_file(doc.file_id)
+        await bot.download_file(file.file_path, destination=dest)
+        page_count = await asyncio.to_thread(open_check, dest)
+    except ChapterDetectionError as e:
+        _remove_quietly(dest)
+        await status.edit_text(f"❌ {title}: {e}")
+        return
+    except Exception:
+        logger.exception("Shared-library chat upload failed for %r", file_name)
+        _remove_quietly(dest)
+        await status.edit_text(f"❌ {title}: couldn't download that file from Telegram. Please send it again.")
+        return
+
+    shared_library.add_book(existing, title, dest, page_count, added_by=uid, book_id=book_id)
+    webapp_api._start_shared_index(book_id)
+    await status.edit_text(f"📚 {title} ({page_count} pages) added to {existing}. Making it searchable...")
+    asyncio.create_task(_report_shared_index(status, book_id, title, existing, page_count))
+
+
+def _remove_quietly(path: str) -> None:
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+async def _report_shared_index(status_msg, book_id: str, title: str, specialty: str, page_count: int) -> None:
+    """Follow a shared book's index job and keep its chat message up to date until it finishes."""
+    deadline = time.monotonic() + scaled_timeout(QA_INDEXING_TIMEOUT_SECONDS, page_count) + 120
+    last = None
+    while time.monotonic() < deadline:
+        await asyncio.sleep(4)
+        job = webapp_api.get_job(book_id, "index") or {}
+        if job.get("status") == "done":
+            book = shared_library.get_book(book_id) or {}
+            text = (
+                f"✅ {title} is ready in {specialty} ({book.get('num_chunks', 0)} passages). "
+                "Every user can now tick it in the 💬 Ask tab."
+            )
+        elif job.get("status") == "error":
+            text = f"❌ {title}: indexing failed ({job.get('error')}). Retry from the mini app's 💬 Ask tab."
+        else:
+            text = f"📚 {title} ({page_count} pages) added to {specialty}. {job.get('progress') or 'Making it searchable...'}"
+        if text != last:
+            try:
+                await status_msg.edit_text(text)
+            except TelegramAPIError:
+                pass  # edited too often or message gone -- the next update tries again
+            last = text
+        if job.get("status") in ("done", "error"):
+            return
 
 
 @dp.message(F.document, admin_flow.AdminStates.awaiting_book_delivery)

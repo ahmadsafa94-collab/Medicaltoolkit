@@ -32,6 +32,8 @@ from keyboards import (
     admin_menu_kb,
     admin_lookup_result_kb,
     admin_test_menu_kb,
+    admin_specialties_kb,
+    specialty_key,
     book_request_offer_kb,
 )
 
@@ -53,6 +55,8 @@ class AdminStates(StatesGroup):
     awaiting_broadcast = State()
     awaiting_custom_days = State()
     awaiting_book_delivery = State()
+    awaiting_specialty_name = State()
+    awaiting_shared_pdf = State()   # data: specialty -- PDFs sent now go into that specialty
 
 
 async def _require_admin_message(message: Message) -> bool:
@@ -523,6 +527,102 @@ async def cmd_lexitest(message: Message):
             )
     except vmos_client.VmosError as e:
         await message.answer(f"❌ VMOS API error: {e}")
+
+
+# ---------------------------------------------------------------------------
+# 🏥 Specialty libraries -- adding books by sending them in chat
+# ---------------------------------------------------------------------------
+# The mini app's Ask tab can do this too, but sending a PDF straight into
+# the chat is quicker for the admin. Telegram caps a bot's downloads at
+# 20 MB, so bigger books still go through the mini app's uploader. The
+# document itself is received by bot.py's handle_shared_pdf_document (it
+# has to be registered on the dispatcher, ahead of the general upload
+# handler -- see that function).
+
+
+async def _show_specialties(answer_fn) -> None:
+    import shared_library
+
+    catalog = shared_library.catalog()
+    lines = ["🏥 Specialty libraries", ""]
+    if catalog:
+        for spec in catalog:
+            ready = sum(1 for b in spec["books"] if b["qa_indexed"])
+            lines.append(f"• {spec['name']}: {len(spec['books'])} book(s), {ready} ready")
+        lines += ["", "Pick a specialty to add books to it, or create a new one."]
+    else:
+        lines.append("No specialties yet. Create the first one.")
+    await answer_fn("\n".join(lines), reply_markup=admin_specialties_kb(catalog))
+
+
+@router.callback_query(F.data == "admin:shlib")
+async def handle_shared_libraries(callback: CallbackQuery, state: FSMContext):
+    if not await _require_admin_callback(callback):
+        return
+    await callback.answer()
+    await state.clear()
+    await _show_specialties(callback.message.answer)
+
+
+@router.callback_query(F.data == "admin:shnew")
+async def handle_new_specialty(callback: CallbackQuery, state: FSMContext):
+    if not await _require_admin_callback(callback):
+        return
+    await callback.answer()
+    await state.set_state(AdminStates.awaiting_specialty_name)
+    await callback.message.answer("Type the new specialty's name (e.g. Psychiatry). /cancel to stop.")
+
+
+@router.message(Command("cancel"), AdminStates.awaiting_specialty_name)
+@router.message(Command("cancel"), AdminStates.awaiting_shared_pdf)
+@router.message(Command("done"), AdminStates.awaiting_shared_pdf)
+async def handle_shared_done(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Done. Books still indexing will finish on their own; I'll post when each is ready.")
+
+
+@router.message(AdminStates.awaiting_specialty_name, F.text & ~F.text.startswith("/"))
+async def handle_specialty_name(message: Message, state: FSMContext):
+    if not await _require_admin_message(message):
+        return
+    import shared_library
+
+    try:
+        name = shared_library.add_specialty(message.text)
+    except shared_library.SharedLibraryError as e:
+        await message.answer(f"{e} Try again, or /cancel.")
+        return
+    await _await_shared_pdfs(message.answer, state, name)
+
+
+@router.callback_query(F.data.startswith("admin:shspec:"))
+async def handle_pick_specialty(callback: CallbackQuery, state: FSMContext):
+    if not await _require_admin_callback(callback):
+        return
+    import shared_library
+
+    key = callback.data.split(":", 2)[2]
+    name = next((s for s in shared_library.list_specialties() if specialty_key(s) == key), None)
+    if name is None:
+        await callback.answer("That specialty no longer exists.", show_alert=True)
+        return
+    await callback.answer()
+    await _await_shared_pdfs(callback.message.answer, state, name)
+
+
+async def _await_shared_pdfs(answer_fn, state: FSMContext, specialty: str) -> None:
+    from config import MAX_UPLOAD_BYTES
+
+    await state.set_state(AdminStates.awaiting_shared_pdf)
+    await state.update_data(specialty=specialty)
+    await answer_fn(
+        f"📥 Send PDFs for {specialty} now -- as many as you like, one after another. Each is added "
+        "and made searchable for every user automatically; I'll post when each one is ready.\n\n"
+        "The file name becomes the book title (add a caption to the file to set a different title).\n"
+        f"Chat files are limited to {MAX_UPLOAD_BYTES // 1024 // 1024} MB by Telegram -- use the mini "
+        "app's 💬 Ask tab for bigger books.\n\n"
+        "/done when finished."
+    )
 
 
 @router.message(Command("pricebook"))
