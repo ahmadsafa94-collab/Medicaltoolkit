@@ -93,7 +93,11 @@ def main() -> None:
                 continue
             pattern = TRANSPORTER_RE if kind.startswith("transporter") else ENZYME_RE
             tokens, cell_notes = _cell(value, pattern)
-            entry["notes"] += cell_notes
+            # A note in a cell belongs to that cell's kind (rifampin's
+            # "Single dose" is about its OATP1B inhibition, not its induction).
+            if cell_notes:
+                entry.setdefault("kind_notes", {}).setdefault(kind, [])
+                entry["kind_notes"][kind] = sorted(set(entry["kind_notes"][kind] + cell_notes), key=int)
             if level is None:
                 entry.setdefault(kind, [])
                 entry[kind] += [t for t in tokens if t not in entry[kind]]

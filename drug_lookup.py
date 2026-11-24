@@ -394,7 +394,20 @@ def _record_score(record: dict, wanted: str) -> tuple[int, int]:
     # one. Used only to break ties within the same match quality.
     substances = openfda.get("substance_name") or []
     single_ingredient = 1 if len(substances) <= 1 else 0
-    return (quality, single_ingredient)
+    # Then the route: for ketoconazole, erythromycin, tacrolimus... a cream
+    # or eye-drop label could win a tie, and its (usually absent) drug
+    # interactions were read as if they were the systemic drug's.
+    routes = {r.upper() for r in (openfda.get("route") or [])}
+    if "ORAL" in routes:
+        route = 2
+    elif routes & _SYSTEMIC_ROUTES:
+        route = 1
+    else:
+        route = 0
+    return (quality, single_ingredient, route)
+
+
+_SYSTEMIC_ROUTES = {"INTRAVENOUS", "INTRAMUSCULAR", "SUBCUTANEOUS", "SUBLINGUAL", "BUCCAL", "TRANSDERMAL", "RECTAL"}
 
 
 def _best_record(results: list[dict], drug_name: str) -> dict:
@@ -464,8 +477,13 @@ async def _fetch_label_record(drug_name: str, retries: int = 1) -> dict | None:
 
                 results = response.json().get("results", [])
                 if results:
+                    best = _best_record(results, drug_name)
+                    # The last, unquoted query matches any shared word: its
+                    # result must actually carry the name asked for.
+                    if query_index == len(queries) - 1 and _record_score(best, drug_name.strip().lower())[0] == 0:
+                        break
                     logger.info("openFDA match found on query %d for '%s'", query_index, drug_name)
-                    return _best_record(results, drug_name)
+                    return best
                 break  # 200 but empty results, try next query variant
 
     logger.info("openFDA: no match for '%s' after trying all query variants", drug_name)

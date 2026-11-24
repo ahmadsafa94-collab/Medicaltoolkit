@@ -54,14 +54,15 @@ def _base_name(ingredient: str) -> str:
     return stripped if len(stripped) > 2 else ingredient
 
 
-async def _query(http: httpx.AsyncClient, name: str, source: str) -> list[str]:
+async def _query(http: httpx.AsyncClient, name: str, source: str) -> list[str] | None:
+    """The classes, [] when RxClass has none, or None when the lookup itself failed."""
     try:
         resp = await http.get(_URL, params={"drugName": name, "relaSource": source})
         resp.raise_for_status()
         items = ((resp.json().get("rxclassDrugInfoList") or {}).get("rxclassDrugInfo")) or []
     except Exception as e:
         logger.info("RxClass %s lookup failed for %r: %s", source, name, type(e).__name__)
-        return []
+        return None
     out = []
     for item in items:
         # Only the single ingredient itself: by name, RxClass also returns
@@ -85,10 +86,13 @@ async def _ingredient_classes(http: httpx.AsyncClient, ingredient: str) -> list[
     if key in _cache:
         return _cache[key]
     daily, atc = await asyncio.gather(_query(http, ingredient, "DAILYMED"), _query(http, ingredient, "ATC"))
-    classes = list(dict.fromkeys(daily + atc))
-    if len(_cache) >= _CACHE_MAX:
-        _cache.pop(next(iter(_cache)))
-    _cache[key] = classes
+    classes = list(dict.fromkeys((daily or []) + (atc or [])))
+    # Only a complete answer is cached: one timeout used to leave a drug
+    # without its classes, for every user, until the next restart.
+    if daily is not None and atc is not None:
+        if len(_cache) >= _CACHE_MAX:
+            _cache.pop(next(iter(_cache)))
+        _cache[key] = classes
     return classes
 
 

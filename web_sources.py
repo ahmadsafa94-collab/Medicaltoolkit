@@ -33,6 +33,7 @@ page makes, not just the first one. Only admins reach the browser.
 
 import asyncio
 import base64
+import concurrent.futures
 import hashlib
 import ipaddress
 import json
@@ -84,12 +85,22 @@ class WebSourceError(Exception):
 _lock = threading.Lock()
 
 
-def _load() -> dict:
+def _load(strict: bool = False) -> dict:
+    """
+    The registry. A missing file is an empty one; any other read or parse
+    error raises when strict -- the callers that write the file back use
+    strict, so a transient error can't turn into "save only the new site".
+    """
     try:
         with open(_SITES_PATH, encoding="utf-8") as f:
             data = json.load(f)
         return data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return {}
     except (OSError, ValueError):
+        if strict:
+            logger.exception("Couldn't read the web sources registry")
+            raise WebSourceError("The saved websites couldn't be read just now. Please try again.")
         return {}
 
 
@@ -163,7 +174,7 @@ def ask_sources() -> list[dict]:
 def update_site(site_id: str, fields: dict) -> dict:
     """Admin edits: name, search_url, link_pattern, max_results, enabled. Validated here."""
     with _lock:
-        sites = _load()
+        sites = _load(strict=True)
         site = sites.get(site_id)
         if site is None:
             raise WebSourceError("That website isn't saved anymore.")
@@ -200,7 +211,7 @@ def update_site(site_id: str, fields: dict) -> dict:
 
 def delete_site(site_id: str) -> None:
     with _lock:
-        sites = _load()
+        sites = _load(strict=True)
         if sites.pop(site_id, None) is None:
             raise WebSourceError("That website isn't saved anymore.")
         _write_json(_SITES_PATH, sites)
@@ -212,7 +223,7 @@ def delete_site(site_id: str) -> None:
 
 def _set_login_result(site_id: str, ok: bool, error: str | None = None) -> None:
     with _lock:
-        sites = _load()
+        sites = _load(strict=True)
         site = sites.get(site_id)
         if site is None:
             return
@@ -307,6 +318,7 @@ def _ip_allowed(ip_text: str) -> bool:
 # different DNS answer can't be slipped in between check and connect).
 
 _PROXY_PORTS = {80, 443, 8080, 8443}
+_DNS_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="web-dns")
 _PROXY_CONNECT_TIMEOUT = 10
 _PROXY_HEAD_LIMIT = 64 * 1024
 
@@ -317,7 +329,15 @@ async def _resolve_public(host: str, port: int) -> str:
         return host
     if _blocked_host(host) or port not in _PROXY_PORTS:
         raise PermissionError(f"{host}:{port} not allowed")
-    infos = await asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    # Its own small thread pool and a timeout: on the default pool, a page
+    # making many slow lookups stalled every AI call in the bot (they share it).
+    loop = asyncio.get_running_loop()
+    try:
+        infos = await asyncio.wait_for(
+            loop.run_in_executor(_DNS_POOL, socket.getaddrinfo, host, port, 0, socket.SOCK_STREAM), timeout=5
+        )
+    except asyncio.TimeoutError:
+        raise PermissionError(f"{host}: DNS lookup timed out")
     addrs = [info[4][0] for info in infos]
     if not addrs or not all(_ip_allowed(a) for a in addrs):
         raise PermissionError(f"{host} resolves to a non-public address")
@@ -453,7 +473,12 @@ async def _get_browser():
             _browser = await _pw.chromium.launch(
                 executable_path=_executable(),
                 headless=True,
-                args=["--no-sandbox", "--disable-dev-shm-usage"],
+                args=[
+                    "--no-sandbox", "--disable-dev-shm-usage",
+                    # WebRTC's UDP doesn't go through a proxy; this keeps it off.
+                    "--webrtc-ip-handling-policy=disable_non_proxied_udp",
+                    "--disable-background-networking",
+                ],
                 # "<-loopback>" removes Chromium's built-in exemption, so even
                 # localhost goes through the proxy (and is refused there).
                 proxy={"server": await _proxy_address(), "bypass": "<-loopback>"},
@@ -506,7 +531,7 @@ async def _watch_idle() -> None:
             return
 
 
-async def _new_context(state: dict | None = None):
+async def _new_context(state: dict | None = None, text_only: bool = False):
     browser = await _get_browser()
     ctx = await browser.new_context(
         viewport=VIEWPORT,
@@ -516,11 +541,20 @@ async def _new_context(state: dict | None = None):
         user_agent=_USER_AGENT,
         locale="en-US",
         storage_state=state,
+        accept_downloads=False,
     )
     ctx.set_default_navigation_timeout(_NAV_TIMEOUT_MS)
     ctx.set_default_timeout(_STEP_TIMEOUT_MS)
-    await ctx.route("**/*", _guard)
+    await ctx.route("**/*", _guard_text_only if text_only else _guard)
     return ctx
+
+
+async def _guard_text_only(route) -> None:
+    """For searches: the text is all that's read, so pictures, media and fonts aren't fetched."""
+    if route.request.resource_type in ("image", "media", "font"):
+        await route.abort()
+    else:
+        await _guard(route)
 
 
 async def _settle(page, quick: bool = False) -> None:
@@ -589,7 +623,7 @@ async def _page_text(page) -> str:
         text = await page.evaluate(
             """() => {
               const root = document.querySelector('main, article, [role=main], #main, #content') || document.body;
-              return root ? root.innerText : '';
+              return root ? root.innerText.slice(0, 40000) : '';
             }"""
         )
     except Exception:
@@ -632,6 +666,7 @@ class _Live:
         self.start_url = start_url
         self.steps: list[dict] = [{"a": "goto", "url": start_url}]
         self.lock = asyncio.Lock()
+        self.had_state = False
 
 
 _live: _Live | None = None
@@ -643,24 +678,39 @@ def live_info() -> dict | None:
     return {"site_id": _live.site_id, "steps": len(_live.steps)}
 
 
+_live_switch = asyncio.Lock()
+
+
 async def live_start(url: str, site_id: str | None = None) -> dict:
     global _live
     url = check_url(url)
     if site_id is not None and get_site(site_id) is None:
         raise WebSourceError("That website isn't saved anymore.")
-    await live_close()
-    _touch()
-    ctx = await _new_context(_load_state(site_id) if site_id else None)
-    page = await ctx.new_page()
-    live = _Live(ctx, page, site_id, url)
+    async with _live_switch:  # two quick opens would otherwise leak a browser context
+        await live_close()
+        _touch()
+        state = _load_state(site_id) if site_id else None
+        ctx = await _new_context(state)
+        page = await ctx.new_page()
+        live = _Live(ctx, page, site_id, url)
+        live.had_state = state is not None
 
-    def on_page(new_page):
-        # A link that opens a new tab (common for "Sign in with ...") is
-        # followed there, as a phone browser would.
-        live.page = new_page
+        def on_close(closed_page):
+            # A sign-in popup that closes itself: back to a page still open.
+            if live.page is closed_page:
+                open_pages = [pg for pg in ctx.pages if not pg.is_closed()]
+                if open_pages:
+                    live.page = open_pages[-1]
 
-    ctx.on("page", on_page)
-    _live = live
+        def on_page(new_page):
+            # A link that opens a new tab (common for "Sign in with ...") is
+            # followed there, as a phone browser would.
+            live.page = new_page
+            new_page.on("close", on_close)
+
+        page.on("close", on_close)
+        ctx.on("page", on_page)
+        _live = live
     try:
         await _goto(page, url)
     except WebSourceError:
@@ -722,7 +772,13 @@ async def live_action(action: dict) -> dict:
             except Exception:
                 selector = None
             step = {"a": "type", "sel": selector}
-            if action.get("secret"):
+            try:
+                in_password_field = await page.evaluate(
+                    "() => !!document.activeElement && document.activeElement.type === 'password'"
+                )
+            except Exception:
+                in_password_field = False
+            if action.get("secret") or in_password_field:  # a password is never stored in plain text
                 step["secret"] = _encrypt(text)
             else:
                 step["text"] = text
@@ -769,29 +825,35 @@ async def live_action(action: dict) -> dict:
 
 async def live_save(name: str | None, keep_steps: bool = True) -> dict:
     """Save the live browser's session (and recorded login steps) as a new website or onto the one it was opened for."""
-    if _live is None:
+    live = _live
+    if live is None:
         raise WebSourceError("The browser is closed. Open a website first.")
     _touch()
-    state = await _live.ctx.storage_state()
-    steps = list(_live.steps) if keep_steps else []
+    state = await live.ctx.storage_state()
+    steps = list(live.steps) if keep_steps else []
     if len(steps) <= 1:
         steps = []  # just opening the start page: nothing to replay
     with _lock:
-        sites = _load()
-        site_id = _live.site_id
+        sites = _load(strict=True)
+        site_id = live.site_id
         now = int(time.time())
         if site_id and site_id in sites:
             site = sites[site_id]
-            if steps:
+            # Opened already logged in (saved cookies), a few taps and Save
+            # aren't a login recording: they would replace the real steps and
+            # the next automatic login would do nothing. A new recording with
+            # a password in it is.
+            relogged = any(st.get("secret") for st in steps)
+            if steps and (relogged or not live.had_state or not site.get("login_steps")):
                 site["login_steps"] = steps
             if name:
                 site["name"] = name.strip()[:80]
         else:
             site_id = "ws" + secrets.token_hex(5)
-            host = urllib.parse.urlsplit(_live.start_url).hostname or "Website"
+            host = urllib.parse.urlsplit(live.start_url).hostname or "Website"
             site = {
                 "name": (name or "").strip()[:80] or host,
-                "start_url": _live.start_url,
+                "start_url": live.start_url,
                 "search_url": "",
                 "link_pattern": "",
                 "max_results": 3,
@@ -799,7 +861,7 @@ async def live_save(name: str | None, keep_steps: bool = True) -> dict:
                 "login_steps": steps,
                 "created": now,
             }
-            _live.site_id = site_id
+            live.site_id = site_id
         site["updated"] = now
         site["last_login"] = now
         site["last_login_ok"] = True
@@ -847,15 +909,24 @@ async def _replay(site: dict, ctx) -> None:
             if not done:
                 await page.mouse.click(step["x"], step["y"])
         elif kind == "type":
-            text = _decrypt(step["secret"]) if step.get("secret") else step.get("text", "")
+            secret = bool(step.get("secret"))
+            text = _decrypt(step["secret"]) if secret else step.get("text", "")
             done = False
             if step.get("sel"):
                 try:
-                    await page.locator(step["sel"]).first.fill(text, timeout=_STEP_TIMEOUT_MS)
+                    # Typed, not filled: recording appended to what the field
+                    # held, so "admin@" + "example.com" must stay one address.
+                    target = page.locator(step["sel"]).first
+                    await target.focus(timeout=_STEP_TIMEOUT_MS)
+                    await target.press_sequentially(text, delay=15, timeout=_STEP_TIMEOUT_MS * 4)
                     done = True
                 except Exception:
                     pass
             if not done:
+                if secret:
+                    # Never typed blind: whatever has focus could be a search
+                    # box that sends the password to the site in the clear.
+                    raise WebSourceError("The login page changed (the password field wasn't found). Log in again from the admin panel.")
                 await page.keyboard.type(text, delay=15)
         elif kind == "key":
             await page.keyboard.press(step["key"])
@@ -865,6 +936,16 @@ async def _replay(site: dict, ctx) -> None:
             except Exception:
                 pass
         await _settle(page)
+    # A login that finishes with a background request needs longer than the
+    # usual settle before its session cookie exists.
+    try:
+        await page.wait_for_load_state("networkidle", timeout=10000)
+    except Exception:
+        pass
+    return page
+
+
+_RELOGIN_PAUSE_SECONDS = 1800
 
 
 async def relogin(site_id: str) -> None:
@@ -874,12 +955,30 @@ async def relogin(site_id: str) -> None:
         raise WebSourceError("That website isn't saved anymore.")
     if not site.get("login_steps"):
         raise WebSourceError("No login steps were recorded for this website. Log in from the browser and save.")
+    asked_at = time.time()
     lock = _relogin_locks.setdefault(site_id, asyncio.Lock())
     async with lock:
+        # Another request logged in while this one waited for the lock.
+        try:
+            if os.path.getmtime(_state_path(site_id)) > asked_at:
+                return
+        except OSError:
+            pass
+        # After a failed login, no automatic retry for a while: every user
+        # question re-submitting a changed (or CAPTCHA-blocked) password
+        # would get the site account locked.
+        site = get_site(site_id) or site
+        if site.get("last_login_ok") is False and time.time() - (site.get("last_login") or 0) < _RELOGIN_PAUSE_SECONDS:
+            raise WebSourceError(f"{site['name']} needs a new login. Open it from the admin panel and log in again.")
         _touch()
         ctx = await _new_context(None)
         try:
-            await _replay(site, ctx)
+            page = await _replay(site, ctx)
+            # Logged in for real? Check the page the searches start from.
+            check_url_ = site.get("search_url", "").replace("{query}", "test") or site["start_url"]
+            await _goto(page, check_url_)
+            if await _looks_logged_out(page):
+                raise WebSourceError("Logging in again didn't work (the site still asks for a login). Open it from the admin panel and log in.")
             _save_state(site_id, await ctx.storage_state())
             _set_login_result(site_id, True)
             logger.info("Web source %s: logged in again by replaying %d steps", site_id, len(site["login_steps"]))
@@ -895,32 +994,45 @@ async def relogin(site_id: str) -> None:
 
 
 def _link_matcher(pattern: str):
+    """Matches when the address contains the text as typed, or matches it as a regular expression ("/view?id=" is both)."""
     if not pattern:
         return None
+    low = pattern.lower()
     try:
         rx = re.compile(pattern, re.I)
-        return lambda href: bool(rx.search(href))
     except re.error:
-        low = pattern.lower()
-        return lambda href: low in href.lower()
+        rx = None
+    return lambda href: low in href.lower() or bool(rx and rx.search(href[:2000]))
+
+
+def _same_site(url: str, base_host: str) -> bool:
+    host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    base = base_host.lower().removeprefix("www.")
+    return host == base or host.endswith("." + base)
 
 
 async def _read_site(site_id: str, site: dict, query: str, ctx) -> list[dict]:
     page = await ctx.new_page()
     search_url = site["search_url"].replace("{query}", urllib.parse.quote_plus(query))
+    base_host = urllib.parse.urlsplit(search_url).hostname or ""
     await _goto(page, search_url)
-    if await _looks_logged_out(page):
+    if await _looks_logged_out(page) or not _same_site(page.url, base_host):
         raise _LoggedOut()
     matcher = _link_matcher(site.get("link_pattern") or "")
     results = []
     if matcher is None:
-        results.append({"title": await page.title(), "url": page.url, "text": await _page_text(page)})
+        results.append({"title": await page.title(), "url": _clean_url(page.url), "text": await _page_text(page)})
         return results
-    links = await page.eval_on_selector_all("a[href]", "els => els.map((a) => a.href)")
+    links = await page.eval_on_selector_all(
+        "a[href]", "els => els.slice(0, 2000).map((a) => a.href).filter((h) => h.length < 2000)"
+    )
     picked, seen = [], {page.url.split("#")[0]}
     for href in links:
         href = (href or "").split("#")[0]
-        if not href.startswith(("http://", "https://")) or href in seen or not matcher(href):
+        # Only the site's own pages: a results page could otherwise point the
+        # (logged-in) browser anywhere, and that page would be cited under
+        # the trusted site's name.
+        if not href.startswith(("http://", "https://")) or href in seen or not _same_site(href, base_host) or not matcher(href):
             continue
         seen.add(href)
         picked.append(href)
@@ -931,8 +1043,23 @@ async def _read_site(site_id: str, site: dict, query: str, ctx) -> list[dict]:
             await _goto(page, href)
         except WebSourceError:
             continue
-        results.append({"title": await page.title(), "url": page.url, "text": await _page_text(page)})
+        if not _same_site(page.url, base_host):
+            continue  # redirected off the site
+        if await _looks_logged_out(page):
+            raise _LoggedOut()  # a login wall is not a result
+        results.append({"title": await page.title(), "url": _clean_url(page.url), "text": await _page_text(page)})
     return results
+
+
+_SESSION_PARAM_RE = re.compile(r"^(sid|session|sessionid|jsessionid|phpsessid|token|auth|access_token|sig|signature)$", re.I)
+
+
+def _clean_url(url: str) -> str:
+    """Session ids in a URL opened with the admin's login aren't passed on to every user who sees the citation."""
+    parts = urllib.parse.urlsplit(url)
+    query = [(k, v) for k, v in urllib.parse.parse_qsl(parts.query, keep_blank_values=True) if not _SESSION_PARAM_RE.match(k)]
+    path = re.sub(r";jsessionid=[^/?#]*", "", parts.path, flags=re.I)
+    return urllib.parse.urlunsplit((parts.scheme, parts.netloc, path, urllib.parse.urlencode(query), ""))
 
 
 class _LoggedOut(Exception):
@@ -950,11 +1077,22 @@ async def search(site_id: str, query: str) -> list[dict]:
         _touch()
         try:
             for attempt in (1, 2):
-                ctx = await _new_context(_load_state(site_id))
+                try:
+                    loaded_at = os.path.getmtime(_state_path(site_id))
+                except OSError:
+                    loaded_at = None
+                ctx = await _new_context(_load_state(site_id), text_only=True)
                 try:
                     results = await _read_site(site_id, site, query, ctx)
                     try:
-                        _save_state(site_id, await ctx.storage_state())  # keep refreshed cookies
+                        # Refreshed cookies are kept -- unless the site was
+                        # deleted or saved anew while this search ran.
+                        try:
+                            current = os.path.getmtime(_state_path(site_id))
+                        except OSError:
+                            current = None
+                        if get_site(site_id) is not None and current == loaded_at:
+                            _save_state(site_id, await ctx.storage_state())
                     except Exception:
                         pass
                     return results
@@ -990,7 +1128,10 @@ def _chunks(text: str) -> list[str]:
 
 def _source_title(site_name: str, page_title: str) -> str:
     """'PubMed: Lithium treatment of ...' -- just the site name when the page title adds nothing."""
-    page_title = re.sub(r"\s*[-|–]\s*" + re.escape(site_name) + r"\s*$", "", page_title.strip(), flags=re.I)
+    # A web page picks its own title, and it goes into the AI prompt: no
+    # quotes or line breaks, and short.
+    page_title = re.sub(r"[\"\r\n\t]+", " ", page_title or "").strip()[:120]
+    page_title = re.sub(r"\s*[-|–]\s*" + re.escape(site_name) + r"\s*$", "", page_title, flags=re.I)
     if not page_title or page_title.lower() == site_name.lower():
         return site_name[:200]
     return f"{site_name}: {page_title}"[:200]

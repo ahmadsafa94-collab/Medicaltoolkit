@@ -275,9 +275,12 @@
     "1A2": "moderate",
     "3A": "moderate"
    },
-   "notes": [
-    "20"
-   ],
+   "kind_notes": {
+    "inhibits": [
+     "20"
+    ]
+   },
+   "notes": [],
    "transporter_substrate": [
     "OAT1",
     "OAT3"
@@ -339,9 +342,12 @@
    "inhibits": {
     "3A": "moderate"
    },
-   "notes": [
-    "5"
-   ],
+   "kind_notes": {
+    "inhibits": [
+     "5"
+    ]
+   },
+   "notes": [],
    "substrate_of": {
     "3A": "sensitive"
    }
@@ -1379,9 +1385,12 @@
     "2C9": "moderate",
     "3A": "strong"
    },
-   "notes": [
-    "13"
-   ],
+   "kind_notes": {
+    "transporter_inhibits": [
+     "13"
+    ]
+   },
+   "notes": [],
    "transporter_inhibits": [
     "OATP1B1",
     "OATP1B3"

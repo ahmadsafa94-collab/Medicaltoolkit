@@ -1704,7 +1704,7 @@ async def drug_interactions(request: Request):
         drugs = []
         for name in names:
             sections = await _fetch_label(name)
-            drugs.append({"name": sections.get("_name") or name, "sections": sections})
+            drugs.append({"name": sections.get("_name") or name, "sections": sections, "typed": name})
         await interaction_ai.add_drug_classes(drugs)  # best effort, never raises
 
         # Charged only here, once every label was found: a misspelled drug

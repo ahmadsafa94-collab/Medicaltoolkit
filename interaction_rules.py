@@ -41,8 +41,13 @@ FDA_AS_OF = FDA_TABLE.get("as_of") or "unknown date"
 _DRUGS = FDA_TABLE.get("drugs", {})
 _FOOTNOTES = FDA_TABLE.get("footnotes", {})
 
-# Common spelling differences between label names and the FDA table.
-_ALIASES = {"rifampicin": "rifampin", "acetaminophen": "paracetamol"}
+# Label names that the FDA table spells differently: label word -> table rows.
+_TABLE_ALIASES = {
+    "rifampicin": ["rifampin"],
+    "venlafaxine": ["r-venlafaxine", "s-venlafaxine"],
+    "isavuconazonium": ["isavuconazole"],
+    "oseltamivir": ["oseltamivir carboxylate"],
+}
 
 _SALT_RE = re.compile(
     r"\b(hydrochloride|hcl|hydrobromide|sodium|potassium|calcium|magnesium|sulfate|maleate|mesylate|"
@@ -65,20 +70,34 @@ def ingredients(drug: dict) -> list[str]:
         for part in _SPLIT_RE.split(raw.lower()):
             part = re.sub(r"\s+", " ", _SALT_RE.sub(" ", part)).strip(" .-")
             if len(part) > 2:
-                names.append(_ALIASES.get(part, part))
+                names.append(part)
     return list(dict.fromkeys(names))
 
 
-def _fda_entries(drug: dict) -> list[tuple[str, dict]]:
-    """FDA-table rows for this drug: the whole combination first (e.g. 'lopinavir and ritonavir'), then each ingredient."""
+def _name_text(drug: dict) -> str:
+    """Every name the drug goes by (generic, label name, typed name), lowercased, for whole-word matching."""
     sections = drug.get("sections") or {}
-    out, seen = [], set()
-    generic = re.sub(r"\s+", " ", _SALT_RE.sub(" ", (sections.get("_generic") or "").lower())).strip()
-    for name in [generic] + ingredients(drug):
-        if name and name in _DRUGS and name not in seen:
-            seen.add(name)
-            out.append((name, _DRUGS[name]))
-    return out
+    parts = [sections.get("_generic"), drug.get("name"), sections.get("_name"), drug.get("typed")]
+    return " | ".join(p.lower() for p in parts if isinstance(p, str))
+
+
+def _has_word(text: str, name: str) -> bool:
+    return re.search(r"(?<![a-z0-9])" + re.escape(name) + r"(?![a-z0-9])", text) is not None
+
+
+def _fda_entries(drug: dict) -> list[tuple[str, dict]]:
+    """
+    FDA-table rows whose drug name appears as a whole word in any of this
+    drug's names -- so salts and forms the label adds ("RIZATRIPTAN
+    BENZOATE", "ERYTHROMYCIN ETHYLSUCCINATE") can't hide it, and a
+    combination product gets its own row and each ingredient's.
+    """
+    text = _name_text(drug)
+    keys = [k for k in _DRUGS if _has_word(text, k)]
+    for word, aliases in _TABLE_ALIASES.items():
+        if _has_word(text, word):
+            keys += [a for a in aliases if a in _DRUGS]
+    return [(k, _DRUGS[k]) for k in dict.fromkeys(keys)]
 
 
 def fda_profile(drug: dict) -> list[str]:
@@ -99,7 +118,8 @@ def fda_profile(drug: dict) -> list[str]:
         if not parts:
             continue
         lines.append(f"{name}: " + "; ".join(parts))
-        for n in e.get("notes") or []:
+        kind_notes = e.get("kind_notes") or {}
+        for n in (e.get("notes") or []) + [x for ids in kind_notes.values() for x in ids]:
             if n in _FOOTNOTES:
                 lines.append(f"  (FDA note: {_FOOTNOTES[n]})")
     return lines
@@ -122,6 +142,16 @@ def _norm_transporter(t: str) -> str:
     return "OATP1B" if t.startswith("OATP1B") else ("MATE" if t.startswith("MATE") else t)
 
 
+def _notes_for(drug: dict, kind: str) -> str:
+    """The FDA notes behind one finding: the drug's general notes, and those on this kind of entry only."""
+    notes = []
+    for name, e in _fda_entries(drug):
+        for n in (e.get("notes") or []) + ((e.get("kind_notes") or {}).get(kind) or []):
+            if n in _FOOTNOTES:
+                notes.append(f"FDA note for {name}: {_FOOTNOTES[n]}")
+    return (" (" + "; ".join(dict.fromkeys(notes)) + ")") if notes else ""
+
+
 def fda_matches(a: dict, b: dict) -> list[str]:
     """Inhibitor/inducer of one drug acting on an enzyme or transporter the other is a substrate of, both ways."""
     found = []
@@ -131,19 +161,19 @@ def fda_matches(a: dict, b: dict) -> list[str]:
             if enzyme in rp["inhibits"]:
                 found.append(
                     f"{perp['name']} is a {rp['inhibits'][enzyme]} CYP{enzyme} inhibitor and {victim['name']} is a "
-                    f"{sub_level} CYP{enzyme} substrate -> {victim['name']} exposure is expected to RISE"
+                    f"{sub_level} CYP{enzyme} substrate -> {victim['name']} exposure is expected to RISE{_notes_for(perp, 'inhibits')}"
                 )
             if enzyme in rp["induces"]:
                 found.append(
                     f"{perp['name']} is a {rp['induces'][enzyme]} CYP{enzyme} inducer and {victim['name']} is a "
-                    f"{sub_level} CYP{enzyme} substrate -> {victim['name']} exposure is expected to FALL"
+                    f"{sub_level} CYP{enzyme} substrate -> {victim['name']} exposure is expected to FALL{_notes_for(perp, 'induces')}"
                 )
         inhibited = {_norm_transporter(t) for t in rp["transporter_inhibits"]}
         shared = sorted({_norm_transporter(t) for t in rv["transporter_substrate"]} & inhibited)
         if shared:
             found.append(
                 f"{perp['name']} inhibits {', '.join(shared)} and {victim['name']} is a substrate of it "
-                f"-> {victim['name']} exposure may RISE"
+                f"-> {victim['name']} exposure may RISE{_notes_for(perp, 'transporter_inhibits')}"
             )
     return found
 
@@ -164,25 +194,58 @@ _TCA = {"amitriptyline", "nortriptyline", "imipramine", "desipramine", "clomipra
 _PPI = {"omeprazole", "esomeprazole", "lansoprazole", "dexlansoprazole", "pantoprazole", "rabeprazole"}
 _PROTEASE_INHIBITORS = {"atazanavir", "darunavir", "fosamprenavir", "indinavir", "lopinavir", "nelfinavir",
                         "ritonavir", "saquinavir", "tipranavir", "nirmatrelvir"}
+# Named as strong CYP3A4 inhibitors in the simvastatin/lovastatin labels'
+# contraindications. The FDA table only lists examples, so atazanavir (an
+# HIV protease inhibitor) matched nothing there.
+_STRONG_3A_BY_LABEL = {
+    "itraconazole", "ketoconazole", "posaconazole", "voriconazole", "clarithromycin", "erythromycin",
+    "telithromycin", "nefazodone", "cobicistat", "boceprevir", "telaprevir",
+    "atazanavir", "darunavir", "fosamprenavir", "indinavir", "lopinavir", "nelfinavir", "ritonavir",
+    "saquinavir", "tipranavir",
+}
 _ERGOTS = {"ergotamine", "dihydroergotamine", "methylergonovine", "methylergometrine", "ergonovine"}
-_TRIPTANS = {"sumatriptan", "rizatriptan", "zolmitriptan", "almotriptan", "naratriptan", "frovatriptan", "eletriptan"}
+# The triptans whose labels contraindicate MAO-A inhibitors, and the MAO
+# inhibitors that inhibit MAO-A (selective MAO-B agents such as rasagiline
+# and safinamide are not contraindicated with triptans).
+_TRIPTANS = {"sumatriptan", "rizatriptan", "zolmitriptan"}
+_MAOI_A = {"phenelzine", "tranylcypromine", "isocarboxazid", "selegiline", "linezolid", "methylene blue"}
 
 
 def _named(names: set):
-    return lambda d: any(i in names for i in ingredients(d))
+    return lambda d: any(_has_word(_name_text(d), n) for n in names)
 
 
 def _fda_role(kind: str, enzyme: str, levels: tuple):
     return lambda d: _roles(d)[kind].get(enzyme) in levels
 
 
+_QT_RE = re.compile(
+    r"\bQTc?\b[^.;]{0,40}?\b(prolong\w*|increas\w*|lengthen\w*)|\b(prolong\w*|lengthen\w*|increas\w*)[^.;]{0,40}?\bQTc?\b"
+    r"|\bQTc?[- ]prolonging\b|torsade",
+    re.I,
+)
+_QT_NEGATION_RE = re.compile(r"\b(no|not|without|did not|does not|was not|were not)\b[^.;]{0,30}?\b(QTc?|prolong\w*)\b", re.I)
+
+
 def _qt_in_label(drug: dict) -> bool:
-    """The label itself warns about QT prolongation / torsades (contraindications, warnings or boxed warning)."""
+    """
+    The label itself mentions QT prolongation / torsades (contraindications,
+    warnings, boxed warning or drug interactions), in a sentence that isn't
+    a negation ("does not prolong the QT interval").
+    """
     s = drug.get("sections") or {}
     text = " ".join(
-        " ".join((s.get(label) or {}).get("bullets") or []) for label in ("Contraindications", "Warnings & Cautions")
+        " ".join((s.get(label) or {}).get("bullets") or [])
+        for label in ("Contraindications", "Warnings & Cautions", "Drug Interactions")
     ) + " " + " ".join((s.get("_interaction_extra") or {}).values())
-    return bool(re.search(r"(?i)QT[c]?\s*(interval\s*)?prolong|prolong\w*\s+(of\s+)?(the\s+)?QT|torsade", text))
+    for sentence in re.split(r"(?<=[.;])\s+", text):
+        if _QT_RE.search(sentence) and not _QT_NEGATION_RE.search(sentence):
+            return True
+    return False
+
+
+def _strong_3a(d: dict) -> bool:
+    return _fda_role("inhibits", "3A", ("strong",))(d) or _named(_STRONG_3A_BY_LABEL)(d)
 
 
 # (object class, precipitant class, object test, precipitant test, at least Major?)
@@ -191,7 +254,7 @@ HIGH_PRIORITY = [
     ("Atazanavir", "Proton pump inhibitors", _named({"atazanavir"}), _named(_PPI), True),
     ("Febuxostat", "Azathioprine / mercaptopurine", _named({"febuxostat"}), _named({"azathioprine", "mercaptopurine"}), True),
     ("SSRIs", "MAO inhibitors", _named(_SSRI), _named(_MAOI), True),
-    ("Irinotecan", "Strong CYP3A4 inhibitors", _named({"irinotecan"}), _fda_role("inhibits", "3A", ("strong",)), True),
+    ("Irinotecan", "Strong CYP3A4 inhibitors", _named({"irinotecan"}), _strong_3a, True),
     ("Narcotic analgesics", "MAO inhibitors", _named(_OPIOIDS), _named(_MAOI), True),
     ("Tricyclic antidepressants", "MAO inhibitors", _named(_TCA), _named(_MAOI), True),
     # Not forced to Major: "QT-prolonging" here means the label warns of it,
@@ -200,12 +263,12 @@ HIGH_PRIORITY = [
     ("Ramelteon", "CYP1A2 inhibitors", _named({"ramelteon"}), _fda_role("inhibits", "1A2", ("strong", "moderate")), True),
     ("Protease inhibitors", "Strong CYP3A4 inducers", _named(_PROTEASE_INHIBITORS), _fda_role("induces", "3A", ("strong",)), True),
     ("Simvastatin / lovastatin", "CYP3A4 inhibitors", _named({"simvastatin", "lovastatin"}),
-     _fda_role("inhibits", "3A", ("strong", "moderate")), True),
-    ("Atorvastatin", "Strong CYP3A4 inhibitors", _named({"atorvastatin"}), _fda_role("inhibits", "3A", ("strong",)), True),
-    ("Ergot alkaloids", "Strong CYP3A4 inhibitors", _named(_ERGOTS), _fda_role("inhibits", "3A", ("strong",)), True),
+     lambda d: _strong_3a(d) or _fda_role("inhibits", "3A", ("moderate",))(d), True),
+    ("Atorvastatin", "Strong CYP3A4 inhibitors", _named({"atorvastatin"}), _strong_3a, True),
+    ("Ergot alkaloids", "Strong CYP3A4 inhibitors", _named(_ERGOTS), _strong_3a, True),
     ("Tizanidine", "CYP1A2 inhibitors", _named({"tizanidine"}), _fda_role("inhibits", "1A2", ("strong", "moderate")), True),
     ("Tranylcypromine", "Procarbazine", _named({"tranylcypromine"}), _named({"procarbazine"}), True),
-    ("Triptans", "MAO inhibitors", _named(_TRIPTANS), _named(_MAOI), True),
+    ("Triptans", "MAO-A inhibitors", _named(_TRIPTANS), _named(_MAOI_A), True),
 ]
 
 
@@ -238,7 +301,7 @@ def findings(drugs: list[dict]) -> str:
                     )
                 else:
                     lines.append(
-                        f"- HIGH-PRIORITY LIST: {text} -- both labels warn of QT prolongation, a combination on "
+                        f"- HIGH-PRIORITY LIST: {text} -- both labels mention QT prolongation, a combination on "
                         "the expert-panel high-priority list (Phansalkar et al., JAMIA 2012). Risk differs widely "
                         "between drugs, so grade it from the labels' wording."
                     )
