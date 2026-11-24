@@ -51,6 +51,7 @@ from config import (
 )
 from pdf_processor import process_pdf, ChapterDetectionError, count_pages, compute_chapter_ranges, open_check
 from paths import user_dir, safe_pdf_filename, unique_path
+import drug_lookup
 from drug_lookup import (
     lookup_drug,
     format_drug_info,
@@ -550,6 +551,9 @@ async def _dose_lookup_and_show(answer_fn, drug_name: str, user_id: int | None) 
     logic instead of three copies drifting apart over time.
     answer_fn is message.answer or callback.message.answer.
     """
+    if drug_lookup.name_too_long(drug_name):
+        await answer_fn(drug_lookup.TOO_LONG_MESSAGE)
+        return
     status_msg = await answer_fn(f"Looking up {drug_name}...")
 
     try:
@@ -900,6 +904,9 @@ async def cmd_pregnancy(message: Message):
         return
 
     drug_name = args[1].strip()
+    if drug_lookup.name_too_long(drug_name):
+        await message.answer(drug_lookup.TOO_LONG_MESSAGE)
+        return
     status_msg = await message.answer(f"Looking up {drug_name}...")
 
     try:

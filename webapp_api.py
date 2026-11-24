@@ -28,6 +28,7 @@ holding one HTTP request open for however long a multi-minute job takes.
 """
 
 import asyncio
+import contextvars
 import logging
 import os
 import re
@@ -82,6 +83,7 @@ from config import (
     scaled_timeout,
     QUIZ_GENERATION_TIMEOUT_SECONDS,
     SEND_CHAPTER_FILES_TIMEOUT_SECONDS,
+    STORAGE_DIR,
 )
 from paths import safe_pdf_filename, unique_path, user_dir
 from pdf_processor import (
@@ -109,6 +111,12 @@ async def _api_error_handler(request: Request, exc: HTTPException):
 # Auth
 # ---------------------------------------------------------------------------
 
+# The signed-in user of the request being handled. Jobs started from it
+# (asyncio tasks and to_thread calls copy the context) see the same value,
+# which is what scopes a specialty book's jobs to the user who started them.
+_request_user_id: contextvars.ContextVar = contextvars.ContextVar("request_user_id", default=None)
+
+
 def require_user(request: Request) -> dict:
     init_data = request.headers.get("x-telegram-init-data", "")
     try:
@@ -119,6 +127,7 @@ def require_user(request: Request) -> dict:
     # keep using the mini app (which calls the same paid AI features).
     if not subscriptions.is_admin(user["id"]) and subscriptions.is_blocked(user["id"]):
         raise ApiError(status_code=403, detail="Your access to this bot has been suspended.")
+    _request_user_id.set(user["id"])
     return user
 
 
@@ -126,11 +135,34 @@ def require_user(request: Request) -> dict:
 # In-memory background job tracking (single process -- see module docstring)
 # ---------------------------------------------------------------------------
 
-_jobs: dict[tuple[str, str], dict] = {}
+_jobs: dict[tuple, dict] = {}
+_JOB_KEEP_SECONDS = 3600          # a finished job's result is dropped after this
+_TIMEOUT_COOLDOWN_SECONDS = 600   # see start_job
 
 
-def _job_key(book_id: str, job_type: str) -> tuple[str, str]:
+def _job_key(book_id: str, job_type: str) -> tuple:
+    """
+    One job per book and type -- except on a specialty book, which many
+    users share: there every user's summary/quiz/flashcards job is their
+    own (they used to see, and even act on, each other's results). Only
+    indexing a specialty book is one job for everyone.
+    """
+    if job_type != "index" and shared_library.is_shared_id(book_id):
+        return (book_id, job_type, _request_user_id.get())
     return (book_id, job_type)
+
+
+def _prune_jobs() -> None:
+    now = time.time()
+    for key, job in list(_jobs.items()):
+        if job.get("status") != "running" and now - job.get("finished_at", now) > _JOB_KEEP_SECONDS:
+            _jobs.pop(key, None)
+
+
+def forget_jobs(book_id: str) -> None:
+    """Drop every finished job of a deleted book (a running one finishes and expires on its own)."""
+    for key in [k for k, j in _jobs.items() if k[0] == book_id and j.get("status") != "running"]:
+        _jobs.pop(key, None)
 
 
 def start_job(book_id: str, job_type: str, coro) -> bool:
@@ -141,19 +173,33 @@ def start_job(book_id: str, job_type: str, coro) -> bool:
     already running for this book (the frontend should disable the
     triggering button while status == "running").
     """
+    _prune_jobs()
     key = _job_key(book_id, job_type)
-    if _jobs.get(key, {}).get("status") == "running":
+    previous = _jobs.get(key, {})
+    if previous.get("status") == "running":
         coro.close()
         return False
+    # A timed-out job's worker thread can't be stopped and keeps running in
+    # the background; starting the same job again at once would stack them
+    # (each still making its AI call, uncharged after the refund).
+    if previous.get("timed_out") and time.time() - previous.get("finished_at", 0) < _TIMEOUT_COOLDOWN_SECONDS:
+        coro.close()
+        raise ApiError(
+            status_code=429,
+            detail="The last attempt is still finishing in the background. Please try again in a few minutes.",
+        )
     _jobs[key] = {"status": "running", "result": None, "error": None, "progress": None, "started_at": time.time()}
 
     async def runner():
         try:
             result = await coro
-            _jobs[key] = {"status": "done", "result": result, "error": None, "progress": None}
+            _jobs[key] = {"status": "done", "result": result, "error": None, "progress": None, "finished_at": time.time()}
         except Exception as e:
             logger.exception("Background job %s failed", key)
-            _jobs[key] = {"status": "error", "result": None, "error": _job_error_text(e), "progress": None}
+            _jobs[key] = {
+                "status": "error", "result": None, "error": _job_error_text(e), "progress": None,
+                "finished_at": time.time(), "timed_out": isinstance(e, asyncio.TimeoutError),
+            }
 
     # Held in a set: asyncio keeps only a weak reference to a bare
     # create_task(), so an unreferenced job could be garbage-collected
@@ -204,16 +250,34 @@ def start_metered_job(book_id: str, job_type: str, coro, user_id: int, feature: 
             raise
 
     wrapper = refunding()
-    started = start_job(book_id, job_type, wrapper)
+    try:
+        started = start_job(book_id, job_type, wrapper)
+    except ApiError:
+        coro.close()
+        subscriptions.refund(user_id, feature, units)
+        raise
     if not started:
         coro.close()
         subscriptions.refund(user_id, feature, units)
     return started
 
 
+def _valid_chapter_indices(raw, chapters: list) -> list[int]:
+    """Whole numbers within the book's chapters, each once, in order (no -1, True, or 20,000 duplicates)."""
+    if not isinstance(raw, list) or not raw:
+        raise ApiError(status_code=400, detail="Select at least one chapter.")
+    out = []
+    for i in raw:
+        if type(i) is not int or not (0 <= i < len(chapters)):
+            raise ApiError(status_code=400, detail="Invalid chapter_indices.")
+        if i not in out:
+            out.append(i)
+    return out
+
+
 def set_job_progress(book_id: str, job_type: str, progress) -> None:
     key = _job_key(book_id, job_type)
-    if key in _jobs:
+    if _jobs.get(key, {}).get("status") == "running":  # not a straggler from an older run
         _jobs[key]["progress"] = progress
 
 
@@ -336,16 +400,23 @@ async def delete_book(request: Request):
         # Only this user's reference (and their notes/history) goes; the
         # file, index and cover belong to the specialty library.
         library.remove_book(user["id"], book_id, delete_file=False)
-        library.delete_qa_sessions_for_book(user["id"], book_id)
-        library.delete_quiz_attempts_for_book(user["id"], book_id)
+        _delete_user_book_data(user["id"], book_id)
         return JSONResponse({"deleted": True, "book_id": book_id})
 
     library.remove_book(user["id"], book_id, delete_file=True)
     pdf_qa.delete_index(book_id)
     covers.delete_covers(book_id)
-    library.delete_qa_sessions_for_book(user["id"], book_id)
-    library.delete_quiz_attempts_for_book(user["id"], book_id)
+    _delete_user_book_data(user["id"], book_id)
+    forget_jobs(book_id)
     return JSONResponse({"deleted": True, "book_id": book_id})
+
+
+def _delete_user_book_data(user_id: int, book_id: str) -> None:
+    """Everything of this user's that hangs off the book -- notes and flashcards too, which used to stay behind."""
+    library.delete_qa_sessions_for_book(user_id, book_id)
+    library.delete_quiz_attempts_for_book(user_id, book_id)
+    notes.delete_notes_for_book(user_id, book_id)
+    flashcards.delete_deck(user_id, book_id)
 
 
 async def set_bookmark(request: Request):
@@ -1053,12 +1124,8 @@ async def create_quiz(request: Request):
     difficulty = body.get("difficulty")
     num_questions = body.get("num_questions")
 
-    if not isinstance(chapter_indices, list) or not chapter_indices:
-        raise ApiError(status_code=400, detail="Select at least one chapter.")
-    try:
-        selected = [chapters[i] for i in chapter_indices]
-    except (IndexError, TypeError):
-        raise ApiError(status_code=400, detail="Invalid chapter_indices.")
+    chapter_indices = _valid_chapter_indices(chapter_indices, chapters)
+    selected = [chapters[i] for i in chapter_indices]
     # Validated here, before any allowance is taken, rather than only inside
     # the job where a bad value surfaced as a failed (and charged) quiz.
     if difficulty not in quiz_ai.VALID_DIFFICULTIES:
@@ -1219,12 +1286,8 @@ async def generate_flashcards_endpoint(request: Request):
     chapter_indices = body.get("chapter_indices")
     num_cards = body.get("num_cards")
 
-    if not isinstance(chapter_indices, list) or not chapter_indices:
-        raise ApiError(status_code=400, detail="Select at least one chapter.")
-    try:
-        selected = [chapters[i] for i in chapter_indices]
-    except (IndexError, TypeError):
-        raise ApiError(status_code=400, detail="Invalid chapter_indices.")
+    chapter_indices = _valid_chapter_indices(chapter_indices, chapters)
+    selected = [chapters[i] for i in chapter_indices]
     if (
         not isinstance(num_cards, int)
         or isinstance(num_cards, bool)
@@ -1494,6 +1557,29 @@ async def _json_body(request: Request) -> dict:
     return body
 
 
+_RESOLVER_PER_HOUR = 30
+_resolver_calls: dict[int, list[float]] = {}
+
+
+def _resolver_allowed() -> bool:
+    """
+    "Did you mean" is an AI call, made on every miss and not counted
+    against any allowance: limited per user, so a script of misses can't
+    run up the AI bill (or openFDA's daily limit) for everyone.
+    """
+    uid = _request_user_id.get()
+    if uid is None:
+        return True
+    now = time.time()
+    calls = [t for t in _resolver_calls.get(uid, []) if now - t < 3600]
+    if len(calls) >= _RESOLVER_PER_HOUR:
+        _resolver_calls[uid] = calls
+        return False
+    calls.append(now)
+    _resolver_calls[uid] = calls
+    return True
+
+
 async def _fetch_label(name: str) -> dict:
     """
     One drug's FDA label, or an ApiError carrying suggestions.
@@ -1503,9 +1589,16 @@ async def _fetch_label(name: str) -> dict:
     at the spelling again -- the same recovery the chat flow does with
     name_resolver, just handed to the client to render.
     """
+    if drug_lookup.name_too_long(name):
+        raise ApiError(status_code=400, detail=drug_lookup.TOO_LONG_MESSAGE)
     try:
         return await asyncio.wait_for(drug_lookup.lookup_drug(name), timeout=_DRUG_LOOKUP_TIMEOUT_SECONDS)
     except drug_lookup.DrugNotFoundError:
+        if not _resolver_allowed():
+            raise ApiError(
+                status_code=404,
+                detail={"message": f"No FDA label found for \"{name}\". Check the spelling.", "suggestions": []},
+            )
         try:
             suggestions = await asyncio.wait_for(
                 asyncio.to_thread(name_resolver.resolve_drug_names, name),
@@ -2103,15 +2196,28 @@ async def shared_delete_book(request: Request):
 UPLOAD_CHUNK_BYTES = 4 * 1024 * 1024
 _WRITE_BUFFER_BYTES = 1024 * 1024
 _UPLOAD_TTL_SECONDS = 2 * 3600
+_UPLOAD_MAX_LIFETIME_SECONDS = 6 * 3600  # however busy, an upload can't hold its space forever
 _MAX_OPEN_UPLOADS_PER_USER = 3
 _uploads: dict[str, dict] = {}
+
+# Parts are assembled here, not at the book's final path: a restart forgets
+# every upload in progress, and this folder is emptied at startup, so an
+# abandoned upload can't leave a file behind in someone's library. The
+# finished file is moved into place only after it passed the checks.
+_UPLOAD_PARTS_DIR = os.path.join(STORAGE_DIR, "_uploads")
+shutil.rmtree(_UPLOAD_PARTS_DIR, ignore_errors=True)
+os.makedirs(_UPLOAD_PARTS_DIR, exist_ok=True)
 
 
 def _expire_uploads() -> None:
     now = time.time()
-    for uid in [k for k, u in _uploads.items() if now - u["touched"] > _UPLOAD_TTL_SECONDS]:
-        u = _uploads.pop(uid)
-        _safe_remove(u["path"])
+    for uid, u in list(_uploads.items()):
+        if u["writers"]:
+            continue
+        if now - u["touched"] > _UPLOAD_TTL_SECONDS or now - u["started"] > _UPLOAD_MAX_LIFETIME_SECONDS:
+            _uploads.pop(uid, None)
+            u["closed"] = True
+            _safe_remove(u["path"])
 
 
 async def upload_start(request: Request):
@@ -2152,18 +2258,18 @@ async def upload_start(request: Request):
     if sum(1 for u in _uploads.values() if u["user_id"] == user["id"]) >= _MAX_OPEN_UPLOADS_PER_USER:
         raise ApiError(status_code=429, detail="You already have uploads in progress. Wait for them to finish.")
 
-    os.makedirs(dest_dir, exist_ok=True)
-    path = unique_path(os.path.join(dest_dir, filename))
-    # Reserve the name and the full size up front, so every chunk can be
-    # written at its own offset in any order.
+    upload_id = uuid.uuid4().hex
+    path = os.path.join(_UPLOAD_PARTS_DIR, f"{upload_id}.part")
+    # Reserve the full size up front, so every chunk can be written at its
+    # own offset in any order.
     with open(path, "wb") as f:
         f.truncate(size)
 
-    upload_id = uuid.uuid4().hex
     _uploads[upload_id] = {
         "user_id": user["id"], "path": path, "size": size, "title": title, "target": target,
         "specialty": specialty, "received": set(), "touched": time.time(), "started": time.time(),
-        "chunks": -(-size // UPLOAD_CHUNK_BYTES),
+        "chunks": -(-size // UPLOAD_CHUNK_BYTES), "dest_dir": dest_dir, "filename": filename,
+        "writers": 0, "closed": False,
     }
     return JSONResponse({"upload_id": upload_id, "chunk_size": UPLOAD_CHUNK_BYTES, "chunks": _uploads[upload_id]["chunks"]})
 
@@ -2178,6 +2284,7 @@ def _owned_upload(request: Request, user_id: int) -> tuple[str, dict]:
 
 async def upload_chunk(request: Request):
     user = require_user(request)
+    _expire_uploads()
     _, up = _owned_upload(request, user["id"])
     try:
         index = int(request.query_params.get("index", ""))
@@ -2190,6 +2297,17 @@ async def upload_chunk(request: Request):
     expected = min(UPLOAD_CHUNK_BYTES, up["size"] - offset)
     written = 0
     buf = bytearray()
+
+    async def write(data: bytes) -> None:
+        # Checked before every write: once "finish" has closed the upload
+        # (and is checking or moving the file), nothing more may land in it.
+        if up["closed"]:
+            raise ApiError(status_code=409, detail="This upload is already finished.")
+        await asyncio.to_thread(os.pwrite, fd, data, offset + written)
+
+    if up["closed"]:
+        raise ApiError(status_code=409, detail="This upload is already finished.")
+    up["writers"] += 1
     fd = os.open(up["path"], os.O_WRONLY)
     try:
         # Network pieces arrive in ~64 KB bits; they're gathered into 1 MB
@@ -2201,14 +2319,15 @@ async def upload_chunk(request: Request):
                 raise ApiError(status_code=400, detail="Chunk is larger than expected.")
             buf += piece
             if len(buf) >= _WRITE_BUFFER_BYTES:
-                await asyncio.to_thread(os.pwrite, fd, bytes(buf), offset + written)
+                await write(bytes(buf))
                 written += len(buf)
                 buf.clear()
         if buf:
-            await asyncio.to_thread(os.pwrite, fd, bytes(buf), offset + written)
+            await write(bytes(buf))
             written += len(buf)
     finally:
         os.close(fd)
+        up["writers"] -= 1
     if written != expected:
         # Connection cut mid-chunk: the client retries this one chunk.
         raise ApiError(status_code=400, detail="Chunk incomplete -- please retry.")
@@ -2223,6 +2342,11 @@ async def upload_finish(request: Request):
     missing = up["chunks"] - len(up["received"])
     if missing:
         raise ApiError(status_code=409, detail=f"{missing} part(s) of the file are still missing. Please retry.")
+    if up["writers"]:
+        raise ApiError(status_code=409, detail="Part of the file is still arriving. Please retry in a moment.")
+    # Closed before the first await: no chunk can be written after this, so
+    # the file that is checked is exactly the file that is kept.
+    up["closed"] = True
     _uploads.pop(upload_id, None)
     secs = max(0.001, time.time() - up["started"])
     logger.info(
@@ -2238,6 +2362,17 @@ async def upload_finish(request: Request):
     if page_count > MAX_SHELF_UPLOAD_PAGES:
         _safe_remove(up["path"])
         raise ApiError(status_code=400, detail=f"This PDF has {page_count} pages, over the {MAX_SHELF_UPLOAD_PAGES}-page limit.")
+
+    # Checked: now it moves into the library (same volume, so a rename).
+    try:
+        os.makedirs(up["dest_dir"], exist_ok=True)
+        final_path = unique_path(os.path.join(up["dest_dir"], up["filename"]))
+        await asyncio.to_thread(shutil.move, up["path"], final_path)
+    except OSError:
+        logger.exception("Couldn't move a finished upload into place")
+        _safe_remove(up["path"])
+        raise ApiError(status_code=500, detail="Couldn't save the file. Please try again.")
+    up["path"] = final_path
 
     if up["target"] == "shared":
         try:
@@ -2283,6 +2418,7 @@ async def upload_cancel(request: Request):
     user = require_user(request)
     upload_id, up = _owned_upload(request, user["id"])
     _uploads.pop(upload_id, None)
+    up["closed"] = True
     _safe_remove(up["path"])
     return JSONResponse({"cancelled": True})
 

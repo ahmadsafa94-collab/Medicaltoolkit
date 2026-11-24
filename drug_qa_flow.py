@@ -40,6 +40,7 @@ import drug_qa
 import name_resolver
 import session_cache
 import subscriptions
+import drug_lookup
 from drug_lookup import lookup_drug, DrugNotFoundError, DrugLookupRateLimitedError
 from keyboards import cancel_kb, drug_suggestion_kb
 from telegram_helpers import md_bold, send_long_text
@@ -78,6 +79,9 @@ async def handle_cancel(message: Message, state: FSMContext):
 @router.message(DrugQAStates.awaiting_drug_name, _NOT_A_COMMAND)
 async def handle_drug_name(message: Message, state: FSMContext):
     drug_name = message.text.strip()
+    if drug_lookup.name_too_long(drug_name):
+        await message.answer(drug_lookup.TOO_LONG_MESSAGE)
+        return
     status = await message.answer(f"Looking up {drug_name}...")
 
     try:

@@ -11,6 +11,7 @@ chapter_ai.generate_flashcards) but reviewed together across a book.
 import json
 import logging
 import os
+import re
 import time
 import uuid
 
@@ -31,8 +32,15 @@ QUALITY_GOOD = 4
 QUALITY_EASY = 5
 
 
+_BOOK_ID_RE = re.compile(r"[A-Za-z0-9]{1,64}")
+
+
 def _cards_path(user_id: int, book_id: str) -> str:
-    return os.path.join(STORAGE_DIR, str(user_id), "flashcards", f"{book_id}.json")
+    # book_id can come from button data, which a client can forge: without
+    # this, "../subscription" (or "../../<other user>/...") reached os.remove.
+    if not isinstance(book_id, str) or not _BOOK_ID_RE.fullmatch(book_id):
+        raise ValueError("invalid book id")
+    return os.path.join(STORAGE_DIR, str(int(user_id)), "flashcards", f"{book_id}.json")
 
 
 def _reminder_state_path(user_id: int) -> str:

@@ -67,13 +67,22 @@ async def handle_pick_book(callback: CallbackQuery):
     if not book_notes:
         text = f"📓 *{md_bold(book['title'])}*\n\nNo notes yet."
     else:
+        # Kept under Telegram's 4096-character limit: 20 long notes used to
+        # make the list fail to send at all (and its delete buttons with it).
         lines = [f"📓 *{md_bold(book['title'])}*", ""]
+        shown = []
         for n in book_notes[:20]:
             page_label = f"p.{n['page']}" if n.get("page") else "(no page)"
-            preview = n["text"][:200]
-            lines.append(f"*{page_label}*: {md(preview)}")
-            lines.append("")
+            preview = n["text"][:150] + ("…" if len(n["text"]) > 150 else "")
+            entry = f"*{page_label}*: {md(preview)}"
+            if sum(len(x) + 1 for x in lines) + len(entry) > 3700:
+                break
+            lines += [entry, ""]
+            shown.append(n["id"])
+        if len(shown) < len(book_notes):
+            lines.append(f"_Showing {len(shown)} of {len(book_notes)} notes._")
         text = "\n".join(lines)
+        book_notes = [n for n in book_notes if n["id"] in shown]
 
     await callback.message.answer(
         text, parse_mode="Markdown", reply_markup=_notes_list_kb(book_id, [n["id"] for n in book_notes[:20]])
@@ -137,7 +146,15 @@ async def handle_note_text(message: Message, state: FSMContext):
 
 @router.callback_query(F.data.startswith("notes:del:"))
 async def handle_delete(callback: CallbackQuery):
-    _, _, book_id, note_id = callback.data.split(":", 3)
+    try:
+        _, _, book_id, note_id = callback.data.split(":", 3)
+    except ValueError:
+        await callback.answer()
+        return
+    # Button data can be forged: only the presser's own book, by a plain id.
+    if not book_id.isalnum() or library.get_book(callback.from_user.id, book_id) is None:
+        await callback.answer("That book isn't available anymore.")
+        return
     deleted = notes.delete_note(callback.from_user.id, book_id, note_id)
     await callback.answer("Deleted." if deleted else "Already gone.")
     if deleted:

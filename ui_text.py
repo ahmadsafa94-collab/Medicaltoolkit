@@ -504,6 +504,11 @@ def _known_languages() -> list[str]:
         return []
 
 
+def _offered(name) -> bool:
+    """Only the languages the bot offers are ever translated or cached."""
+    return isinstance(name, str) and name in language.SUPPORTED_LANGUAGES
+
+
 def ensure_language(language: str) -> bool:
     """
     Make sure `language` is translated and cached, translating it now if not.
@@ -515,6 +520,8 @@ def ensure_language(language: str) -> bool:
     """
     if is_english(language):
         return True
+    if not _offered(language):
+        return False
     existing = _load(language)
     missing = [s for s in dict.fromkeys(UI_STRINGS) if s not in existing]
     if not missing:
@@ -557,6 +564,8 @@ def warm_all_messages(language: str) -> int:
     discarding the lot.
     """
     if is_english(language):
+        return 0
+    if not _offered(language):
         return 0
 
     cached = _load_messages(language)

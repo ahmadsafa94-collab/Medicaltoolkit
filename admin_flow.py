@@ -21,7 +21,7 @@ from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 import admin_log
 import book_requests
@@ -234,7 +234,7 @@ async def handle_subs_prompt(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer("Send the Telegram user id, or @username, to look up.")
 
 
-@router.message(AdminStates.awaiting_lookup)
+@router.message(AdminStates.awaiting_lookup, ~(F.text.startswith("/")))
 async def handle_lookup_input(message: Message, state: FSMContext):
     if not await _require_admin_message(message):
         await state.clear()
@@ -303,7 +303,7 @@ async def handle_grant_custom_cancel(message: Message, state: FSMContext):
     await message.answer("Cancelled.")
 
 
-@router.message(AdminStates.awaiting_custom_days)
+@router.message(AdminStates.awaiting_custom_days, ~(F.text.startswith("/")))
 async def handle_grant_custom_days(message: Message, state: FSMContext):
     if not await _require_admin_message(message):
         await state.clear()
@@ -366,17 +366,48 @@ async def handle_broadcast_cancel(message: Message, state: FSMContext):
     await message.answer("Broadcast cancelled.")
 
 
-@router.message(AdminStates.awaiting_broadcast)
-async def handle_broadcast_send(message: Message, state: FSMContext):
+# Commands are left alone (so a /replyuser typed while this is pending goes
+# to its own handler, not to every user), and nothing is sent before the
+# admin has seen a preview and tapped Send.
+@router.message(AdminStates.awaiting_broadcast, ~(F.text.startswith("/")))
+async def handle_broadcast_text(message: Message, state: FSMContext):
     if not await _require_admin_message(message):
         await state.clear()
         return
-    await state.clear()
     text = message.text or ""
     if not text.strip():
-        await message.answer("Empty message -- broadcast cancelled.")
+        await message.answer("Send the broadcast as a text message, or /cancel.")
         return
+    await state.update_data(broadcast_text=text)
+    count = len(subscriptions.all_user_ids())
+    await message.answer(
+        f"Preview -- this goes to {count} user(s):\n\n📢 {text}",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text=f"📢 Send to {count}", callback_data="admin:bcast:go"),
+            InlineKeyboardButton(text="✖️ Cancel", callback_data="admin:bcast:no"),
+        ]]),
+    )
 
+
+@router.callback_query(F.data.in_({"admin:bcast:go", "admin:bcast:no"}))
+async def handle_broadcast_confirm(callback: CallbackQuery, state: FSMContext):
+    if not await _require_admin_callback(callback):
+        return
+    data = await state.get_data()
+    text = data.get("broadcast_text") if await state.get_state() == AdminStates.awaiting_broadcast.state else None
+    await state.clear()
+    await callback.answer()
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except TelegramAPIError:
+        pass
+    if callback.data == "admin:bcast:no" or not text:
+        await callback.message.answer("Broadcast cancelled." if callback.data == "admin:bcast:no" else "Nothing to send -- start again from 📢 Broadcast.")
+        return
+    await _send_broadcast(callback.message, text)
+
+
+async def _send_broadcast(message: Message, text: str) -> None:
     from bot_instance import bot as tg_bot  # local import: avoids a circular import with bot.py at module load time
 
     ids = subscriptions.all_user_ids()

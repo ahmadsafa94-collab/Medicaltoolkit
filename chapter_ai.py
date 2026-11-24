@@ -98,9 +98,17 @@ def extract_text_for_page_range(
             total = len(pdf.pages)
             start_idx = max(0, start_page - 1)
             end_idx = min(total, end_page)
-            for page in pdf.pages[start_idx:end_idx]:
+            collected = 0
+            for idx in range(start_idx, end_idx):
+                page = pdf.pages[idx]
                 text = page.extract_text() or ""
                 parts.append(text)
+                collected += len(text)
+                page.close()  # pdfplumber keeps every parsed page in memory otherwise
+                # Only max_chars are used: reading the rest of a 1,500-page
+                # range first just made the job time out.
+                if collected > max_chars:
+                    break
     except Exception as e:
         logger.warning("PDF text extraction failed: %s", e)
         raise ChapterAIError("Couldn't read text for this chapter. The file may be damaged or scanned.")

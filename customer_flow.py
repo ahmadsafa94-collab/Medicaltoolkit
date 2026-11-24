@@ -822,6 +822,11 @@ async def handle_language_prompt(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("lang:set:"))
 async def handle_language_set(callback: CallbackQuery):
     lang = callback.data.split(":", 2)[2]
+    # Button data can be forged: anything not offered would otherwise go
+    # into an AI translation prompt and a whole new set of cache files.
+    if lang not in language.SUPPORTED_LANGUAGES:
+        await callback.answer()
+        return
     subscriptions.set_language(callback.from_user.id, lang)
     await callback.answer(f"Language set to {lang}.")
 

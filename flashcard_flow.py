@@ -296,12 +296,25 @@ def _parse_chapter_token(token: str) -> int | None:
     return None if token == "all" else int(token)
 
 
+def _own_book(user_id: int, book_id: str):
+    """The presser's own book, or None. Button data can be forged, so every book id from it is checked."""
+    if not isinstance(book_id, str) or not book_id.isalnum():
+        return None
+    return library.get_book(user_id, book_id)
+
+
 @router.callback_query(F.data.startswith("flash:review:"))
 async def handle_start_review(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
-    _, _, book_id, mode, chap_token = callback.data.split(":", 4)
-    chapter_index = _parse_chapter_token(chap_token)
+    try:
+        _, _, book_id, mode, chap_token = callback.data.split(":", 4)
+        chapter_index = _parse_chapter_token(chap_token)
+    except ValueError:
+        return
     user_id = callback.from_user.id
+    if _own_book(user_id, book_id) is None:
+        await callback.message.answer("That book isn't available anymore.")
+        return
     queue = _REVIEW_QUEUE_FN.get(mode, _REVIEW_QUEUE_FN["due"])(user_id, book_id, chapter_index)
     if not queue:
         await callback.message.answer(_REVIEW_EMPTY_MESSAGE.get(mode, _REVIEW_EMPTY_MESSAGE["due"]))
@@ -338,9 +351,15 @@ async def handle_chapter_filter_menu(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("flash:chapfilterpick:"))
 async def handle_chapter_filter_pick(callback: CallbackQuery):
     await callback.answer()
-    _, _, book_id, chapter_index_str = callback.data.split(":", 3)
-    chapter_index = int(chapter_index_str)
+    try:
+        _, _, book_id, chapter_index_str = callback.data.split(":", 3)
+        chapter_index = int(chapter_index_str)
+    except ValueError:
+        return
     user_id = callback.from_user.id
+    if _own_book(user_id, book_id) is None:
+        await callback.message.answer("That book isn't available anymore.")
+        return
 
     await callback.message.answer(
         "Review mode:",
@@ -453,8 +472,11 @@ async def handle_export(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("flash:delete:"))
 async def handle_delete(callback: CallbackQuery):
-    await callback.answer("Deleted.")
     book_id = callback.data.split(":", 2)[2]
+    if _own_book(callback.from_user.id, book_id) is None:
+        await callback.answer("That book isn't available anymore.")
+        return
+    await callback.answer("Deleted.")
     flashcards.delete_deck(callback.from_user.id, book_id)
     await callback.message.answer("Deck deleted.")
 

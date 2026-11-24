@@ -124,6 +124,14 @@ class DrugNotFoundError(Exception):
     pass
 
 
+MAX_DRUG_NAME_CHARS = 80
+TOO_LONG_MESSAGE = "That's too long for a drug name -- send just the name, e.g. metformin."
+
+
+def name_too_long(name: str | None) -> bool:
+    return len((name or "").strip()) > MAX_DRUG_NAME_CHARS
+
+
 def _with_key(url: str) -> str:
     """Append the openFDA API key, when one is configured (config.OPENFDA_API_KEY)."""
     if not OPENFDA_API_KEY:
@@ -301,6 +309,8 @@ async def lookup_drug(drug_name: str) -> dict:
     Raises DrugNotFoundError if nothing matches.
     """
     drug_name = drug_name.strip().lower()
+    if name_too_long(drug_name):
+        raise DrugNotFoundError(TOO_LONG_MESSAGE)
     record = await _fetch_label_record(drug_name)
 
     if record is None:

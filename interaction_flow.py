@@ -34,6 +34,7 @@ from aiogram.types import CallbackQuery, Message
 import ui_text
 import interaction_ai
 import subscriptions
+import drug_lookup
 from drug_lookup import lookup_drug, DrugNotFoundError, DrugLookupRateLimitedError
 from keyboards import interaction_menu_kb, interaction_confirm_kb
 from telegram_helpers import md_bold, send_long_text
@@ -215,6 +216,9 @@ async def handle_ix_add_drug(message: Message, state: FSMContext):
         )
         return
 
+    if drug_lookup.name_too_long(raw_name):
+        await message.answer(drug_lookup.TOO_LONG_MESSAGE)
+        return
     status_msg = await message.answer(f"Looking up {raw_name}...")
 
     try:
