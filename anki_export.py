@@ -14,6 +14,7 @@ is in requirements.txt; if the generated .apkg doesn't open cleanly in Anki,
 that's the first place to check.
 """
 
+import zlib
 import logging
 
 logger = logging.getLogger(__name__)
@@ -32,7 +33,9 @@ _DECK_ID_BASE = 1972000000  # deck id = base + a stable hash of book_id, see _de
 
 
 def _deck_id(book_id: str) -> int:
-    return _DECK_ID_BASE + (abs(hash(book_id)) % 1_000_000)
+    # crc32, not hash(): Python salts str hashes per process, so the "same"
+    # deck got a new id after every restart and Anki imported a duplicate.
+    return _DECK_ID_BASE + (zlib.crc32(book_id.encode("utf-8")) % 1_000_000)
 
 
 def export_deck_to_apkg(book_title: str, book_id: str, cards: list[dict], output_path: str) -> None:

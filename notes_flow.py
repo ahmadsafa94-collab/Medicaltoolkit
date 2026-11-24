@@ -24,7 +24,10 @@ logger = logging.getLogger(__name__)
 router = Router(name="notes_flow")
 
 _NOT_A_COMMAND = F.text & ~F.text.startswith("/")
-_LEADING_PAGE_RE = re.compile(r"^\s*(\d+)\s*[:\-\.\)]\s*(.+)$", re.DOTALL)
+# A leading page number only in an unambiguous form -- "p12: ...", "page 12 - ...",
+# or "12: ..." (colon and a space). The old pattern also took "1.5 mg/kg
+# enoxaparin" as page 1, "5 mg/kg enoxaparin": the dose changed silently.
+_LEADING_PAGE_RE = re.compile(r"^\s*(?:(?:p\.?|page)\s*(\d{1,5})\s*[:\-]?\s+|(\d{1,5}):\s+)(.+)$", re.DOTALL | re.IGNORECASE)
 
 
 class NotesStates(StatesGroup):
@@ -104,8 +107,8 @@ async def handle_add_prompt(callback: CallbackQuery, state: FSMContext):
 
     hint = f" (defaults to your bookmarked page {book['bookmark_page']} if you don't include one)" if book.get("bookmark_page") else ""
     await callback.message.answer(
-        f"Type your note{hint}. Start with a page number and a colon/dash to set the page explicitly, "
-        "e.g. '42: remember this mechanism'.",
+        f"Type your note{hint}. To set the page, start with the page number and a colon, "
+        "e.g. '42: remember this mechanism' (or 'p42 remember this mechanism').",
         reply_markup=cancel_kb(),
     )
 
@@ -129,8 +132,8 @@ async def handle_note_text(message: Message, state: FSMContext):
     raw = message.text.strip()
     match = _LEADING_PAGE_RE.match(raw)
     if match:
-        page = int(match.group(1))
-        text = match.group(2).strip()
+        page = int(match.group(1) or match.group(2))
+        text = match.group(3).strip()
     else:
         page = default_page
         text = raw
@@ -141,7 +144,8 @@ async def handle_note_text(message: Message, state: FSMContext):
 
     notes.add_note(message.from_user.id, book_id, page, text)
     page_label = f"page {page}" if page else "no page"
-    await message.answer(f"✅ Note saved ({page_label}).")
+    # The saved text is echoed, so a misread page prefix can't go unnoticed.
+    await message.answer(f"✅ Note saved ({page_label}):\n{text[:300]}")
 
 
 @router.callback_query(F.data.startswith("notes:del:"))

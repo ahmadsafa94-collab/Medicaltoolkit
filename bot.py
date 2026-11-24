@@ -18,7 +18,7 @@ import tempfile
 import time
 
 import uvicorn
-from aiogram import Dispatcher, F
+from aiogram import Dispatcher, F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -134,6 +134,11 @@ async def _block_gate(handler, event, data):
     user = data.get("event_from_user")
     if user is None or subscriptions.is_admin(user.id) or not subscriptions.is_blocked(user.id):
         return await handler(event, data)
+    # Money already taken must still be recorded (and be refundable with its
+    # charge id): a user blocked between checkout and payment used to be
+    # charged with nothing recorded.
+    if event.message is not None and event.message.successful_payment is not None:
+        return await handler(event, data)
     try:
         if event.callback_query is not None:
             await event.callback_query.answer("Your access to this bot has been suspended.", show_alert=True)
@@ -198,6 +203,19 @@ flashcard_flow.register_flashcard_handlers(dp)
 # Study Tools -> My Notes (personal note-taking synced to bookmarks) --
 # see notes_flow.py.
 notes_flow.register_notes_handlers(dp)
+
+# Last of all: a button nothing above recognises -- typically one whose
+# conversation state was lost in a restart -- is answered instead of
+# leaving Telegram's spinner going with no reply.
+_expired_buttons = Router(name="expired-buttons")
+
+
+@_expired_buttons.callback_query()
+async def _expired_button(callback: CallbackQuery):
+    await callback.answer("This button has expired. Please open the menu again.")
+
+
+dp.include_router(_expired_buttons)
 
 
 def _update_summary(update) -> str:
@@ -541,6 +559,22 @@ async def handle_inline_drug_search(inline_query: InlineQuery):
     ]
 
     await inline_query.answer(results, cache_time=30, is_personal=True)
+
+
+async def _safe_edit(status_msg, text: str) -> None:
+    """
+    Edit a status message, or send the text new if that fails. Used once the
+    work is done: a deleted status message (or a 429 on the edit) used to
+    raise there and throw away a finished split -- chapters unsent, book
+    unregistered, allowance kept.
+    """
+    try:
+        await status_msg.edit_text(text)
+    except TelegramAPIError:
+        try:
+            await status_msg.answer(text)
+        except TelegramAPIError:
+            logger.warning("Couldn't show status: %s", text[:80])
 
 
 async def _dose_lookup_and_show(answer_fn, drug_name: str, user_id: int | None) -> None:
@@ -1138,10 +1172,14 @@ async def handle_book_delivery_document(message: Message, state: FSMContext):
     status = await message.answer("Downloading and delivering...")
     try:
         file = await bot.get_file(doc.file_id)
-        await bot.download_file(file.file_path, destination=dest_path)
-    except TelegramAPIError as e:
+        await bot.download_file(file.file_path, destination=dest_path, timeout=120)
+    except Exception as e:
         logger.exception("Failed to download book-delivery PDF for request %s", request_id)
-        await status.edit_text(f"Couldn't download that file from Telegram: {e}")
+        try:
+            os.remove(dest_path)  # a partial file must not be left in the customer's library folder
+        except OSError:
+            pass
+        await status.edit_text(f"Couldn't download that file from Telegram ({type(e).__name__}). Please send it again.")
         return
 
     try:
@@ -1236,8 +1274,8 @@ async def handle_pdf_split_only(message: Message, state: FSMContext):
 
     try:
         file = await bot.get_file(doc.file_id)
-        await bot.download_file(file.file_path, destination=local_pdf_path)
-    except TelegramAPIError:
+        await bot.download_file(file.file_path, destination=local_pdf_path, timeout=120)
+    except Exception:
         logger.exception("Failed to download uploaded PDF for split-only")
         subscriptions.refund(message.from_user.id, "books")
         shutil.rmtree(workdir, ignore_errors=True)
@@ -1292,7 +1330,7 @@ async def handle_pdf_split_only(message: Message, state: FSMContext):
             return
 
         succeeded = True
-        await status_msg.edit_text(f"Found {len(chapters)} chapter(s). Sending them now...")
+        await _safe_edit(status_msg, f"Found {len(chapters)} chapter(s). Sending them now...")
 
         sent, total = await send_documents_safely(message, chapters, output_paths)
 
@@ -1399,8 +1437,8 @@ async def _process_chat_upload(message: Message, doc, file_name: str) -> None:
 
     try:
         file = await bot.get_file(doc.file_id)
-        await bot.download_file(file.file_path, destination=local_pdf_path)
-    except TelegramAPIError:
+        await bot.download_file(file.file_path, destination=local_pdf_path, timeout=120)
+    except Exception:
         logger.exception("Failed to download uploaded PDF")
         subscriptions.refund(uid, "books")
         shutil.rmtree(workdir, ignore_errors=True)
@@ -1469,9 +1507,7 @@ async def _process_chat_upload(message: Message, doc, file_name: str) -> None:
             return
 
         succeeded = True
-        await status_msg.edit_text(
-            f"Found {len(chapters)} chapter(s). Sending them now..."
-        )
+        await _safe_edit(status_msg, f"Found {len(chapters)} chapter(s). Sending them now...")
 
         sent, total = await send_documents_safely(
             message, chapters, output_paths, get_reply_markup=build_chapter_ai_kb

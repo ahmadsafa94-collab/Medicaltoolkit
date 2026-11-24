@@ -16,10 +16,12 @@ import json
 import logging
 import os
 import re
+import zlib
 
 import anthropic
 import pdfplumber
 from pypdf import PdfReader, PdfWriter
+from pypdf.filters import ASCII85Decode, ASCIIHexDecode
 
 import content_cache
 import cost_ledger
@@ -56,6 +58,77 @@ def count_pages(pdf_path: str) -> int:
     return len(PdfReader(pdf_path).pages)
 
 
+# A page's drawing instructions, decompressed. Real pages are kilobytes to a
+# few megabytes; a "decompression bomb" -- a 22 KB file whose one page
+# inflates to gigabytes of instructions -- took 50 s of CPU and 2.5 GB of
+# memory in text extraction and could take the whole bot down. Every page's
+# content (and the drawings it reuses) is inflated here with a hard cap
+# first, so such a file is refused before anything parses it.
+_MAX_PAGE_CONTENT_BYTES = 24 * 1024 * 1024
+_BOMB = ChapterDetectionError(
+    "This PDF has a page with an abnormally large amount of drawing data and can't be processed safely. "
+    "Try printing it to a new PDF and sending that."
+)
+
+
+def _inflated_size(stream, budget: int) -> int:
+    """Bytes the stream inflates to, counting at most budget + 1 (so a bomb is never inflated in full)."""
+    filters = stream.get("/Filter")
+    filters = list(filters) if isinstance(filters, list) else ([filters] if filters else [])
+    data = getattr(stream, "_data", b"") or b""
+    # Text encodings in front of the compression (ASCII85, hex) only ever
+    # shrink the data, so they are undone in full; the compression itself is
+    # inflated with the cap. ("<ASCII85><Flate>" hid a bomb from a first-filter-only check.)
+    for f in filters:
+        if f in ("/ASCII85Decode", "/A85"):
+            data = ASCII85Decode.decode(data)
+        elif f in ("/ASCIIHexDecode", "/AHx"):
+            data = ASCIIHexDecode.decode(data)
+        elif f in ("/FlateDecode", "/Fl"):
+            d = zlib.decompressobj()
+            out = len(d.decompress(data, budget + 1))
+            return budget + 1 if d.unconsumed_tail else out
+        else:
+            break  # a filter text extraction rarely meets: counted at its stored size
+    return len(data)
+
+
+def _check_content_streams(reader) -> None:
+    for page in reader.pages:
+        try:
+            budget = _MAX_PAGE_CONTENT_BYTES
+            pending = []
+            contents = page.get("/Contents")
+            if contents is not None:
+                contents = contents.get_object()
+                pending.extend(contents if isinstance(contents, list) else [contents])
+            # Form XObjects: reusable drawings the page's text extraction also walks into.
+            seen = set()
+            resources = page.get("/Resources")
+            xobjects = resources.get_object().get("/XObject") if resources is not None else None
+            stack = [xobjects] if xobjects is not None else []
+            while stack and len(seen) < 500:
+                xo = stack.pop().get_object()
+                for ref in xo.values():
+                    obj = ref.get_object()
+                    if id(obj) in seen or obj.get("/Subtype") != "/Form":
+                        continue
+                    seen.add(id(obj))
+                    pending.append(obj)
+                    inner = obj.get("/Resources")
+                    inner_xo = inner.get_object().get("/XObject") if inner is not None else None
+                    if inner_xo is not None:
+                        stack.append(inner_xo)
+            for ref in pending:
+                budget -= _inflated_size(ref.get_object(), budget)
+                if budget < 0:
+                    raise _BOMB
+        except ChapterDetectionError:
+            raise
+        except Exception:
+            continue  # an odd structure is not a reason to refuse an otherwise readable book
+
+
 def open_check(pdf_path: str) -> int:
     """
     Page count, or a ChapterDetectionError a user can act on. pypdf's own
@@ -76,6 +149,7 @@ def open_check(pdf_path: str) -> int:
                 raise locked
             if not ok:
                 raise locked
+        _check_content_streams(reader)
         return len(reader.pages)
     except ChapterDetectionError:
         raise

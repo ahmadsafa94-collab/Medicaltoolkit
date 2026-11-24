@@ -69,6 +69,15 @@ def validate_glucose_mgdl(v) -> float:
     return _num(v, "Glucose", 20, 2000)
 
 
+def validate_glucose_mgdl_hyperglycemia(v) -> float:
+    """
+    Corrected sodium is for hyperglycemia. Below 100 mg/dL is refused: a
+    DKA value typed in mmol/L (20-60) used to pass as mg/dL and give a
+    negative correction (Na 130 with "25" -> 128.8 instead of ~136).
+    """
+    return _num(v, "Glucose (mg/dL; mmol/L x 18 = mg/dL)", 100, 2000)
+
+
 def validate_chloride_meql(v) -> float:
     return _num(v, "Serum chloride", 60, 150)
 
@@ -221,28 +230,35 @@ def calculate_meld(bilirubin_mgdl: float, inr: float, creatinine_mgdl: float, on
     of the measured value, per OPTN policy.
     """
     bilirubin, inr, creatinine = _meld_clamp_labs(bilirubin_mgdl, inr, creatinine_mgdl, on_dialysis, cr_cap=4.0)
-    score = 10 * (0.957 * math.log(creatinine) + 0.378 * math.log(bilirubin) + 1.120 * math.log(inr) + 0.643)
-    return min(max(round(score), 6), 40)
+    raw = 0.957 * math.log(creatinine) + 0.378 * math.log(bilirubin) + 1.120 * math.log(inr) + 0.643
+    return min(max(_round_half_up(raw * 10), 6), 40)
+
+
+def _round_half_up(x: float) -> int:
+    """Clinical rounding (x.5 goes up). Python's round() is half-to-even: MELD 10.5 became 10."""
+    return math.floor(x + 0.5)
 
 
 def calculate_meld_na(
     bilirubin_mgdl: float, inr: float, creatinine_mgdl: float, sodium_meql: float, on_dialysis: bool
 ) -> float:
     """
-    MELD-Na (OPTN, 2016). The sodium adjustment is decided on, and applied
-    to, MELD(i) -- the unrounded initial score rounded to one decimal --
-    not the integer MELD. Testing the rounded integer against 11 dropped the
-    adjustment for MELD(i) in (11, 11.5): bili 1.9, INR 1.25, Cr 1.0, Na 125
-    is MELD(i) 11.4 and MELD-Na 23, which that version reported as 11.
+    MELD-Na (OPTN Policy 9.1.D, 2016). MELD(i) is the raw score "rounded
+    to the tenth decimal place and then multiplied by 10" -- a whole
+    number. The sodium step applies only when that number is above 11,
+    and uses it. (An earlier version kept one decimal, so a raw 11.4
+    counted as > 11: bili 1.9, INR 1.25, Cr 1.0, Na 125 came out 23 where
+    the policy gives 11.) The result is rounded to the nearest whole number.
     """
     bilirubin, inr_c, creatinine = _meld_clamp_labs(bilirubin_mgdl, inr, creatinine_mgdl, on_dialysis, cr_cap=4.0)
-    meld_i = round(
-        10 * (0.957 * math.log(creatinine) + 0.378 * math.log(bilirubin) + 1.120 * math.log(inr_c) + 0.643), 1
-    )
+    raw = 0.957 * math.log(creatinine) + 0.378 * math.log(bilirubin) + 1.120 * math.log(inr_c) + 0.643
+    meld_i = _round_half_up(raw * 10)
     if meld_i > 11:
         na = min(max(sodium_meql, 125), 137)
-        meld_i = meld_i + 1.32 * (137 - na) - (0.033 * meld_i * (137 - na))
-    return min(max(round(meld_i), 6), 40)
+        score = meld_i + 1.32 * (137 - na) - (0.033 * meld_i * (137 - na))
+    else:
+        score = meld_i
+    return min(max(_round_half_up(score), 6), 40)
 
 
 def calculate_meld3(

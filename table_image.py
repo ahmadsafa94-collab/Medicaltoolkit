@@ -42,7 +42,7 @@ _EMOJI_RE = re.compile(
 def _strip_emoji(text: str) -> str:
     return re.sub(r"\s+", " ", _EMOJI_RE.sub("", text)).strip()
 
-_FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
+_FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Fonts")  # the repo folder is "Fonts" (Linux paths are case-sensitive)
 _REGULAR_FONT_PATH = os.path.join(_FONT_DIR, "DejaVuSansMono.ttf")
 _BOLD_FONT_PATH = os.path.join(_FONT_DIR, "DejaVuSansMono-Bold.ttf")
 

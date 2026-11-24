@@ -264,7 +264,7 @@ _register(Calculator(
     "corrected_sodium", "Corrected Sodium", "🧂",
     fields=[
         NumberField("sodium_meql", "Enter measured serum sodium (mEq/L):", cc.validate_sodium_meql),
-        NumberField("glucose_mgdl", "Enter serum glucose (mg/dL):", cc.validate_glucose_mgdl),
+        NumberField("glucose_mgdl", "Enter serum glucose (mg/dL; mmol/L x 18 = mg/dL):", cc.validate_glucose_mgdl_hyperglycemia),
     ],
     compute=_compute_corrected_sodium,
     intro="For hyperglycemia-related pseudo-hyponatremia. Shows both commonly-used correction factors.",

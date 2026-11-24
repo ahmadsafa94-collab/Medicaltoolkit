@@ -238,24 +238,25 @@ async def handle_successful_payment(message: Message):
         )
         return
 
-    was_first_payment = not subscriptions.has_ever_paid(user_id)
     if not subscriptions.apply_payment(user_id, charge_id, stars=payment.total_amount, days=days, source="stars"):
         logger.info("Ignoring duplicate successful_payment %s for user %s", charge_id, user_id)
         return
 
+    # Credited on the first Premium purchase -- maybe_credit_referral pays out
+    # only once. (Gating on "first payment of any kind" meant an earlier
+    # book-request payment made a referred user's Premium purchase not count.)
     referral_note = ""
-    if was_first_payment:
-        credited_referrer = subscriptions.maybe_credit_referral(user_id)
-        if credited_referrer is not None:
-            referral_note = "\n\n🎁 Your referral bonus (and your friend's) has also been applied."
-            try:
-                from bot_instance import bot as tg_bot
-                await tg_bot.send_message(
-                    chat_id=credited_referrer,
-                    text="🎁 Someone you referred just went Premium -- you've been credited a free month!",
-                )
-            except TelegramAPIError:
-                logger.warning("Failed to notify referrer %s of their bonus", credited_referrer)
+    credited_referrer = subscriptions.maybe_credit_referral(user_id, charge_id)
+    if credited_referrer is not None:
+        referral_note = "\n\n🎁 Your referral bonus (and your friend's) has also been applied."
+        try:
+            from bot_instance import bot as tg_bot
+            await tg_bot.send_message(
+                chat_id=credited_referrer,
+                text="🎁 Someone you referred just went Premium -- you've been credited a free month!",
+            )
+        except TelegramAPIError:
+            logger.warning("Failed to notify referrer %s of their bonus", credited_referrer)
 
     await message.answer(
         f"✅ Thanks! You're now Premium for {days} days.{referral_note}",

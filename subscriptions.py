@@ -623,6 +623,20 @@ def record_refund(user_id: int, charge_id: str) -> dict | None:
                 "ts": now,
             }
         )
+        # The payment that earned a referral bonus is refunded: both bonuses
+        # go too (they used to stay -- two accounts and one refund were 60
+        # free days).
+        referrer_id = sub.get("referred_by")
+        if (
+            original is not None and charge_id and sub.get("referral_credit_charge") == charge_id
+            and not sub.get("referral_clawed_back")
+        ):
+            _shorten_premium(sub, REFERRAL_BONUS_DAYS, now)
+            sub["referral_clawed_back"] = True
+            if referrer_id:
+                referrer = _load(referrer_id)
+                _shorten_premium(referrer, REFERRAL_BONUS_DAYS, now)
+                _save(referrer_id, referrer)
         _save(user_id, sub)
         return dict(original) if original is not None else None
 
@@ -663,6 +677,11 @@ def register_referral(new_user_id: int, referrer_id: int) -> bool:
     """
     if referrer_id == new_user_id:
         return False
+    # Only a real user of this bot can be a referrer: any integer in the link
+    # used to be accepted (a never-seen id got Premium and a phantom record,
+    # and a group id the bot is in received the credit message).
+    if not isinstance(referrer_id, int) or referrer_id <= 0 or referrer_id not in set(all_user_ids()):
+        return False
     if os.path.exists(_sub_path(new_user_id)):
         return False
     sub = _default_sub(new_user_id)
@@ -671,7 +690,7 @@ def register_referral(new_user_id: int, referrer_id: int) -> bool:
     return True
 
 
-def maybe_credit_referral(user_id: int) -> int | None:
+def maybe_credit_referral(user_id: int, charge_id: str | None = None) -> int | None:
     """
     Call right after a user's FIRST successful Stars payment. If they were
     referred and haven't been credited yet, grants REFERRAL_BONUS_DAYS of
@@ -702,8 +721,21 @@ def maybe_credit_referral(user_id: int) -> int | None:
 
     sub = _load(user_id)
     sub["referral_credited"] = True
+    # Remembered so that refunding this payment takes both bonuses back.
+    sub["referral_credit_charge"] = charge_id
     _save(user_id, sub)
     return referrer_id
+
+
+def _shorten_premium(sub: dict, days: int, now: float) -> None:
+    if days > 0 and sub.get("plan") == "premium" and sub.get("premium_until"):
+        new_until = sub["premium_until"] - days * 86400
+        if new_until <= now:
+            sub["plan"] = "free"
+            sub["premium_until"] = None
+            sub["premium_source"] = None
+        else:
+            sub["premium_until"] = new_until
 
 
 def get_referral_stats(user_id: int) -> dict:

@@ -19,6 +19,7 @@ nothing and is never gated.
 import asyncio
 import logging
 import os
+import tempfile
 
 from aiogram import Router, F
 from aiogram.exceptions import TelegramAPIError
@@ -448,7 +449,10 @@ async def handle_export(callback: CallbackQuery):
 
     cards = flashcards.get_deck(user_id, book_id)
     workdir = user_dir(user_id)
-    output_path = os.path.join(workdir, f"_tmp_anki_{book_id}.apkg")
+    # A file of its own per export: two taps used to share one path, and one
+    # export's cleanup deleted the file the other was still reading.
+    fd, output_path = tempfile.mkstemp(dir=workdir, prefix="anki-", suffix=".apkg")
+    os.close(fd)
     try:
         await asyncio.to_thread(anki_export.export_deck_to_apkg, book["title"], book_id, cards, output_path)
         with open(output_path, "rb") as f:

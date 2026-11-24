@@ -67,7 +67,10 @@ def validate_weight_kg(weight) -> float:
 
 
 def validate_creatinine_mgdl(creatinine) -> float:
-    return _validate_number(creatinine, "Serum creatinine", 0.1, 25)
+    # Adult-only calculator: below 0.3 mg/dL (26.5 umol/L) isn't a real adult
+    # value, and the floor closes an overlap -- a mg/dL value of 9-25 typed
+    # with umol/L selected used to pass as 0.10-0.28 mg/dL ("eGFR 183, G1").
+    return _validate_number(creatinine, "Serum creatinine", 0.3, 25)
 
 
 def validate_direct_value(value, label: str) -> float:
