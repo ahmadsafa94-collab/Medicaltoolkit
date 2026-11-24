@@ -986,6 +986,33 @@ const ZOOM_STEP = 0.2;
 const ZOOM_MIN = 0.5;
 const ZOOM_MAX = 3;
 
+// Large books (1,000 pages, 100+ MB) on mobile: pdf.js by default keeps
+// downloading the WHOLE file in small pieces in the background, so any
+// dropped connection -- or a server restart during a deploy -- failed the
+// reader with "Failed to fetch". Now it fetches only the pages being read
+// (disableAutoFetch), in 1 MB pieces, and a failed open is retried.
+async function openPdfWithRetry(url, attempts = 3) {
+  let lastErr;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const task = pdfjsLib.getDocument({
+        url,
+        httpHeaders: { "X-Telegram-Init-Data": INIT_DATA },
+        disableAutoFetch: true,
+        disableStream: true,
+        rangeChunkSize: 1024 * 1024,
+      });
+      return await task.promise;
+    } catch (e) {
+      lastErr = e;
+      if (e && e.name === "InvalidPDFException") break;  // a broken file won't get better
+      document.getElementById("reader-page-label").textContent = "Reconnecting…";
+      await new Promise((r) => setTimeout(r, 1500 * (i + 1)));
+    }
+  }
+  throw lastErr;
+}
+
 async function openReader(targetPage) {
   if (readerSource && readerSource.page !== targetPage) readerSource = null;
   document.getElementById("reader-source").hidden = true;
@@ -995,11 +1022,7 @@ async function openReader(targetPage) {
   try {
     pdfjsLib.GlobalWorkerOptions.workerSrc =
       "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
-    const loadingTask = pdfjsLib.getDocument({
-      url: `/api/books/${currentBook.book_id}/file`,
-      httpHeaders: { "X-Telegram-Init-Data": INIT_DATA },
-    });
-    readerState.pdf = await loadingTask.promise;
+    readerState.pdf = await openPdfWithRetry(`/api/books/${currentBook.book_id}/file`);
     // targetPage (from a bookmark tap) wins; otherwise resume from the
     // book's own bookmark if one is set, otherwise page 1.
     readerState.pageNum = targetPage || currentBook.bookmark_page || 1;
@@ -1022,7 +1045,31 @@ async function openReader(targetPage) {
 async function renderReaderPage() {
   if (!readerState.pdf || readerState.rendering) return;
   readerState.rendering = true;
-  const page = await readerState.pdf.getPage(readerState.pageNum);
+  try {
+    await _renderReaderPage();
+  } catch (e) {
+    // A failed page fetch used to leave `rendering` stuck at true, so the
+    // reader froze on "Loading…" with a blank page for good.
+    document.getElementById("reader-page-label").textContent = "⚠️ Couldn't load -- tap here to retry";
+  } finally {
+    readerState.rendering = false;
+  }
+}
+
+async function getPageWithRetry(num, attempts = 3) {
+  for (let i = 0; ; i++) {
+    try {
+      return await readerState.pdf.getPage(num);
+    } catch (e) {
+      if (i >= attempts - 1) throw e;
+      document.getElementById("reader-page-label").textContent = "Reconnecting…";
+      await new Promise((r) => setTimeout(r, 1200 * (i + 1)));
+    }
+  }
+}
+
+async function _renderReaderPage() {
+  const page = await getPageWithRetry(readerState.pageNum);
   const canvas = document.getElementById("reader-canvas");
   const ctx = canvas.getContext("2d");
   const containerWidth = document.getElementById("reader-canvas-wrap").clientWidth - 16;
@@ -1077,7 +1124,6 @@ async function renderReaderPage() {
   updateBookmarkButton();
   updateNotesButton();
   if (!document.getElementById("reader-notes-panel").hidden) renderNotesPanel();
-  readerState.rendering = false;
 }
 
 function updateZoomLabel() {
@@ -1190,6 +1236,7 @@ function flipPage(delta) {
   return true;
 }
 
+document.getElementById("reader-page-label").addEventListener("click", () => renderReaderPage());
 document.getElementById("reader-prev").addEventListener("click", () => flipPage(-1));
 document.getElementById("reader-next").addEventListener("click", () => flipPage(1));
 
@@ -1465,6 +1512,17 @@ async function exportSummaryAsPdf(btn, title, text) {
 let qaHistory = [];
 let qaMode = "single"; // "single" | "conversational"
 let qaSessionId = null; // client-generated thread id -- every turn asked under it lands in the same history entry
+
+// A question box that grows with what's typed (up to 40% of the screen);
+// Ctrl/Cmd+Enter sends.
+function autoGrowComposer(id, send) {
+  const q = document.getElementById(id);
+  const grow = () => { q.style.height = "auto"; q.style.height = Math.min(q.scrollHeight + 2, window.innerHeight * 0.4) + "px"; };
+  q.addEventListener("input", grow);
+  q.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send(); }
+  });
+}
 
 // crypto.randomUUID() isn't guaranteed in every WebView this mini app might
 // run in, so fall back to a plain timestamp+random id -- it only needs to be
@@ -2352,6 +2410,8 @@ const DRUG_SUGGEST_DEBOUNCE_MS = 250;
 let interactionDrugs = [];
 let lookupDrug = null;
 let lookupThread = [];   // [{q, a}] -- sent back as history so follow-ups keep context
+let lookupTopicId = null;      // saved-topic id for this drug thread (kind "drug")
+let interactionTopicId = null; // saved-topic id of the check on screen (kind "interactions")
 let drugsBusy = false;
 
 function drugsTab(name) {
@@ -2375,6 +2435,10 @@ function wireDrugSuggest(inputId, boxId, onPick) {
   let seq = 0;
 
   function close() {
+    // Also cancel a pending or in-flight lookup, so its late reply can't
+    // reopen the list after the name was already set.
+    clearTimeout(timer);
+    seq++;
     box.hidden = true;
     box.innerHTML = "";
   }
@@ -2501,7 +2565,7 @@ async function checkInteractions() {
     const { answer, drugs } = await api("/api/drugs/interactions", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ names: interactionDrugs }),
+      body: JSON.stringify({ names: interactionDrugs, topic_id: (interactionTopicId = genId()) }),
     });
     // The server resolves each name to the label's own spelling; show that
     // back so it is clear which products were actually read.
@@ -2509,9 +2573,7 @@ async function checkInteractions() {
       interactionDrugs = drugs;
       renderInteractionChips();
     }
-    result.innerHTML =
-      `<p class="muted">${escapeHtml(interactionDrugs.join(" · "))}</p>` +
-      `<div class="qa-msg a">${richText(answer)}</div>`;
+    renderInteractionResult(interactionDrugs, answer);
   } catch (e) {
     if (e.status === 404) {
       // Every chip was confirmed when it was added, so reaching here means
@@ -2530,6 +2592,80 @@ async function checkInteractions() {
     drugsBusy = false;
     renderInteractionChips();
   }
+}
+
+function renderInteractionResult(drugs, answer) {
+  const result = document.getElementById("interaction-result");
+  result.hidden = false;
+  result.innerHTML =
+    `<p class="muted">${escapeHtml(drugs.join(" · "))}</p>` +
+    `<div class="qa-msg a">${richText(answer)}` +
+    (interactionTopicId
+      ? `<div class="ask-turn-tools"><button class="mini-btn" data-export-interaction="1">📄 Save as PDF</button></div>`
+      : "") +
+    `</div>`;
+}
+
+// --- saved Drugs-tab topics (same store as Ask your books, by kind) ----
+
+async function showDrugTopics(panelId, kind, emptyText) {
+  const box = document.getElementById(panelId);
+  const list = box.querySelector(".topics-list");
+  box.hidden = false;
+  list.innerHTML = `<p class="muted">Loading…</p>`;
+  let topics;
+  try {
+    ({ topics } = await api(`/api/ask/topics?kind=${kind}`));
+  } catch (e) {
+    list.innerHTML = `<p class="muted">${escapeHtml(e.message)}</p>`;
+    return;
+  }
+  list.innerHTML = topics.length
+    ? topics
+        .map((t) => {
+          const when = new Date(t.updated * 1000).toLocaleDateString();
+          const meta = kind === "interactions" ? when : `${t.turns} answer${t.turns === 1 ? "" : "s"} · ${when}`;
+          return (
+            `<div class="topic-row"><button class="topic-main" data-topic="${t.topic_id}">` +
+            `<span class="topic-title" dir="auto">${escapeHtml(t.title)}</span>` +
+            `<span class="topic-meta">${meta}</span>` +
+            `</button><button class="mini-btn" data-del-topic="${t.topic_id}" title="Delete">🗑</button></div>`
+          );
+        })
+        .join("")
+    : `<p class="muted">${emptyText}</p>`;
+  box.scrollIntoView({ block: "start", behavior: "smooth" });
+}
+
+function wireDrugTopicsPanel(panelId, kind, emptyText, onOpen, onDeleted) {
+  const box = document.getElementById(panelId);
+  box.addEventListener("click", async (e) => {
+    if (e.target.closest(".topics-close")) {
+      box.hidden = true;
+      return;
+    }
+    const open = e.target.closest("button.topic-main");
+    if (open) {
+      try {
+        const topic = await api(`/api/ask/topics/${open.dataset.topic}`);
+        box.hidden = true;
+        onOpen(open.dataset.topic, topic);
+      } catch (err) {
+        alertMsg(err.message);
+      }
+      return;
+    }
+    const del = e.target.closest("button[data-del-topic]");
+    if (del) {
+      try {
+        await api(`/api/ask/topics/${del.dataset.delTopic}`, { method: "DELETE" });
+        onDeleted(del.dataset.delTopic);
+        showDrugTopics(panelId, kind, emptyText);
+      } catch (err) {
+        alertMsg(err.message);
+      }
+    }
+  });
 }
 
 // --- drug lookup (Q&A against one label) ------------------------------
@@ -2552,12 +2688,27 @@ function renderLookupThread() {
   const box = document.getElementById("lookup-thread");
   box.innerHTML = lookupThread
     .map(
-      (t) =>
+      (t, i) =>
         `<div class="qa-msg q" dir="auto">${escapeHtml(t.q)}</div>` +
-        `<div class="qa-msg a">${richText(t.a)}</div>`
+        `<div class="qa-msg a">${richText(t.a)}` +
+        (t.done && lookupTopicId
+          ? `<div class="ask-turn-tools"><button class="mini-btn" data-export-turn="${i}">📄 Save as PDF</button></div>`
+          : "") +
+        `</div>`
     )
     .join("");
   box.scrollTop = box.scrollHeight;
+  const answered = lookupThread.some((t) => t.done);
+  document.getElementById("lookup-topic-note").hidden = !answered;
+  document.getElementById("lookup-topic-pdf").hidden = !(answered && lookupTopicId);
+}
+
+function lookupStartTopic() {
+  lookupDrug = null;
+  lookupThread = [];
+  lookupTopicId = null;
+  document.getElementById("lookup-drug-input").value = "";
+  renderLookupState();
 }
 
 async function setLookupDrug(name) {
@@ -2578,7 +2729,10 @@ async function setLookupDrug(name) {
     });
     // A different drug means a different label, so the thread cannot carry
     // over -- its history would be answered against the wrong document.
-    if (lookupDrug && resolved.toLowerCase() !== lookupDrug.toLowerCase()) lookupThread = [];
+    if (lookupDrug && resolved.toLowerCase() !== lookupDrug.toLowerCase()) {
+      lookupThread = [];
+      lookupTopicId = null;
+    }
     lookupDrug = resolved;
     input.value = resolved;
     renderLookupState();
@@ -2617,6 +2771,7 @@ async function askLookup() {
         question,
         // Everything answered so far, minus the placeholder just pushed.
         history: lookupThread.slice(0, -1).map((t) => ({ question: t.q, answer: t.a })),
+        topic_id: lookupTopicId || (lookupTopicId = genId()),
       }),
     });
     if (drug && drug !== lookupDrug) {
@@ -2624,6 +2779,7 @@ async function askLookup() {
       renderLookupState();
     }
     lookupThread[lookupThread.length - 1].a = answer;
+    lookupThread[lookupThread.length - 1].done = true;
   } catch (e) {
     // The failed turn is dropped rather than left in the thread: it would
     // otherwise be replayed as history on the next question, teaching the
@@ -2806,6 +2962,7 @@ function wireDrugsTab() {
   document.getElementById("interaction-check").addEventListener("click", checkInteractions);
   document.getElementById("interaction-clear").addEventListener("click", () => {
     interactionDrugs = [];
+    interactionTopicId = null;
     document.getElementById("interaction-result").hidden = true;
     renderInteractionChips();
   });
@@ -2823,12 +2980,55 @@ function wireDrugsTab() {
     }
   });
   document.getElementById("lookup-ask").addEventListener("click", askLookup);
-  document.getElementById("lookup-reset").addEventListener("click", () => {
-    lookupDrug = null;
-    lookupThread = [];
-    document.getElementById("lookup-drug-input").value = "";
-    renderLookupState();
+  document.getElementById("lookup-reset").addEventListener("click", lookupStartTopic);
+  document.getElementById("lookup-topic-pdf").addEventListener("click", (e) => exportTopic(e.currentTarget, lookupTopicId));
+  document.getElementById("lookup-thread").addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-export-turn]");
+    if (btn) exportTopic(btn, lookupTopicId, parseInt(btn.dataset.exportTurn, 10));
   });
+  const lookupEmpty = "No saved drug questions yet. Every answer here is saved automatically.";
+  document.getElementById("lookup-history").addEventListener("click", () =>
+    showDrugTopics("lookup-topics", "drug", lookupEmpty)
+  );
+  wireDrugTopicsPanel(
+    "lookup-topics", "drug", lookupEmpty,
+    (topicId, topic) => {
+      lookupTopicId = topicId;
+      lookupDrug = (topic.books && topic.books[0] && topic.books[0].title) || null;
+      lookupThread = (topic.turns || []).map((t) => ({ q: t.q, a: t.a, done: true }));
+      document.getElementById("lookup-drug-input").value = lookupDrug || "";
+      renderLookupState();
+      document.getElementById("lookup-thread").scrollIntoView({ block: "start", behavior: "smooth" });
+    },
+    (deleted) => { if (lookupTopicId === deleted) lookupStartTopic(); }
+  );
+
+  document.getElementById("interaction-result").addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-export-interaction]");
+    if (btn) exportTopic(btn, interactionTopicId);
+  });
+  const interactionEmpty = "No saved interaction checks yet. Every check is saved automatically.";
+  document.getElementById("interaction-history").addEventListener("click", () =>
+    showDrugTopics("interaction-topics", "interactions", interactionEmpty)
+  );
+  wireDrugTopicsPanel(
+    "interaction-topics", "interactions", interactionEmpty,
+    (topicId, topic) => {
+      const turn = (topic.turns || [])[0];
+      if (!turn) return;
+      interactionTopicId = topicId;
+      interactionDrugs = (topic.books || []).map((b) => b.title);
+      renderInteractionChips();
+      renderInteractionResult(interactionDrugs, turn.a);
+      document.getElementById("interaction-result").scrollIntoView({ block: "start", behavior: "smooth" });
+    },
+    (deleted) => {
+      if (interactionTopicId === deleted) {
+        interactionTopicId = null;
+        document.getElementById("interaction-result").hidden = true;
+      }
+    }
+  );
 
   renderInteractionChips();
   renderLookupState();
@@ -3044,8 +3244,12 @@ function askStartTopic() {
 
 // Answers go to the user's Telegram chat as a PDF: the in-app browser
 // can't save files itself. One answer, or the whole topic.
-async function askExport(btn, turn) {
-  if (!askTopicId) return;
+function askExport(btn, turn) {
+  return exportTopic(btn, askTopicId, turn);
+}
+
+async function exportTopic(btn, topicId, turn) {
+  if (!topicId) return;
   const label = btn.textContent;
   btn.disabled = true;
   btn.textContent = "Sending…";
@@ -3053,7 +3257,7 @@ async function askExport(btn, turn) {
     await api("/api/ask/export", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(turn === undefined ? { topic_id: askTopicId } : { topic_id: askTopicId, turn }),
+      body: JSON.stringify(turn === undefined ? { topic_id: topicId } : { topic_id: topicId, turn }),
     });
     btn.textContent = "✅ Sent to your chat";
     setTimeout(() => { btn.textContent = label; btn.disabled = false; }, 2500);
@@ -3513,12 +3717,8 @@ function wireAskTab() {
   });
   document.getElementById("ask-topic-pdf").addEventListener("click", (e) => askExport(e.currentTarget));
   // The question box grows with what's typed (up to 40% of the screen).
-  const q = document.getElementById("ask-question");
-  const grow = () => { q.style.height = "auto"; q.style.height = Math.min(q.scrollHeight + 2, window.innerHeight * 0.4) + "px"; };
-  q.addEventListener("input", grow);
-  q.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); askSend(); }
-  });
+  autoGrowComposer("ask-question", askSend);
+  autoGrowComposer("lookup-question", askLookup);
   document.getElementById("ask-clear").addEventListener("click", () => {
     askSelected.clear();
     renderAskLibrary();

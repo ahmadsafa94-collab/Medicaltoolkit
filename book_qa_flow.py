@@ -75,7 +75,7 @@ async def show_book_picker(answer_fn, user_id: int) -> None:
     # same function.
     books = {bid: info for bid, info in all_books.items() if info.get("qa_indexed")}
     # Asking several books at once, and the specialty libraries, live in the
-    # mini app's 💬 Ask tab: a checklist of books is a screen, not a chat
+    # mini app's 💬 Ask your books tab: a checklist of books is a screen, not a chat
     # exchange. This button opens that tab directly.
     multi_url = f"{WEBAPP_URL}?tab=ask" if WEBAPP_URL else None
     if not books:

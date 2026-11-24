@@ -620,7 +620,7 @@ async def _await_shared_pdfs(answer_fn, state: FSMContext, specialty: str) -> No
         "and made searchable for every user automatically; I'll post when each one is ready.\n\n"
         "The file name becomes the book title (add a caption to the file to set a different title).\n"
         f"Chat files are limited to {MAX_UPLOAD_BYTES // 1024 // 1024} MB by Telegram -- use the mini "
-        "app's 💬 Ask tab for bigger books.\n\n"
+        "app's 💬 Ask your books tab for bigger books.\n\n"
         "/done when finished."
     )
 

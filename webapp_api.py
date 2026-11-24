@@ -1532,6 +1532,19 @@ async def _fetch_label(name: str) -> dict:
         )
 
 
+def _save_drug_turn(user_id: int, topic_id, kind: str, drugs: list[str], question: str, answer: str, title: str) -> None:
+    """Keep a Drugs-tab answer as a saved topic (best effort), like Ask-your-books answers."""
+    if not ask_sessions.valid_id(topic_id):
+        return
+    try:
+        ask_sessions.append_turn(
+            user_id, topic_id, [{"book_id": f"drug:{d}", "title": d} for d in drugs], question, answer, [],
+            kind=kind, title=title,
+        )
+    except Exception:
+        logger.exception("Couldn't save %s topic %s", kind, topic_id)
+
+
 async def drug_search(request: Request):
     """Live name suggestions for the two inputs. Never an error: an empty
     list is a perfectly good answer to a half-typed word."""
@@ -1631,6 +1644,8 @@ async def drug_interactions(request: Request):
         logger.exception("Mini app interaction check failed")
         raise ApiError(status_code=500, detail="Couldn't check those interactions just now (not counted). Please try again.")
 
+    label = " + ".join(resolved)
+    _save_drug_turn(user["id"], body.get("topic_id"), "interactions", resolved, f"Interactions: {label}", answer, title=label)
     return JSONResponse({"answer": answer, "drugs": resolved})
 
 
@@ -1686,6 +1701,7 @@ async def drug_ask(request: Request):
         logger.exception("Mini app drug Q&A failed for %r", resolved)
         raise ApiError(status_code=500, detail="Couldn't answer that just now (not counted). Please try again.")
 
+    _save_drug_turn(user["id"], body.get("topic_id"), "drug", [resolved], question, answer, title=f"{resolved}: {question}")
     return JSONResponse({"answer": answer, "drug": resolved})
 
 
@@ -2316,7 +2332,10 @@ async def suggest_book(request: Request):
 
 async def ask_topics(request: Request):
     user = require_user(request)
-    return JSONResponse({"topics": ask_sessions.list_topics(user["id"])})
+    kind = request.query_params.get("kind") or "books"
+    if kind not in ask_sessions.KINDS:
+        raise ApiError(status_code=400, detail="Unknown topic kind.")
+    return JSONResponse({"topics": ask_sessions.list_topics(user["id"], kind)})
 
 
 def _topic_or_404(user_id: int, topic_id: str) -> dict:
@@ -2370,7 +2389,7 @@ async def ask_export(request: Request):
     if not turns:
         raise ApiError(status_code=400, detail="Nothing to export yet.")
 
-    title = topic.get("title") or "Ask Books"
+    title = topic.get("title") or "Ask your books"
     try:
         pdf_bytes = await asyncio.to_thread(pdf_export.generate_text_pdf, title, _qa_text(turns))
     except Exception:

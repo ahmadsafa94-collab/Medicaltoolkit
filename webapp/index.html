@@ -15,7 +15,7 @@
     changes style.css or app.js, or the fix for THIS bug silently stops
     covering your NEXT change.
   -->
-  <link rel="stylesheet" href="style.css?v=18" />
+  <link rel="stylesheet" href="style.css?v=19" />
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 </head>
@@ -67,17 +67,22 @@
           Add two or more drugs. Each one's own FDA label is read, and only what those labels
           actually say about the others is reported.
         </p>
-        <div class="name-editor drug-add-row">
-          <input id="interaction-input" type="text" placeholder="Drug name, e.g. warfarin"
-                 autocomplete="off" enterkeyhint="done" />
+        <div class="drug-input-row">
+          <input id="interaction-input" class="drug-input" type="text" placeholder="Drug name, e.g. warfarin"
+                 autocomplete="off" enterkeyhint="done" dir="auto" />
           <button id="interaction-add" class="btn">Add</button>
         </div>
         <div id="interaction-suggestions" class="suggestions" hidden></div>
         <div id="interaction-chips" class="chips"></div>
-        <div class="flash-review-row" style="margin-top:12px;">
-          <button id="interaction-check" class="btn" disabled>Check interactions</button>
-          <button id="interaction-clear" class="btn secondary" hidden>Clear</button>
+        <button id="interaction-check" class="btn ask-send-btn" disabled>Check interactions</button>
+        <div class="ask-compose-tools">
+          <button id="interaction-clear" class="mini-btn" hidden>🧹 Clear drugs</button>
+          <button id="interaction-history" class="mini-btn">🕘 Saved checks</button>
         </div>
+      </div>
+      <div id="interaction-topics" class="panel" hidden>
+        <div class="reader-source-head"><strong>🕘 Saved interaction checks</strong><button class="mini-btn topics-close">✕</button></div>
+        <div class="topics-list"></div>
       </div>
       <div id="interaction-result" class="panel" hidden></div>
     </div>
@@ -89,21 +94,30 @@
           Pick a drug, then ask anything about it in your own words. Answers come from that drug's
           official FDA label, and follow-up questions keep the thread.
         </p>
-        <div class="name-editor drug-add-row">
-          <input id="lookup-drug-input" type="text" placeholder="Drug name, e.g. metformin"
-                 autocomplete="off" enterkeyhint="done" />
+        <div class="drug-input-row">
+          <input id="lookup-drug-input" class="drug-input" type="text" placeholder="Drug name, e.g. metformin"
+                 autocomplete="off" enterkeyhint="done" dir="auto" />
           <button id="lookup-drug-set" class="btn">Set</button>
         </div>
         <div id="lookup-suggestions" class="suggestions" hidden></div>
         <p id="lookup-current" class="muted" hidden></p>
+        <div class="ask-compose-tools">
+          <button id="lookup-history" class="mini-btn">🕘 Saved questions</button>
+        </div>
+      </div>
+      <div id="lookup-topics" class="panel" hidden>
+        <div class="reader-source-head"><strong>🕘 Saved drug questions</strong><button class="mini-btn topics-close">✕</button></div>
+        <div class="topics-list"></div>
       </div>
       <div id="lookup-thread" class="qa-thread"></div>
-      <div class="panel" id="lookup-ask-panel" hidden>
-        <textarea id="lookup-question" rows="3"
-                  placeholder="e.g. Can it be used in renal impairment?"></textarea>
-        <div class="flash-review-row" style="margin-top:10px;">
-          <button id="lookup-ask" class="btn">Ask</button>
-          <button id="lookup-reset" class="btn secondary">New drug</button>
+      <div class="panel ask-compose" id="lookup-ask-panel" hidden>
+        <p id="lookup-topic-note" class="muted ask-topic-note" hidden>Follow-up questions keep the context. Tap 🆕 New drug to start fresh.</p>
+        <textarea id="lookup-question" class="compose-box" rows="4" dir="auto"
+                  placeholder="Type your question… e.g. Can it be used in renal impairment?"></textarea>
+        <button id="lookup-ask" class="btn ask-send-btn">Ask</button>
+        <div class="ask-compose-tools">
+          <button id="lookup-reset" class="mini-btn">🆕 New drug</button>
+          <button id="lookup-topic-pdf" class="mini-btn" hidden>📄 Conversation as PDF</button>
         </div>
       </div>
     </div>
@@ -138,7 +152,7 @@
 
   <!-- ============ ASK (root, third tab): several books at once ============ -->
   <section id="view-ask" class="view" hidden>
-    <header class="topbar"><h1>💬 Ask Books</h1></header>
+    <header class="topbar"><h1>💬 Ask your books</h1></header>
 
     <div class="panel">
       <p class="muted">
@@ -201,7 +215,7 @@
         <button id="ask-clear" class="mini-btn">Untick all</button>
       </div>
       <p id="ask-topic-note" class="muted ask-topic-note" hidden>Follow-up questions continue this topic. Tap 🆕 New topic to start fresh.</p>
-      <textarea id="ask-question" rows="4" dir="auto" placeholder="Type your question… e.g. First-line treatment for bipolar depression?"></textarea>
+      <textarea id="ask-question" class="compose-box" rows="4" dir="auto" placeholder="Type your question… e.g. First-line treatment for bipolar depression?"></textarea>
       <button id="ask-send" class="btn ask-send-btn" disabled>Ask</button>
       <div class="ask-compose-tools">
         <button id="ask-new" class="mini-btn">🆕 New topic</button>
@@ -344,10 +358,10 @@
   -->
   <nav id="tabbar" class="tabbar">
     <button class="tab is-active" data-tab="view-shelf"><span>📚</span><small>Shelf</small></button>
-    <button class="tab" data-tab="view-ask"><span>💬</span><small>Ask</small></button>
+    <button class="tab" data-tab="view-ask"><span>💬</span><small>Ask your books</small></button>
     <button class="tab" data-tab="view-drugs"><span>💊</span><small>Drugs</small></button>
   </nav>
 
-  <script src="app.js?v=18"></script>
+  <script src="app.js?v=19"></script>
 </body>
 </html>

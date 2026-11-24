@@ -1015,7 +1015,7 @@ async def handle_shared_pdf_document(message: Message, state: FSMContext):
         await message.answer(
             f"That file is {doc.file_size / 1024 / 1024:.1f}MB -- over Telegram's "
             f"{MAX_UPLOAD_BYTES // 1024 // 1024}MB limit for files sent to a bot. Upload it from the mini "
-            "app's 💬 Ask tab instead (🛠 Manage specialty libraries -> Upload a PDF)."
+            "app's 💬 Ask your books tab instead (🛠 Manage specialty libraries -> Upload a PDF)."
         )
         return
 
@@ -1062,10 +1062,10 @@ async def _report_shared_index(status_msg, book_id: str, title: str, specialty: 
             book = shared_library.get_book(book_id) or {}
             text = (
                 f"✅ {title} is ready in {specialty} ({book.get('num_chunks', 0)} passages). "
-                "Every user can now tick it in the 💬 Ask tab."
+                "Every user can now tick it in the 💬 Ask your books tab."
             )
         elif job.get("status") == "error":
-            text = f"❌ {title}: indexing failed ({job.get('error')}). Retry from the mini app's 💬 Ask tab."
+            text = f"❌ {title}: indexing failed ({job.get('error')}). Retry from the mini app's 💬 Ask your books tab."
         else:
             text = f"📚 {title} ({page_count} pages) added to {specialty}. {job.get('progress') or 'Making it searchable...'}"
         if text != last:

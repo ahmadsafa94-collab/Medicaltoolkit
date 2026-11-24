@@ -54,13 +54,24 @@ def valid_id(topic_id) -> bool:
     return isinstance(topic_id, str) and 8 <= len(topic_id) <= 40 and topic_id.replace("-", "").isalnum()
 
 
-def append_turn(user_id: int, topic_id: str, books: list[dict], question: str, answer: str, sources: list) -> None:
+KINDS = ("books", "drug", "interactions")
+
+
+def append_turn(
+    user_id: int, topic_id: str, books: list[dict], question: str, answer: str, sources: list,
+    kind: str = "books", title: str | None = None,
+) -> None:
+    """
+    kind: "books" (Ask your books), "drug" (Drug LookUp -- books holds the
+    drug), or "interactions" (one check per topic). title defaults to the
+    first question.
+    """
     with _lock:
         data = _load(user_id)
         now = time.time()
         topic = data.get(topic_id)
         if topic is None:
-            topic = {"title": question.strip()[:120], "created": now, "turns": []}
+            topic = {"title": (title or question).strip()[:120], "created": now, "turns": [], "kind": kind}
         topic["updated"] = now
         topic["books"] = [{"book_id": b["book_id"], "title": b["title"]} for b in books]
         topic["turns"].append({"q": question, "a": answer, "sources": sources, "ts": now})
@@ -72,7 +83,7 @@ def append_turn(user_id: int, topic_id: str, books: list[dict], question: str, a
         _save(user_id, data)
 
 
-def list_topics(user_id: int) -> list[dict]:
+def list_topics(user_id: int, kind: str | None = None) -> list[dict]:
     data = _load(user_id)
     out = [
         {
@@ -81,8 +92,10 @@ def list_topics(user_id: int) -> list[dict]:
             "updated": t.get("updated", 0),
             "turns": len(t.get("turns", [])),
             "books": [b["title"] for b in t.get("books", [])],
+            "kind": t.get("kind", "books"),
         }
         for tid, t in data.items()
+        if kind is None or t.get("kind", "books") == kind
     ]
     out.sort(key=lambda t: t["updated"], reverse=True)
     return out
