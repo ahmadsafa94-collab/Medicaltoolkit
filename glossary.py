@@ -77,8 +77,8 @@ _ENTRIES: list[tuple[str, str, str]] = [
     ("F/U", "abbr", "Follow-up."),
     ("BMI", "abbr", "Body mass index (weight in kg / height in m^2). See /calculators."),
     ("BSA", "abbr", "Body surface area. See /calculators."),
-    ("eGFR", "abbr", "Estimated glomerular filtration rate -- an estimate of kidney function. See /calculators or 'Calculate dose by renal function' under /dose."),
-    ("CrCl", "abbr", "Creatinine clearance -- a different renal-function estimate from eGFR, requires weight. See /calculators."),
+    ("eGFR", "abbr", "Estimated glomerular filtration rate -- an estimate of kidney function. Calculate it with 'Calculate dose by renal function' under /dose."),
+    ("CrCl", "abbr", "Creatinine clearance -- a different renal-function estimate from eGFR, requires weight. Calculate it with 'Calculate dose by renal function' under /dose."),
     ("INR", "abbr", "International normalized ratio -- standardizes prothrombin time across labs, used to monitor warfarin."),
     ("PT/PTT", "abbr", "Prothrombin time / partial thromboplastin time -- coagulation studies."),
     ("CBC", "abbr", "Complete blood count."),
@@ -129,7 +129,24 @@ _ENTRIES: list[tuple[str, str, str]] = [
     ("Lactate", "lab", "~0.5-2.2 mmol/L (typical adult range; verify against your lab)."),
 ]
 
-_INDEX = {term.upper(): (term, category, definition) for term, category, definition in _ENTRIES}
+def _build_index() -> dict:
+    """
+    Terms listed twice (TSH and HbA1c are both an abbreviation and a lab
+    value) are merged: a dict built straight from the list kept only the
+    last one, so the abbreviation's meaning was unreachable.
+    """
+    index = {}
+    for term, category, definition in _ENTRIES:
+        key = term.upper()
+        if key in index:
+            first_term, first_cat, first_def = index[key]
+            index[key] = (first_term, first_cat, f"{first_def}\nTypical range: {definition}")
+        else:
+            index[key] = (term, category, definition)
+    return index
+
+
+_INDEX = _build_index()
 
 
 class GlossaryNotFoundError(Exception):
@@ -156,7 +173,7 @@ def search_glossary(prefix: str, limit: int = 10) -> list[str]:
     prefix = prefix.strip().upper()
     if not prefix:
         return []
-    matches = [term for term, _cat, _def in _ENTRIES if term.upper().startswith(prefix)]
+    matches = list(dict.fromkeys(term for term, _cat, _def in _ENTRIES if term.upper().startswith(prefix)))
     if len(matches) < limit:
         # also allow matches anywhere in the term for short abbreviations buried mid-string
         for term, _cat, _def in _ENTRIES:

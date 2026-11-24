@@ -13,6 +13,7 @@ keyboards.py's admin_menu_kb() for the top-level menu these all hang off of.
 """
 
 import asyncio
+import math
 import logging
 import time
 
@@ -318,10 +319,12 @@ async def handle_grant_custom_days(message: Message, state: FSMContext):
 
     try:
         days = int((message.text or "").strip())
-        if days <= 0:
+        # Capped: a huge number overflowed the date shown in My Plan and the
+        # admin lookup for that user.
+        if days <= 0 or days > 36500:
             raise ValueError
     except ValueError:
-        await message.answer("Please send a positive whole number of days (e.g. 45), or /cancel to abort.")
+        await message.answer("Please send a whole number of days from 1 to 36500 (e.g. 45), or /cancel to abort.")
         return
 
     await state.clear()
@@ -675,10 +678,11 @@ async def cmd_price_book(message: Message):
     request_id = parts[1]
     try:
         price_usd = float(parts[2])
-        if price_usd <= 0:
+        # "nan" and "inf" parse as floats and passed a "<= 0" check.
+        if not math.isfinite(price_usd) or price_usd <= 0 or price_usd > 1000:
             raise ValueError
     except ValueError:
-        await message.answer("The price must be a positive number, e.g. 12.50.")
+        await message.answer("The price must be a number between 0 and 1000 (USD), e.g. 12.50.")
         return
 
     record = book_requests.get_request(request_id)
