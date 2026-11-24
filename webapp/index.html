@@ -15,19 +15,34 @@
     changes style.css or app.js, or the fix for THIS bug silently stops
     covering your NEXT change.
   -->
-  <link rel="stylesheet" href="style.css?v=21" />
-  <!-- THEME PREVIEW (not deployed): ?theme=sky|mint|lavender|sunrise|midnight -->
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fira+Sans:wght@400;500;600;700&family=Poppins:wght@500;600;700&family=Quicksand:wght@600;700&family=Source+Sans+3:wght@400;600;700&family=Vazirmatn:wght@400;600;700&display=swap" />
-  <link rel="stylesheet" href="themes.css?v=21" />
+  <link rel="stylesheet" href="style.css?v=22" />
+  <link rel="stylesheet" href="fonts.css?v=22" />
+  <link rel="stylesheet" href="themes.css?v=22" />
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <script>
+    // Sky (light) or Midnight (dark), following the user's Telegram theme;
+    // ?theme=<name> overrides it for testing.
     (function () {
-      try {
-        var t = new URLSearchParams(location.search).get("theme");
-        if (t) document.documentElement.setAttribute("data-theme", t);
-      } catch (e) {}
+      var root = document.documentElement, forced = null;
+      try { forced = new URLSearchParams(location.search).get("theme"); } catch (e) {}
+      var tg = window.Telegram && window.Telegram.WebApp;
+      function apply() {
+        var dark = tg && tg.colorScheme
+          ? tg.colorScheme === "dark"
+          : !!(window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
+        var theme = forced || (dark ? "midnight" : "sky");
+        root.setAttribute("data-theme", theme);
+        if (tg) {
+          try {
+            tg.setHeaderColor(theme === "midnight" ? "#12223b" : "#bfe0fb");
+            tg.setBackgroundColor(theme === "midnight" ? "#0c1524" : "#f2f8fe");
+          } catch (e) {}
+        }
+      }
+      apply();
+      if (tg && tg.onEvent) tg.onEvent("themeChanged", apply);
     })();
   </script>
-  <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 </head>
 <body>
@@ -449,6 +464,6 @@
     <button class="tab" data-tab="view-drugs"><span>💊</span><small>Drugs</small></button>
   </nav>
 
-  <script src="app.js?v=21"></script>
+  <script src="app.js?v=22"></script>
 </body>
 </html>

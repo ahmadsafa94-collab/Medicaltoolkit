@@ -1,11 +1,13 @@
 /* =====================================================================
-   Themes. Each html[data-theme] sets a palette and a pair of fonts; the
-   rules after the palettes restyle the app from those tokens only. With
-   no data-theme the app keeps its original look (style.css alone).
+   Themes. Sky (sky blue and white) is the app's look; Midnight is its
+   dark version, used when the user's Telegram is in dark mode (the
+   script in index.html picks one and sets html[data-theme]). Each block
+   sets a palette and a pair of fonts; the rules after the palettes
+   restyle the app from those tokens only.
 
-   Fonts are open-licence Google Fonts, chosen from Adobe Fonts'
-   recommendations for app UI / healthcare (Source Sans 3, Fira Sans,
-   Poppins, Quicksand). Vazirmatn follows in every stack so Persian and
+   Fonts (self-hosted, see fonts.css): Poppins for headings and Source
+   Sans 3 for text, chosen from Adobe Fonts' recommendations for app and
+   healthcare interfaces. Vazirmatn follows in every stack so Persian and
    Arabic text gets a matching, properly joined face.
    ===================================================================== */
 
@@ -27,72 +29,6 @@ html[data-theme="sky"] {
   --shelf-wood: #8cc4f2;
   --shelf-wood-dark: #5ea7e6;
   --card-shadow: 0 2px 10px rgba(31, 127, 216, 0.08);
-  --font-body: "Source Sans 3", "Vazirmatn", system-ui, sans-serif;
-  --font-head: "Poppins", "Vazirmatn", system-ui, sans-serif;
-}
-
-html[data-theme="mint"] {
-  --bg: #f1faf7;
-  --secondary-bg: #ffffff;
-  --text: #0f2e2a;
-  --hint: #5f7d77;
-  --link: #0c8a7d;
-  --button: #10a393;
-  --button-text: #ffffff;
-  --primary-soft: #dcf4ee;
-  --border: #cfe9e2;
-  --head-bg: linear-gradient(180deg, #c3eee4 0%, #e7f8f3 70%, #f1faf7 100%);
-  --head-ink: #0b4a42;
-  --shelf-bg: linear-gradient(180deg, #d3f1ea 0%, #f0fbf8 100%);
-  --shelf-ink: #0f3f39;
-  --shelf-hint: #4f7a72;
-  --shelf-wood: #7fd3c3;
-  --shelf-wood-dark: #46b5a2;
-  --card-shadow: 0 2px 10px rgba(12, 138, 125, 0.08);
-  --font-body: "Fira Sans", "Vazirmatn", system-ui, sans-serif;
-  --font-head: "Fira Sans", "Vazirmatn", system-ui, sans-serif;
-}
-
-html[data-theme="lavender"] {
-  --bg: #f6f5ff;
-  --secondary-bg: #ffffff;
-  --text: #1e1b3a;
-  --hint: #75719a;
-  --link: #5a54d6;
-  --button: #6760e3;
-  --button-text: #ffffff;
-  --primary-soft: #ebe9ff;
-  --border: #e0ddf7;
-  --head-bg: linear-gradient(180deg, #dcd8ff 0%, #efedff 70%, #f6f5ff 100%);
-  --head-ink: #2f2a7a;
-  --shelf-bg: linear-gradient(180deg, #e4e1ff 0%, #f7f6ff 100%);
-  --shelf-ink: #2b2766;
-  --shelf-hint: #6e6aa0;
-  --shelf-wood: #b6b0f5;
-  --shelf-wood-dark: #8d85ec;
-  --card-shadow: 0 2px 10px rgba(90, 84, 214, 0.08);
-  --font-body: "Source Sans 3", "Vazirmatn", system-ui, sans-serif;
-  --font-head: "Quicksand", "Vazirmatn", system-ui, sans-serif;
-}
-
-html[data-theme="sunrise"] {
-  --bg: #fff7f2;
-  --secondary-bg: #ffffff;
-  --text: #3a1f17;
-  --hint: #8f6e63;
-  --link: #d4553c;
-  --button: #ea6a4f;
-  --button-text: #ffffff;
-  --primary-soft: #ffe8df;
-  --border: #f5ddd3;
-  --head-bg: linear-gradient(180deg, #ffd9c8 0%, #ffeee6 70%, #fff7f2 100%);
-  --head-ink: #7a2c1b;
-  --shelf-bg: linear-gradient(180deg, #ffe4d6 0%, #fff8f4 100%);
-  --shelf-ink: #5a2a1d;
-  --shelf-hint: #9a6f62;
-  --shelf-wood: #f3b49b;
-  --shelf-wood-dark: #e48e6f;
-  --card-shadow: 0 2px 10px rgba(212, 85, 60, 0.08);
   --font-body: "Source Sans 3", "Vazirmatn", system-ui, sans-serif;
   --font-head: "Poppins", "Vazirmatn", system-ui, sans-serif;
 }
