@@ -351,11 +351,9 @@ function openBookMenu(book) {
   showActionSheet(`
     <div class="sheet-title">${escapeHtml(book.title)}</div>
     <button id="sheet-edit-name">✏️ Edit name</button>
-    <button id="sheet-change-cover">🎨 Change cover color</button>
     <button id="sheet-delete" class="danger">🗑 Delete book</button>
   `);
   document.getElementById("sheet-edit-name").addEventListener("click", () => promptRenameFromShelf(book));
-  document.getElementById("sheet-change-cover").addEventListener("click", () => openCoverPicker(book));
   document.getElementById("sheet-delete").addEventListener("click", () => confirmDeleteBook(book));
 }
 
@@ -790,7 +788,47 @@ async function openBook(bookId) {
   showView("view-book");
 }
 
+function isSpecialtyBook(book) {
+  return !!book && book.source === "shared";
+}
+
+// Specialty books are divided into chapters for everyone when the admin
+// adds them, so they have no "Divide into chapters" step -- if chapters
+// aren't there yet, they're still being prepared.
+function noChaptersText(what) {
+  return isSpecialtyBook(currentBook)
+    ? `This book's chapters are still being prepared. Please check back in a few minutes to ${what}.`
+    : `Divide this book into chapters first, then come back to ${what}.`;
+}
+
+// "Ask questions using AI" inside a book goes to the 💬 Ask tab with only
+// this book ticked, ready for a question -- one place to ask, whether it's
+// one book or several. A book that isn't searchable yet is made searchable
+// first and ticked when that finishes.
+async function askAboutCurrentBook() {
+  const book = currentBook;
+  showView("view-ask");
+  await loadAskLibrary();
+  askSelected.clear();
+  if (isSpecialtyBook(book)) {
+    const spec = askLib.specialties.find((x) => x.books.some((b) => b.book_id === book.book_id));
+    if (spec) askSpecialty = spec.name;
+  }
+  if (book.qa_indexed) {
+    askSelected.add(book.book_id);
+  } else if (!isSpecialtyBook(book)) {
+    askIndexOwn(book.book_id);  // ticks it itself once searchable
+  }
+  askStartTopic();
+  renderAskLibrary();
+  const q = document.getElementById("ask-question");
+  q.focus();
+  q.scrollIntoView({ block: "center" });
+}
+
 function renderBookHeader() {
+  // Specialty books come divided into chapters; the button would only confuse.
+  document.querySelector('.action-btn[data-action="chapters"]').hidden = isSpecialtyBook(currentBook);
   document.getElementById("book-title").textContent = currentBook.title;
   const chStatus = currentBook.chapters_status;
   document.getElementById("book-meta").textContent =
@@ -817,7 +855,7 @@ document.querySelectorAll(".action-btn").forEach((btn) => {
     if (action === "chapters") handleChapters();
     else if (action === "read") openReader();
     else if (action === "summarize") handleSummarizeMenu();
-    else if (action === "ask") handleAskMenu();
+    else if (action === "ask") askAboutCurrentBook();
     else if (action === "quiz") handleQuizMenu();
     else if (action === "flashcards") handleFlashcardsMenu();
   });
@@ -1335,7 +1373,7 @@ document.getElementById("reader-bookmark").addEventListener("click", async () =>
 function handleSummarizeMenu() {
   const chapters = currentBook.chapters || [];
   if (!chapters.length) {
-    panel(`<p>Divide this book into chapters first, then come back to summarize it.</p>`);
+    panel(`<p>${noChaptersText("summarize it")}</p>`);
     return;
   }
   const options = chapters
@@ -1588,11 +1626,18 @@ async function openQaSession(sessionId) {
 // superscript citation numbers, and appends a numbered source list at the
 // bottom of the bubble -- exactly the footnote-style citation the mini
 // app's Ask AI panel is meant to show.
+// Source lines under an answer show a short preview; tapping one opens the
+// book at that page with the full passage shown and highlighted.
+function sourcePreview(text) {
+  const t = String(text || "").replace(/\s+/g, " ").trim();
+  return t.length > 100 ? t.slice(0, 100).replace(/\s\S*$/, "") + "…" : t;
+}
+
 function renderAnswerHtml(text, sources) {
   const body = richText(text);
   if (!sources || !sources.length) return body;
   const lines = sources
-    .map((s) => `<span class="src-line" data-n="${s.n}"><span class="n">[${s.n}]</span><span>p.${s.page} — ${escapeHtml(s.text)}</span></span>`)
+    .map((s) => `<span class="src-line" data-n="${s.n}"><span class="n">[${s.n}]</span><span>p.${s.page} — ${escapeHtml(sourcePreview(s.text))}</span></span>`)
     .join("");
   return `${body}<span class="qa-sources">${lines}</span>`;
 }
@@ -1716,7 +1761,7 @@ let currentQuizMeta = { difficulty: "medium", chapterTitles: [] };
 function handleQuizMenu() {
   const chapters = currentBook.chapters || [];
   if (!chapters.length) {
-    panel(`<p>Divide this book into chapters first, then come back to create a quiz.</p>`);
+    panel(`<p>${noChaptersText("create a quiz")}</p>`);
     return;
   }
   quizDifficulty = "medium";
@@ -2082,7 +2127,7 @@ function renderFlashcardsMenu() {
   if (hardCount) reviewButtons.push(`<button class="btn secondary flash-mode-btn" data-mode="hard">❗ Review hard (${hardCount})</button>`);
 
   const genSection = !chapters.length
-    ? `<p class="muted">Divide this book into chapters first, then come back to generate flashcards.</p>`
+    ? `<p class="muted">${noChaptersText("generate flashcards")}</p>`
     : `
       <p style="margin-top:16px;"><strong>Generate cards from chapters:</strong></p>
       <div class="quiz-select-row">
@@ -2816,6 +2861,7 @@ let askLib = null;            // last /api/ask/library response
 let askSelected = new Set();  // ticked book ids (own and shared)
 let askSpecialty = null;      // name of the specialty being shown
 let askThread = [];           // [{q, a, sources}] -- sent back as history
+let askTopicId = null;        // server-side id of the saved topic these turns belong to
 let askBusy = false;
 let askPollTimer = null;
 let askIndexingOwn = new Set();  // own books whose index job this tab started
@@ -2967,7 +3013,7 @@ function askAnswerHtml(text, sources) {
     .map(
       (s) =>
         `<span class="src-line" data-n="${s.n}"><span class="n">[${s.n}]</span>` +
-        `<span><strong>${escapeHtml(s.title)}</strong>, p.${s.page} — ${escapeHtml(s.text)}</span></span>`
+        `<span><strong>${escapeHtml(s.title)}</strong>, p.${s.page} — ${escapeHtml(sourcePreview(s.text))}</span></span>`
     )
     .join("");
   return `${body}<span class="qa-sources">${lines}</span>`;
@@ -2979,10 +3025,91 @@ function renderAskThread() {
     .map(
       (t, i) =>
         `<div class="qa-msg q" dir="auto">${escapeHtml(t.q)}</div>` +
-        `<div class="qa-msg a" data-turn="${i}">${t.sources ? askAnswerHtml(t.a, t.sources) : escapeHtml(t.a)}</div>`
+        `<div class="qa-msg a" data-turn="${i}">${t.sources ? askAnswerHtml(t.a, t.sources) : escapeHtml(t.a)}` +
+        (t.sources ? `<div class="ask-turn-tools"><button class="mini-btn" data-export-turn="${i}">📄 Save as PDF</button></div>` : "") +
+        `</div>`
     )
     .join("");
   box.scrollTop = box.scrollHeight;
+  const answered = askThread.some((t) => t.sources);
+  document.getElementById("ask-topic-note").hidden = !answered;
+  document.getElementById("ask-topic-pdf").hidden = !answered;
+}
+
+function askStartTopic() {
+  askThread = [];
+  askTopicId = null;
+  renderAskThread();
+}
+
+// Answers go to the user's Telegram chat as a PDF: the in-app browser
+// can't save files itself. One answer, or the whole topic.
+async function askExport(btn, turn) {
+  if (!askTopicId) return;
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Sending…";
+  try {
+    await api("/api/ask/export", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(turn === undefined ? { topic_id: askTopicId } : { topic_id: askTopicId, turn }),
+    });
+    btn.textContent = "✅ Sent to your chat";
+    setTimeout(() => { btn.textContent = label; btn.disabled = false; }, 2500);
+  } catch (e) {
+    btn.textContent = label;
+    btn.disabled = false;
+    alertMsg(e.message);
+  }
+}
+
+async function askShowTopics() {
+  const box = document.getElementById("ask-topics");
+  const list = document.getElementById("ask-topics-list");
+  box.hidden = false;
+  list.innerHTML = `<p class="muted">Loading…</p>`;
+  let topics;
+  try {
+    ({ topics } = await api("/api/ask/topics"));
+  } catch (e) {
+    list.innerHTML = `<p class="muted">${escapeHtml(e.message)}</p>`;
+    return;
+  }
+  list.innerHTML = topics.length
+    ? topics
+        .map((t) => {
+          const when = new Date(t.updated * 1000).toLocaleDateString();
+          return (
+            `<div class="topic-row"><button class="topic-main" data-topic="${t.topic_id}">` +
+            `<span class="topic-title">${escapeHtml(t.title)}</span>` +
+            `<span class="topic-meta">${t.turns} answer${t.turns === 1 ? "" : "s"} · ${when} · ${escapeHtml(t.books.join(", "))}</span>` +
+            `</button><button class="mini-btn" data-del-topic="${t.topic_id}" title="Delete">🗑</button></div>`
+          );
+        })
+        .join("")
+    : `<p class="muted">No saved topics yet. Every question you ask here is saved automatically.</p>`;
+  box.scrollIntoView({ block: "start", behavior: "smooth" });
+}
+
+// Reopen a saved topic: its answers come back, its books are ticked again
+// (those still available), and new questions continue it.
+async function askOpenTopic(topicId) {
+  let topic;
+  try {
+    topic = await api(`/api/ask/topics/${topicId}`);
+  } catch (e) {
+    return alertMsg(e.message);
+  }
+  askTopicId = topicId;
+  askThread = (topic.turns || []).map((t) => ({ q: t.q, a: t.a, sources: t.sources || [] }));
+  const available = new Set(askAllBooks().filter((b) => b.qa_indexed).map((b) => b.book_id));
+  askSelected.clear();
+  (topic.books || []).forEach((b) => { if (available.has(b.book_id)) askSelected.add(b.book_id); });
+  document.getElementById("ask-topics").hidden = true;
+  renderAskLibrary();
+  renderAskThread();
+  document.getElementById("ask-thread").scrollIntoView({ block: "start", behavior: "smooth" });
 }
 
 async function askSend() {
@@ -3005,6 +3132,7 @@ async function askSend() {
       body: JSON.stringify({
         book_ids: Array.from(askSelected),
         question,
+        topic_id: askTopicId || (askTopicId = genId()),
         history: askThread.slice(0, -1).map((t) => ({ question: t.q, answer: t.a })),
       }),
     });
@@ -3305,9 +3433,20 @@ function wireAskTab() {
       if (src) openSource(src.book_id, src.page, src.text, src.n);
       return;
     }
+    const topicBtn = e.target.closest("button.topic-main");
+    if (topicBtn) return askOpenTopic(topicBtn.dataset.topic);
     const btn = e.target.closest("button.mini-btn");
     if (!btn) return;
     e.preventDefault();
+    if (btn.dataset.exportTurn !== undefined) return askExport(btn, parseInt(btn.dataset.exportTurn, 10));
+    if (btn.dataset.delTopic) {
+      return api(`/api/ask/topics/${btn.dataset.delTopic}`, { method: "DELETE" })
+        .then(() => {
+          if (askTopicId === btn.dataset.delTopic) askStartTopic();
+          askShowTopics();
+        })
+        .catch((err) => alertMsg(err.message));
+    }
     if (btn.dataset.open) return openBook(btn.dataset.open);
     if (btn.id === "ask-tick-all") return askTickAll();
     if (btn.id === "ask-suggest") {
@@ -3365,8 +3504,20 @@ function wireAskTab() {
   const viewer = document.getElementById("cover-viewer");
   viewer.addEventListener("click", () => { viewer.hidden = true; });
   document.getElementById("ask-new").addEventListener("click", () => {
-    askThread = [];
-    renderAskThread();
+    askStartTopic();
+    document.getElementById("ask-question").focus();
+  });
+  document.getElementById("ask-history").addEventListener("click", askShowTopics);
+  document.getElementById("ask-topics-close").addEventListener("click", () => {
+    document.getElementById("ask-topics").hidden = true;
+  });
+  document.getElementById("ask-topic-pdf").addEventListener("click", (e) => askExport(e.currentTarget));
+  // The question box grows with what's typed (up to 40% of the screen).
+  const q = document.getElementById("ask-question");
+  const grow = () => { q.style.height = "auto"; q.style.height = Math.min(q.scrollHeight + 2, window.innerHeight * 0.4) + "px"; };
+  q.addEventListener("input", grow);
+  q.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); askSend(); }
   });
   document.getElementById("ask-clear").addEventListener("click", () => {
     askSelected.clear();

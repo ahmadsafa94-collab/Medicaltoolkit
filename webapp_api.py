@@ -47,6 +47,7 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
 import anki_export
+import ask_sessions
 import book_requests
 import chapter_ai
 import covers
@@ -1888,6 +1889,16 @@ async def ask_multi(request: Request):
     except Exception:
         logger.exception("Multi-book Q&A failed for books=%s", [b["book_id"] for b in books])
         raise ApiError(status_code=500, detail="Something went wrong answering that (not counted). Please try again.")
+
+    # Saved under the client's topic id, so the whole topic can be reopened,
+    # continued or exported later. Best effort: a failed save must not cost
+    # the user the answer they just got.
+    topic_id = body.get("topic_id")
+    if ask_sessions.valid_id(topic_id):
+        try:
+            ask_sessions.append_turn(user["id"], topic_id, books, question, result["answer"], result["sources"])
+        except Exception:
+            logger.exception("Couldn't save Ask topic %s", topic_id)
     return JSONResponse(result)
 
 
@@ -2299,6 +2310,109 @@ async def suggest_book(request: Request):
     return JSONResponse({"sent": True})
 
 
+# ---------------------------------------------------------------------------
+# Saved Ask topics: list, reopen, delete, export as PDF
+# ---------------------------------------------------------------------------
+
+async def ask_topics(request: Request):
+    user = require_user(request)
+    return JSONResponse({"topics": ask_sessions.list_topics(user["id"])})
+
+
+def _topic_or_404(user_id: int, topic_id: str) -> dict:
+    topic = ask_sessions.get_topic(user_id, topic_id) if ask_sessions.valid_id(topic_id) else None
+    if topic is None:
+        raise ApiError(status_code=404, detail="That saved topic wasn't found.")
+    return topic
+
+
+async def ask_topic(request: Request):
+    user = require_user(request)
+    return JSONResponse(_topic_or_404(user["id"], request.path_params["topic_id"]))
+
+
+async def ask_topic_delete(request: Request):
+    user = require_user(request)
+    if not ask_sessions.delete_topic(user["id"], request.path_params["topic_id"]):
+        raise ApiError(status_code=404, detail="That saved topic wasn't found.")
+    return JSONResponse({"deleted": True})
+
+
+def _qa_text(turns: list[dict]) -> str:
+    """The exported body: every question, its answer, and its sources (book + page)."""
+    blocks = []
+    for i, t in enumerate(turns, 1):
+        lines = [f"## Q{i}: {t['q']}", "", t["a"]]
+        if t.get("sources"):
+            lines += ["", "**Sources**"]
+            for s in t["sources"]:
+                where = f"{s.get('title')}, p.{s.get('page')}" if s.get("title") else f"p.{s.get('page')}"
+                lines.append(f"[{s.get('n')}] {where} — {s.get('text', '')}")
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)
+
+
+async def ask_export(request: Request):
+    """
+    Sends an Ask-tab answer -- one turn, or a whole saved topic -- to the
+    user's chat as a PDF (the in-app WebView can't save files itself; see
+    export_answer_pdf).
+    """
+    user = require_user(request)
+    body = await _json_body(request)
+    topic = _topic_or_404(user["id"], body.get("topic_id"))
+    turns = topic.get("turns", [])
+    index = body.get("turn")
+    if index is not None:
+        if not isinstance(index, int) or isinstance(index, bool) or not (0 <= index < len(turns)):
+            raise ApiError(status_code=400, detail="Invalid answer number.")
+        turns = [turns[index]]
+    if not turns:
+        raise ApiError(status_code=400, detail="Nothing to export yet.")
+
+    title = topic.get("title") or "Ask Books"
+    try:
+        pdf_bytes = await asyncio.to_thread(pdf_export.generate_text_pdf, title, _qa_text(turns))
+    except Exception:
+        logger.exception("Ask topic PDF export failed")
+        raise ApiError(status_code=500, detail="Couldn't build the PDF. Please try again.")
+    try:
+        await tg_bot.send_document(
+            chat_id=user["id"],
+            document=BufferedInputFile(pdf_bytes, filename=safe_pdf_filename(f"{title[:60]} - Answers")),
+            caption=f"📄 {'Answer' if len(turns) == 1 else f'{len(turns)} answers'} -- {title[:80]}",
+        )
+    except TelegramAPIError:
+        logger.exception("Failed to send Ask export PDF to chat_id=%s", user["id"])
+        raise ApiError(
+            status_code=502,
+            detail="Couldn't send that to your Telegram chat. Make sure you've started a chat with the bot, then try again.",
+        )
+    return JSONResponse({"sent": True})
+
+
+async def backfill_shared_chapters() -> None:
+    """
+    Divide every indexed specialty book that has no chapters yet -- books
+    uploaded before division became automatic. Runs once at startup, one
+    book at a time; a book that fails is simply left for next time.
+    """
+    for book_id, book in list(shared_library.list_books().items()):
+        if not book.get("qa_indexed") or book.get("chapters"):
+            continue
+        if (get_job(book_id, "index") or {}).get("status") == "running":
+            continue  # the index job divides it itself when it finishes
+        try:
+            chapters = await asyncio.wait_for(
+                asyncio.to_thread(detect_chapters_cached, book["pdf_path"]),
+                timeout=scaled_timeout(CHAPTER_DIVISION_TIMEOUT_SECONDS, book.get("page_count") or 0),
+            )
+            shared_library.set_chapters(book_id, compute_chapter_ranges(chapters, book.get("page_count") or 1))
+            logger.info("Divided specialty book %s into %d chapters", book_id, len(chapters))
+        except Exception:
+            logger.exception("Couldn't divide specialty book %s into chapters (will retry next start)", book_id)
+
+
 routes = [
     Route("/api/books", list_books, methods=["GET"]),
     Route("/api/upload", upload_book, methods=["POST"]),
@@ -2342,6 +2456,10 @@ routes = [
     Route("/api/drugs/ask", drug_ask, methods=["POST"]),
     Route("/api/ask/library", ask_library, methods=["GET"]),
     Route("/api/ask/multi", ask_multi, methods=["POST"]),
+    Route("/api/ask/topics", ask_topics, methods=["GET"]),
+    Route("/api/ask/topics/{topic_id}", ask_topic, methods=["GET"]),
+    Route("/api/ask/topics/{topic_id}", ask_topic_delete, methods=["DELETE"]),
+    Route("/api/ask/export", ask_export, methods=["POST"]),
     Route("/api/suggest-book", suggest_book, methods=["POST"]),
     Route("/api/shared/specialties", shared_add_specialty, methods=["POST"]),
     Route("/api/shared/specialties/remove", shared_remove_specialty, methods=["POST"]),

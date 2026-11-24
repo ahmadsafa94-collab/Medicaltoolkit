@@ -1627,6 +1627,8 @@ async def main():
     # so a bad key or empty balance shows up at deploy time, not as a
     # user's failed request.
     asyncio.create_task(health_check.log_startup_checks())
+    # Specialty books uploaded before chapter division became automatic.
+    asyncio.create_task(webapp_api.backfill_shared_chapters())
 
     server_config = uvicorn.Config(webapp_app, host="0.0.0.0", port=PORT, log_level="info")
     server = uvicorn.Server(server_config)

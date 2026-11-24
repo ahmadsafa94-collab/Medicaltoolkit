@@ -632,3 +632,33 @@ body.has-tabbar .fab { bottom: calc(76px + env(safe-area-inset-bottom, 0px)); }
 .reader-source-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 4px; }
 .reader-source .mini-btn { border: 0; background: none; color: var(--hint); font-size: 16px; cursor: pointer; }
 .textLayer span.src-hl { background: rgba(255, 213, 0, 0.45); border-radius: 2px; }
+
+/* ---------- Ask tab composer ---------- */
+.ask-compose { position: relative; }
+.ask-compose-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.ask-compose-head .muted { margin: 0; }
+.ask-topic-note { margin: 0 0 8px; }
+#ask-question {
+  display: block; width: 100%; box-sizing: border-box; min-height: 96px; max-height: 40vh; resize: none;
+  padding: 12px 14px; border-radius: 14px; font: inherit; font-size: 16px; line-height: 1.45;
+  border: 1.5px solid rgba(128, 128, 128, 0.32); background: var(--bg); color: var(--text);
+  unicode-bidi: plaintext;
+}
+#ask-question:focus { outline: none; border-color: var(--button); box-shadow: 0 0 0 3px rgba(38, 120, 182, 0.15); }
+.ask-send-btn { display: block; width: 100%; margin-top: 10px; padding: 12px; font-size: 16px; border-radius: 12px; }
+.ask-compose-tools { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.mini-btn.ask-like, .ask-compose-tools .mini-btn, .ask-compose-head .mini-btn {
+  padding: 7px 11px; border-radius: 9px; font: inherit; font-size: 13px; cursor: pointer;
+  border: 1px solid rgba(128, 128, 128, 0.28); background: var(--bg); color: var(--link);
+}
+.ask-turn-tools { display: flex; justify-content: flex-end; margin-top: 8px; }
+.ask-turn-tools .mini-btn {
+  padding: 5px 10px; border-radius: 8px; font: inherit; font-size: 12px; cursor: pointer;
+  border: 1px solid rgba(128, 128, 128, 0.28); background: var(--bg); color: var(--link);
+}
+.topic-row { display: flex; align-items: center; gap: 8px; padding: 9px 0; border-bottom: 1px solid rgba(128, 128, 128, 0.16); }
+.topic-row:last-child { border-bottom: 0; }
+.topic-row .topic-main { flex: 1; min-width: 0; text-align: start; background: none; border: 0; padding: 0; font: inherit; color: var(--text); cursor: pointer; }
+.topic-row .topic-title { display: block; font-size: 14px; unicode-bidi: plaintext; overflow-wrap: anywhere; }
+.topic-row .topic-meta { display: block; font-size: 12px; color: var(--hint); margin-top: 2px; }
+.topic-row .mini-btn { flex-shrink: 0; border: 0; background: none; color: var(--hint); font-size: 16px; cursor: pointer; }
