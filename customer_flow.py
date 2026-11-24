@@ -86,6 +86,17 @@ def _plan_summary_text(user_id: int) -> str:
     return "\n".join(lines)
 
 
+
+async def _send_to_admin(tg_bot, **kwargs):
+    """
+    A message for the admin is sent exactly as written: through the
+    translation layer, the user's own words (a bug report, a payment
+    problem, a /replyuser line) were rewritten by the AI before the admin
+    read them -- and could be steered by what the user wrote.
+    """
+    with ui_text.untranslated():
+        return await tg_bot.send_message(**kwargs)
+
 @router.message(Command("myplan"))
 async def cmd_my_plan(message: Message):
     await _show_plan(message.answer, message.from_user.id)
@@ -305,7 +316,7 @@ async def _handle_book_payment(message: Message, payment) -> None:
         )
         for admin_id in ADMIN_USER_IDS:
             try:
-                await tg_bot.send_message(
+                await _send_to_admin(tg_bot, 
                     chat_id=admin_id,
                     text=(
                         f"⚠️ Book request {request_id} (status '{record['status']}') was paid AGAIN "
@@ -327,7 +338,7 @@ async def _handle_book_payment(message: Message, payment) -> None:
 
     for admin_id in ADMIN_USER_IDS:
         try:
-            await tg_bot.send_message(
+            await _send_to_admin(tg_bot, 
                 chat_id=admin_id,
                 text=(
                     f"💰 Book request {request_id} was just paid ({payment.total_amount} Stars) by "
@@ -387,7 +398,7 @@ async def handle_book_decline(callback: CallbackQuery):
 
     for admin_id in ADMIN_USER_IDS:
         try:
-            await tg_bot.send_message(
+            await _send_to_admin(tg_bot, 
                 chat_id=admin_id,
                 text=f"❌ {record['who']} declined the ${record['price_usd']:.2f} quote for book request {request_id}.",
             )
@@ -430,7 +441,7 @@ async def handle_contact_admin_send(message: Message, state: FSMContext):
     sent_to_any = False
     for admin_id in ADMIN_USER_IDS:
         try:
-            await tg_bot.send_message(
+            await _send_to_admin(tg_bot, 
                 chat_id=admin_id,
                 text=(
                     f"💳 Payment request from {who} (id {user.id}):\n\n{text}\n\n"
@@ -488,7 +499,7 @@ async def handle_feedback_send(message: Message, state: FSMContext):
     sent_to_any = False
     for admin_id in ADMIN_USER_IDS:
         try:
-            await tg_bot.send_message(
+            await _send_to_admin(tg_bot, 
                 chat_id=admin_id,
                 text=(
                     f"🐞 Report/suggestion from {who} (id {user.id}):\n\n{text}\n\n"
@@ -542,7 +553,7 @@ async def handle_support_send(message: Message, state: FSMContext):
     sent_to_any = False
     for admin_id in ADMIN_USER_IDS:
         try:
-            await tg_bot.send_message(
+            await _send_to_admin(tg_bot, 
                 chat_id=admin_id,
                 text=(
                     f"🆘 Support request from {who} (id {user.id}):\n\n{text}\n\n"
@@ -654,7 +665,7 @@ async def handle_pay_support_send(message: Message, state: FSMContext):
     sent_to_any = False
     for admin_id in ADMIN_USER_IDS:
         try:
-            await tg_bot.send_message(
+            await _send_to_admin(tg_bot, 
                 chat_id=admin_id,
                 text=(
                     f"💳 Payment support request from {who} (id {user.id}):\n\n{text}\n\n"

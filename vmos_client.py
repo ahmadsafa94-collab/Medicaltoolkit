@@ -41,7 +41,12 @@ _mode = VMOS_CMD_MODE if VMOS_CMD_MODE in ("sync", "async") else "auto"
 
 
 class VmosError(Exception):
-    pass
+    def __init__(self, message: str, refused: bool = False):
+        super().__init__(message)
+        # True when the API answered and declined (e.g. syncCmd not offered);
+        # False for a network error or timeout, after which the command may
+        # well have run.
+        self.refused = refused
 
 
 def is_configured() -> bool:
@@ -74,8 +79,15 @@ async def call(endpoint: str, payload: dict) -> dict:
         raise VmosError(f"HTTP {resp.status_code}, non-JSON reply")
     code = data.get("code")
     if resp.status_code != 200 or code not in (200, 0, "200", "0"):
-        raise VmosError(f"{endpoint}: code {code} {data.get('msg') or ''}".strip())
+        raise VmosError(f"{endpoint}: code {code} {data.get('msg') or ''}".strip(), refused=True)
     return data.get("data")
+
+
+def _int_or_none(value) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _first(data) -> dict:
@@ -95,8 +107,8 @@ def _output_of(item: dict) -> str:
 
 async def _shell_sync(command: str) -> str:
     item = _first(await call("syncCmd", {"padCode": VMOS_PAD_CODE, "scriptContent": command}))
-    status = item.get("taskStatus")
-    if status is not None and int(status) in _FAILED:
+    status = _int_or_none(item.get("taskStatus"))
+    if status is not None and status in _FAILED:
         raise VmosError(item.get("errorMsg") or f"command failed (status {status})")
     return _output_of(item)
 
@@ -112,8 +124,8 @@ async def _shell_async(command: str) -> str:
     while time.monotonic() < deadline:
         await asyncio.sleep(_ASYNC_POLL_SECONDS)
         detail = _first(await call("padTaskDetail", {"taskIds": [task_id]}))
-        status = detail.get("taskStatus")
-        status = int(status) if status is not None else 1
+        status = _int_or_none(detail.get("taskStatus"))
+        status = status if status is not None else 1
         if status in _DONE:
             return _output_of(detail)
         if status in _FAILED:
@@ -131,7 +143,10 @@ async def shell(command: str) -> str:
     try:
         return await _shell_sync(command)
     except VmosError as e:
-        if _mode == "sync":
+        # Only when syncCmd itself was refused. After a timeout the command
+        # may already have run, and running it again typed text twice or
+        # skipped a screen -- and switched the mode for good.
+        if _mode == "sync" or not e.refused:
             raise
         logger.warning("VMOS syncCmd unavailable (%s); switching to asyncCmd", e)
         _mode = "async"

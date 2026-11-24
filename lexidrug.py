@@ -168,7 +168,8 @@ def _find_search_box(nodes: list[dict]) -> dict | None:
 def _find_result(nodes: list[dict], drug: str, typed_y: int) -> dict | None:
     """The result row best matching the drug: exact title first, then prefix."""
     want = drug.lower()
-    below = [n for n in nodes if n["center"] and n["y"] > typed_y and n["text"]]
+    # Never the search box itself: it holds the typed name, so it "matches".
+    below = [n for n in nodes if n["center"] and n["y"] > typed_y and n["text"] and not n["cls"].endswith("EditText")]
     for n in below:
         if n["text"].lower() == want:
             return n
@@ -219,7 +220,7 @@ async def _open_monograph(drug: str, log: list[str]) -> tuple[str, str]:
     await vmos_client.shell("input keyevent 111")  # ESC: hide the keyboard so it doesn't cover the tap
     await asyncio.sleep(0.5)
     nodes = await _dump_screen()
-    result = _find_result(nodes, drug, 0) or result
+    result = _find_result(nodes, drug, field["y"]) or result
     await _tap(result)
     log.append(f"opened {title!r}")
     await asyncio.sleep(LEXIDRUG_RESULT_WAIT_SECONDS)

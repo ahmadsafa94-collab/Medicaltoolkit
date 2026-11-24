@@ -24,6 +24,8 @@ register_renal_handlers(dp) once at startup.
 
 import logging
 
+import ui_text
+
 from aiogram import Router, F
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.state import State, StatesGroup
@@ -351,7 +353,9 @@ async def _show_renal_results(
         "judgment and a current formulary.",
     ]
 
-    ok = await send_long_text(message.answer, "\n".join(lines))
+    # Sent as computed, not through the AI translation layer (see calc_flow).
+    with ui_text.untranslated():
+        ok = await send_long_text(message.answer, "\n".join(lines))
     if not ok:
         await message.answer("Couldn't send the calculated value (Telegram rejected the message).")
 

@@ -802,6 +802,7 @@ async def summarize(request: Request):
                         chapters,
                         progress,
                         subscriptions.get_language(user["id"]),
+                        time.monotonic() + BOOK_SUMMARY_TIMEOUT_SECONDS,
                     ),
                     timeout=BOOK_SUMMARY_TIMEOUT_SECONDS,
                 )
@@ -1452,6 +1453,11 @@ async def request_book_endpoint(request: Request):
     if not ADMIN_USER_IDS:
         raise ApiError(status_code=503, detail="This bot doesn't have an admin contact configured yet -- please try again later.")
 
+    if book_requests.count_recent(user["id"]) >= book_requests.MAX_REQUESTS_PER_DAY:
+        raise ApiError(
+            status_code=429,
+            detail=f"You've sent {book_requests.MAX_REQUESTS_PER_DAY} book requests today -- please wait for the admin to answer those.",
+        )
     username = user.get("username")
     who = f"@{username}" if username else f"id {user['id']}"
     record = book_requests.create_request(user["id"], who, url, note)
@@ -1826,14 +1832,26 @@ async def _lexi_monograph(drug: str) -> dict:
         raise ApiError(status_code=502, detail="Couldn't read Lexidrug on the cloud phone. Please try again shortly.")
 
 
+_LEXI_OPENS_PER_HOUR = 10
+_lexi_opens: dict[int, list[float]] = {}
+
+
 async def lexidrug_open(request: Request):
-    require_user(request)
+    user = require_user(request)
     body = await _json_body(request)
     drug = _text(body, "drug", 200)
     if not drug:
         raise ApiError(status_code=400, detail="Type a drug name first.")
     if len(drug) > 80:
         raise ApiError(status_code=400, detail="That drug name is too long.")
+    # Opening an uncached drug drives the one cloud phone for up to 100 s,
+    # for everyone: limited per user (cached ones are free and instant).
+    if lexidrug._cache_get(drug) is None and not subscriptions.is_admin(user["id"]):
+        now = time.time()
+        recent = [t for t in _lexi_opens.get(user["id"], []) if now - t < 3600]
+        if len(recent) >= _LEXI_OPENS_PER_HOUR:
+            raise ApiError(status_code=429, detail="That's a lot of new drugs in an hour -- please try again a little later.")
+        _lexi_opens[user["id"]] = recent + [now]
     entry = await _lexi_monograph(drug)
     return JSONResponse({"drug": entry["title"], "fetched_at": entry["fetched_at"]})
 
@@ -1857,7 +1875,12 @@ async def lexidrug_ask(request: Request):
             raise ApiError(status_code=400, detail="Invalid history entry.")
         history.append({"question": turn["question"][:_HISTORY_Q_CHARS], "answer": turn["answer"][:_HISTORY_A_CHARS]})
 
-    entry = await _lexi_monograph(drug)  # cached after /open, so normally instant
+    if len(drug) > 80:
+        raise ApiError(status_code=400, detail="That drug name is too long.")
+    # Only from the cache: opening a drug is /open's job (rate-limited there).
+    entry = lexidrug._cache_get(drug)
+    if entry is None:
+        raise ApiError(status_code=409, detail="Open the drug first (tap Open), then ask.")
 
     try:
         with subscriptions.metered(user["id"], "questions"):

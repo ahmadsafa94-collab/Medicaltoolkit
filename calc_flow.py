@@ -28,6 +28,8 @@ implemented in clinical_calc.py, never something inferred here.
 
 import logging
 
+import ui_text
+
 from aiogram import Router, F
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.state import State, StatesGroup
@@ -442,7 +444,10 @@ async def _start_or_continue(answer_fn, state: FSMContext, calc: Calculator, idx
             await state.clear()
             return
         header = f"{calc.emoji} *{calc.title} -- result*"
-        ok = await send_long_text(answer_fn, header + "\n\n" + "\n".join(lines))
+        # Sent as computed, not through the AI translation layer: a swapped
+        # value or a flipped "normal/prolonged" there can't be checked for.
+        with ui_text.untranslated():
+            ok = await send_long_text(answer_fn, header + "\n\n" + "\n".join(lines))
         if not ok:
             await answer_fn("Couldn't send the result (Telegram rejected the message).")
         await state.clear()

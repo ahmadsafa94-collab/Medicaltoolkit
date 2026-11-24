@@ -16,6 +16,7 @@ labeled as such and never presented as authoritative on its own.
 import json
 import logging
 import re
+import time
 
 import pdfplumber
 
@@ -434,7 +435,10 @@ MAX_CHAPTERS_FOR_WHOLE_BOOK_SUMMARY = 80
 MAX_COMBINED_SUMMARY_CHARS = MAX_CHARS_PER_CHAPTER * 2
 
 
-def summarize_whole_book(title: str, pdf_path: str, chapters: list[dict], progress_cb=None, language: str = "English") -> str:
+def summarize_whole_book(
+    title: str, pdf_path: str, chapters: list[dict], progress_cb=None, language: str = "English",
+    deadline: float | None = None,
+) -> str:
     """
     Map-reduce summary for a whole book: summarize each chapter's text
     individually (map), then ask Claude to synthesize those chapter
@@ -458,6 +462,11 @@ def summarize_whole_book(title: str, pdf_path: str, chapters: list[dict], progre
     chapters = chapters[:MAX_CHAPTERS_FOR_WHOLE_BOOK_SUMMARY]
     chapter_summaries = []
     for i, chapter in enumerate(chapters):
+        # The caller's timeout can't stop this thread; without this check it
+        # went on making AI calls for every remaining chapter after the job
+        # had been given up (and the allowance refunded).
+        if deadline is not None and time.monotonic() > deadline:
+            raise ChapterAIError("Summarizing the whole book took too long and was stopped.")
         try:
             # Extracted with the generous MAX_CHARS_HARD_CAP (not the smaller
             # MAX_CHARS_PER_CHAPTER) and summarized via summarize_chapter_full's
@@ -480,6 +489,8 @@ def summarize_whole_book(title: str, pdf_path: str, chapters: list[dict], progre
     if not chapter_summaries:
         raise ChapterAIError("Couldn't extract readable text from any chapter to summarize.")
 
+    if deadline is not None and time.monotonic() > deadline:
+        raise ChapterAIError("Summarizing the whole book took too long and was stopped.")
     combined = "\n\n".join(chapter_summaries)[:MAX_COMBINED_SUMMARY_CHARS]
 
     system_prompt = (

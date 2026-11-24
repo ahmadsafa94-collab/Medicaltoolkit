@@ -59,9 +59,20 @@ def usd_to_stars(price_usd: float) -> int:
     return max(1, round(price_usd * USD_TO_STARS_RATE))
 
 
+MAX_REQUESTS_PER_DAY = 5
+
+
+def count_recent(user_id: int, seconds: int = 86400) -> int:
+    """How many requests this user made in the last `seconds` (each one messages every admin)."""
+    now = time.time()
+    return sum(1 for r in _load().values() if r.get("user_id") == user_id and now - r.get("created_at", 0) < seconds)
+
+
 def create_request(user_id: int, who: str, url: str, note: str = "") -> dict:
     requests = _load()
     request_id = uuid.uuid4().hex[:8]
+    while request_id in requests:  # 8 hex digits can collide; a collision overwrote the older request
+        request_id = uuid.uuid4().hex[:8]
     record = {
         "request_id": request_id,
         "user_id": user_id,
