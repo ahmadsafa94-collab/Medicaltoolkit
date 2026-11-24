@@ -1966,9 +1966,181 @@ async def shared_delete_book(request: Request):
     return JSONResponse({"specialties": _shared_catalog()})
 
 
+# ---------------------------------------------------------------------------
+# Chunked uploads (shelf books and, for admins, specialty-library books)
+# ---------------------------------------------------------------------------
+# A single multipart POST was slow in three ways: Starlette spooled the
+# whole body to a temp file before our code saw a byte, the file was then
+# copied a second time onto the volume, and on a slow or high-latency link
+# (Telegram's WebView on mobile data, far from the server) one TCP stream
+# can't use the connection's full bandwidth -- and one dropped connection
+# meant starting over.
+#
+# Now the client splits the file into 8 MB chunks and sends several at
+# once; each chunk is written straight to its offset in the final file on
+# the volume, a failed chunk is retried on its own, and "finish" only has
+# to check the PDF and register it. The old /api/upload stays for clients
+# still running a cached older app.js.
+
+UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024
+_UPLOAD_TTL_SECONDS = 2 * 3600
+_MAX_OPEN_UPLOADS_PER_USER = 3
+_uploads: dict[str, dict] = {}
+
+
+def _expire_uploads() -> None:
+    now = time.time()
+    for uid in [k for k, u in _uploads.items() if now - u["touched"] > _UPLOAD_TTL_SECONDS]:
+        u = _uploads.pop(uid)
+        _safe_remove(u["path"])
+
+
+async def upload_start(request: Request):
+    user = require_user(request)
+    body = await _json_body(request)
+    _expire_uploads()
+
+    size = body.get("size")
+    if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
+        raise ApiError(status_code=400, detail="Invalid file size.")
+    limit_mb = MAX_SHELF_UPLOAD_BYTES // 1024 // 1024
+    if size > MAX_SHELF_UPLOAD_BYTES:
+        raise ApiError(status_code=413, detail=f"That file is over the {limit_mb}MB limit.")
+    filename = safe_pdf_filename(body.get("filename"))
+    title = " ".join(str(body.get("title") or "").split())[:200] or os.path.splitext(filename)[0] or "Untitled book"
+
+    target = body.get("target") or "shelf"
+    if target == "shared":
+        if not subscriptions.is_admin(user["id"]):
+            raise ApiError(status_code=403, detail="Only the admin can change the specialty libraries.")
+        try:
+            specialty = shared_library.clean_specialty_name(body.get("specialty"))
+        except shared_library.SharedLibraryError as e:
+            raise _shared_error(e)
+        dest_dir = shared_library.BOOKS_DIR
+    elif target == "shelf":
+        specialty = None
+        # Checked now so a free user with a full shelf isn't made to upload
+        # 300 MB first; checked again at finish, which is what enforces it.
+        try:
+            subscriptions.check_shelf_capacity(user["id"], library.count_toward_shelf_limit(user["id"]))
+        except subscriptions.ShelfLimitReached as e:
+            raise ApiError(status_code=402, detail=str(e))
+        dest_dir = os.path.join(user_dir(user["id"]), "library")
+    else:
+        raise ApiError(status_code=400, detail="Invalid upload target.")
+
+    if sum(1 for u in _uploads.values() if u["user_id"] == user["id"]) >= _MAX_OPEN_UPLOADS_PER_USER:
+        raise ApiError(status_code=429, detail="You already have uploads in progress. Wait for them to finish.")
+
+    os.makedirs(dest_dir, exist_ok=True)
+    path = unique_path(os.path.join(dest_dir, filename))
+    # Reserve the name and the full size up front, so every chunk can be
+    # written at its own offset in any order.
+    with open(path, "wb") as f:
+        f.truncate(size)
+
+    upload_id = uuid.uuid4().hex
+    _uploads[upload_id] = {
+        "user_id": user["id"], "path": path, "size": size, "title": title, "target": target,
+        "specialty": specialty, "received": set(), "touched": time.time(),
+        "chunks": -(-size // UPLOAD_CHUNK_BYTES),
+    }
+    return JSONResponse({"upload_id": upload_id, "chunk_size": UPLOAD_CHUNK_BYTES, "chunks": _uploads[upload_id]["chunks"]})
+
+
+def _owned_upload(request: Request, user_id: int) -> tuple[str, dict]:
+    upload_id = request.path_params["upload_id"]
+    up = _uploads.get(upload_id)
+    if up is None or up["user_id"] != user_id:
+        raise ApiError(status_code=404, detail="This upload expired. Please start it again.")
+    return upload_id, up
+
+
+async def upload_chunk(request: Request):
+    user = require_user(request)
+    _, up = _owned_upload(request, user["id"])
+    try:
+        index = int(request.query_params.get("index", ""))
+    except ValueError:
+        raise ApiError(status_code=400, detail="Invalid chunk index.")
+    if not (0 <= index < up["chunks"]):
+        raise ApiError(status_code=400, detail="Invalid chunk index.")
+
+    offset = index * UPLOAD_CHUNK_BYTES
+    expected = min(UPLOAD_CHUNK_BYTES, up["size"] - offset)
+    written = 0
+    fd = os.open(up["path"], os.O_WRONLY)
+    try:
+        async for piece in request.stream():
+            if not piece:
+                continue
+            if written + len(piece) > expected:
+                raise ApiError(status_code=400, detail="Chunk is larger than expected.")
+            await asyncio.to_thread(os.pwrite, fd, piece, offset + written)
+            written += len(piece)
+    finally:
+        os.close(fd)
+    if written != expected:
+        # Connection cut mid-chunk: the client retries this one chunk.
+        raise ApiError(status_code=400, detail="Chunk incomplete -- please retry.")
+    up["received"].add(index)
+    up["touched"] = time.time()
+    return JSONResponse({"ok": True, "received": len(up["received"])})
+
+
+async def upload_finish(request: Request):
+    user = require_user(request)
+    upload_id, up = _owned_upload(request, user["id"])
+    missing = up["chunks"] - len(up["received"])
+    if missing:
+        raise ApiError(status_code=409, detail=f"{missing} part(s) of the file are still missing. Please retry.")
+    _uploads.pop(upload_id, None)
+
+    try:
+        page_count = await asyncio.to_thread(open_check, up["path"])
+    except ChapterDetectionError as e:
+        _safe_remove(up["path"])
+        raise ApiError(status_code=400, detail=str(e))
+    if page_count > MAX_SHELF_UPLOAD_PAGES:
+        _safe_remove(up["path"])
+        raise ApiError(status_code=400, detail=f"This PDF has {page_count} pages, over the {MAX_SHELF_UPLOAD_PAGES}-page limit.")
+
+    if up["target"] == "shared":
+        try:
+            book_id = shared_library.add_book(up["specialty"], up["title"], up["path"], page_count, added_by=user["id"])
+        except shared_library.SharedLibraryError as e:
+            _safe_remove(up["path"])
+            raise _shared_error(e)
+        _start_shared_index(book_id)
+        return JSONResponse({"book_id": book_id, "specialties": _shared_catalog()})
+
+    # No await between this check and add_book, so two uploads finishing
+    # together can't both squeeze past the free shelf limit.
+    try:
+        subscriptions.check_shelf_capacity(user["id"], library.count_toward_shelf_limit(user["id"]))
+    except subscriptions.ShelfLimitReached as e:
+        _safe_remove(up["path"])
+        raise ApiError(status_code=402, detail=str(e))
+    book_id = library.add_book(user["id"], up["title"], up["path"], page_count, source="shelf")
+    return JSONResponse(_public_book(book_id, library.get_book(user["id"], book_id)))
+
+
+async def upload_cancel(request: Request):
+    user = require_user(request)
+    upload_id, up = _owned_upload(request, user["id"])
+    _uploads.pop(upload_id, None)
+    _safe_remove(up["path"])
+    return JSONResponse({"cancelled": True})
+
+
 routes = [
     Route("/api/books", list_books, methods=["GET"]),
     Route("/api/upload", upload_book, methods=["POST"]),
+    Route("/api/uploads", upload_start, methods=["POST"]),
+    Route("/api/uploads/{upload_id}/chunk", upload_chunk, methods=["PUT"]),
+    Route("/api/uploads/{upload_id}/finish", upload_finish, methods=["POST"]),
+    Route("/api/uploads/{upload_id}", upload_cancel, methods=["DELETE"]),
     Route("/api/books/{book_id}", get_book, methods=["GET"]),
     Route("/api/books/{book_id}", delete_book, methods=["DELETE"]),
     Route("/api/books/{book_id}/rename", rename_book, methods=["POST"]),

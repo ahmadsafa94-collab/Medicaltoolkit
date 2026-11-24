@@ -461,6 +461,78 @@ document.getElementById("file-input").addEventListener("change", (e) => {
   if (file) uploadFile(file);
 });
 
+// ---------------------------------------------------------------------
+// Chunked upload (shelf books, and specialty books for the admin)
+// ---------------------------------------------------------------------
+// The file goes up in 8 MB parts, UPLOAD_PARALLEL at a time, each written
+// straight into place on the server. Several streams use a slow or
+// far-away connection much better than one, and a part that fails is
+// retried on its own instead of the whole book starting over.
+
+const UPLOAD_PARALLEL = 3;
+const UPLOAD_RETRIES = 4;
+
+function putChunk(url, blob, onBytes) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("PUT", url);
+    xhr.setRequestHeader("X-Telegram-Init-Data", INIT_DATA);
+    xhr.setRequestHeader("Content-Type", "application/octet-stream");
+    xhr.upload.addEventListener("progress", (e) => { if (e.lengthComputable) onBytes(e.loaded); });
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) return resolve();
+      let detail = null;
+      try { detail = JSON.parse(xhr.responseText).detail; } catch (_) { /* ignore */ }
+      const err = new Error((typeof detail === "string" && detail) || `Upload failed (${xhr.status})`);
+      err.status = xhr.status;
+      reject(err);
+    };
+    xhr.onerror = () => reject(new Error("Network error"));
+    xhr.send(blob);
+  });
+}
+
+async function chunkedUpload(file, { target = "shelf", title, specialty, onProgress }) {
+  const start = await api("/api/uploads", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ filename: file.name, size: file.size, title, target, specialty }),
+  });
+  const { upload_id: id, chunk_size: size, chunks } = start;
+  const loaded = new Array(chunks).fill(0);
+  const report = () => onProgress && onProgress(loaded.reduce((a, b) => a + b, 0) / file.size);
+
+  let next = 0;
+  const worker = async () => {
+    while (next < chunks) {
+      const i = next++;
+      const blob = file.slice(i * size, Math.min(file.size, (i + 1) * size));
+      for (let attempt = 1; ; attempt++) {
+        try {
+          await putChunk(`/api/uploads/${id}/chunk?index=${i}`, blob, (b) => { loaded[i] = b; report(); });
+          loaded[i] = blob.size;
+          report();
+          break;
+        } catch (e) {
+          // 4xx other than a cut-off chunk is not going to improve on retry.
+          const permanent = e.status && e.status !== 400 && e.status < 500;
+          if (permanent || attempt >= UPLOAD_RETRIES) throw e;
+          loaded[i] = 0;
+          await new Promise((r) => setTimeout(r, 1000 * attempt));
+        }
+      }
+    }
+  };
+  try {
+    await Promise.all(Array.from({ length: Math.min(UPLOAD_PARALLEL, chunks) }, worker));
+  } catch (e) {
+    api(`/api/uploads/${id}`, { method: "DELETE" }).catch(() => {});
+    throw e;
+  }
+  if (onProgress) onProgress(1);
+  return api(`/api/uploads/${id}/finish`, { method: "POST" });
+}
+
 function uploadFile(file) {
   if (file.size > maxUploadMb * 1024 * 1024) {
     alertMsg(`That file is over the ${maxUploadMb}MB limit (${(file.size / 1024 / 1024).toFixed(1)}MB).`);
@@ -472,42 +544,25 @@ function uploadFile(file) {
   bar.style.width = "0%";
   status.textContent = "Starting upload…";
 
-  const form = new FormData();
-  form.append("file", file, file.name);
-  form.append("title", file.name.replace(/\.pdf$/i, ""));
-
-  const xhr = new XMLHttpRequest();
-  xhr.open("POST", "/api/upload");
-  xhr.setRequestHeader("X-Telegram-Init-Data", INIT_DATA);
-
-  xhr.upload.addEventListener("progress", (evt) => {
-    if (evt.lengthComputable) {
-      const pct = Math.round((evt.loaded / evt.total) * 100);
+  chunkedUpload(file, {
+    target: "shelf",
+    title: file.name.replace(/\.pdf$/i, ""),
+    onProgress: (f) => {
+      const pct = Math.round(f * 100);
       bar.style.width = pct + "%";
-      status.textContent = pct < 100 ? `Uploading… ${pct}%` : "Processing…";
-    }
-  });
-
-  xhr.onload = () => {
-    let data = null;
-    try { data = JSON.parse(xhr.responseText); } catch (_) { /* ignore */ }
-    if (xhr.status >= 200 && xhr.status < 300 && data) {
+      status.textContent = pct < 100 ? `Uploading… ${pct}%` : "Checking the file…";
+    },
+  })
+    .then((data) => {
       showView("view-shelf", { pushHistory: false });
       viewStack = ["view-shelf"];
       loadShelf().then(() => openBook(data.book_id));
-    } else {
-      const msg = (data && data.detail) || `Upload failed (${xhr.status})`;
-      alertMsg(msg);
+    })
+    .catch((e) => {
+      alertMsg(e.message === "Network error" ? "Upload failed -- check your connection and try again." : e.message);
       showView("view-shelf", { pushHistory: false });
       viewStack = ["view-shelf"];
-    }
-  };
-  xhr.onerror = () => {
-    alertMsg("Upload failed -- check your connection and try again.");
-    showView("view-shelf", { pushHistory: false });
-    viewStack = ["view-shelf"];
-  };
-  xhr.send(form);
+    });
 }
 
 // ---------------------------------------------------------------------
@@ -2795,35 +2850,24 @@ function askAdminUpload(file) {
   bar.style.width = "0%";
   status.textContent = `Uploading "${file.name}" to ${askSpecialty}…`;
 
-  const form = new FormData();
-  form.append("file", file, file.name);
-  form.append("title", file.name.replace(/\.pdf$/i, "").replace(/_/g, " "));
-  form.append("specialty", askSpecialty);
-
   const done = (msg) => {
     wrap.hidden = true;
     uploadBtn.disabled = false;
     if (msg) alertMsg(msg);
     loadAskLibrary({ quiet: true });
   };
-  const xhr = new XMLHttpRequest();
-  xhr.open("POST", "/api/shared/upload");
-  xhr.setRequestHeader("X-Telegram-Init-Data", INIT_DATA);
-  xhr.upload.addEventListener("progress", (evt) => {
-    if (!evt.lengthComputable) return;
-    const pct = Math.round((evt.loaded / evt.total) * 100);
-    bar.style.width = pct + "%";
-    status.textContent = pct < 100 ? `Uploading… ${pct}%` : "Checking the file…";
-  });
-  xhr.onload = () => {
-    let data = null;
-    try { data = JSON.parse(xhr.responseText); } catch (_) { /* ignore */ }
-    if (xhr.status >= 200 && xhr.status < 300) return done();
-    const detail = data && data.detail;
-    done((typeof detail === "string" && detail) || `Upload failed (${xhr.status})`);
-  };
-  xhr.onerror = () => done("Upload failed -- check your connection and try again.");
-  xhr.send(form);
+  chunkedUpload(file, {
+    target: "shared",
+    specialty: askSpecialty,
+    title: file.name.replace(/\.pdf$/i, "").replace(/_/g, " "),
+    onProgress: (f) => {
+      const pct = Math.round(f * 100);
+      bar.style.width = pct + "%";
+      status.textContent = pct < 100 ? `Uploading… ${pct}%` : "Checking the file…";
+    },
+  })
+    .then(() => done())
+    .catch((e) => done(e.message === "Network error" ? "Upload failed -- check your connection and try again." : e.message));
 }
 
 function renderAskAdminShelf() {
