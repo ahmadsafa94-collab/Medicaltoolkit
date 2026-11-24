@@ -16,6 +16,17 @@
     covering your NEXT change.
   -->
   <link rel="stylesheet" href="style.css?v=21" />
+  <!-- THEME PREVIEW (not deployed): ?theme=sky|mint|lavender|sunrise|midnight -->
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fira+Sans:wght@400;500;600;700&family=Poppins:wght@500;600;700&family=Quicksand:wght@600;700&family=Source+Sans+3:wght@400;600;700&family=Vazirmatn:wght@400;600;700&display=swap" />
+  <link rel="stylesheet" href="themes.css?v=21" />
+  <script>
+    (function () {
+      try {
+        var t = new URLSearchParams(location.search).get("theme");
+        if (t) document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {}
+    })();
+  </script>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 </head>

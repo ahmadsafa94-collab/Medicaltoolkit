@@ -1,0 +1,209 @@
+/* =====================================================================
+   Themes. Each html[data-theme] sets a palette and a pair of fonts; the
+   rules after the palettes restyle the app from those tokens only. With
+   no data-theme the app keeps its original look (style.css alone).
+
+   Fonts are open-licence Google Fonts, chosen from Adobe Fonts'
+   recommendations for app UI / healthcare (Source Sans 3, Fira Sans,
+   Poppins, Quicksand). Vazirmatn follows in every stack so Persian and
+   Arabic text gets a matching, properly joined face.
+   ===================================================================== */
+
+html[data-theme="sky"] {
+  --bg: #f2f8fe;
+  --secondary-bg: #ffffff;
+  --text: #11283f;
+  --hint: #6a7f96;
+  --link: #1f7fd8;
+  --button: #2b8ce8;
+  --button-text: #ffffff;
+  --primary-soft: #e2f0fd;
+  --border: #d4e4f4;
+  --head-bg: linear-gradient(180deg, #bfe0fb 0%, #e6f3fe 70%, #f2f8fe 100%);
+  --head-ink: #0d3b66;
+  --shelf-bg: linear-gradient(180deg, #d7ecfd 0%, #eef7ff 100%);
+  --shelf-ink: #18406a;
+  --shelf-hint: #5a7896;
+  --shelf-wood: #8cc4f2;
+  --shelf-wood-dark: #5ea7e6;
+  --card-shadow: 0 2px 10px rgba(31, 127, 216, 0.08);
+  --font-body: "Source Sans 3", "Vazirmatn", system-ui, sans-serif;
+  --font-head: "Poppins", "Vazirmatn", system-ui, sans-serif;
+}
+
+html[data-theme="mint"] {
+  --bg: #f1faf7;
+  --secondary-bg: #ffffff;
+  --text: #0f2e2a;
+  --hint: #5f7d77;
+  --link: #0c8a7d;
+  --button: #10a393;
+  --button-text: #ffffff;
+  --primary-soft: #dcf4ee;
+  --border: #cfe9e2;
+  --head-bg: linear-gradient(180deg, #c3eee4 0%, #e7f8f3 70%, #f1faf7 100%);
+  --head-ink: #0b4a42;
+  --shelf-bg: linear-gradient(180deg, #d3f1ea 0%, #f0fbf8 100%);
+  --shelf-ink: #0f3f39;
+  --shelf-hint: #4f7a72;
+  --shelf-wood: #7fd3c3;
+  --shelf-wood-dark: #46b5a2;
+  --card-shadow: 0 2px 10px rgba(12, 138, 125, 0.08);
+  --font-body: "Fira Sans", "Vazirmatn", system-ui, sans-serif;
+  --font-head: "Fira Sans", "Vazirmatn", system-ui, sans-serif;
+}
+
+html[data-theme="lavender"] {
+  --bg: #f6f5ff;
+  --secondary-bg: #ffffff;
+  --text: #1e1b3a;
+  --hint: #75719a;
+  --link: #5a54d6;
+  --button: #6760e3;
+  --button-text: #ffffff;
+  --primary-soft: #ebe9ff;
+  --border: #e0ddf7;
+  --head-bg: linear-gradient(180deg, #dcd8ff 0%, #efedff 70%, #f6f5ff 100%);
+  --head-ink: #2f2a7a;
+  --shelf-bg: linear-gradient(180deg, #e4e1ff 0%, #f7f6ff 100%);
+  --shelf-ink: #2b2766;
+  --shelf-hint: #6e6aa0;
+  --shelf-wood: #b6b0f5;
+  --shelf-wood-dark: #8d85ec;
+  --card-shadow: 0 2px 10px rgba(90, 84, 214, 0.08);
+  --font-body: "Source Sans 3", "Vazirmatn", system-ui, sans-serif;
+  --font-head: "Quicksand", "Vazirmatn", system-ui, sans-serif;
+}
+
+html[data-theme="sunrise"] {
+  --bg: #fff7f2;
+  --secondary-bg: #ffffff;
+  --text: #3a1f17;
+  --hint: #8f6e63;
+  --link: #d4553c;
+  --button: #ea6a4f;
+  --button-text: #ffffff;
+  --primary-soft: #ffe8df;
+  --border: #f5ddd3;
+  --head-bg: linear-gradient(180deg, #ffd9c8 0%, #ffeee6 70%, #fff7f2 100%);
+  --head-ink: #7a2c1b;
+  --shelf-bg: linear-gradient(180deg, #ffe4d6 0%, #fff8f4 100%);
+  --shelf-ink: #5a2a1d;
+  --shelf-hint: #9a6f62;
+  --shelf-wood: #f3b49b;
+  --shelf-wood-dark: #e48e6f;
+  --card-shadow: 0 2px 10px rgba(212, 85, 60, 0.08);
+  --font-body: "Source Sans 3", "Vazirmatn", system-ui, sans-serif;
+  --font-head: "Poppins", "Vazirmatn", system-ui, sans-serif;
+}
+
+html[data-theme="midnight"] {
+  --bg: #0c1524;
+  --secondary-bg: #15233a;
+  --text: #e5edf8;
+  --hint: #8ea2bd;
+  --link: #6db3ff;
+  --button: #3d95f5;
+  --button-text: #ffffff;
+  --primary-soft: #1c3150;
+  --border: #243756;
+  --head-bg: linear-gradient(180deg, #12223b 0%, #0c1524 100%);
+  --head-ink: #e5edf8;
+  --shelf-bg: linear-gradient(180deg, #13223a 0%, #0c1524 100%);
+  --shelf-ink: #dbe6f5;
+  --shelf-hint: #8ea2bd;
+  --shelf-wood: #2c4a74;
+  --shelf-wood-dark: #1e3658;
+  --card-shadow: 0 2px 12px rgba(0, 0, 0, 0.35);
+  --font-body: "Source Sans 3", "Vazirmatn", system-ui, sans-serif;
+  --font-head: "Poppins", "Vazirmatn", system-ui, sans-serif;
+}
+
+/* ---------------------------------------------------------------------
+   Shared restyle (any theme)
+   --------------------------------------------------------------------- */
+
+html[data-theme] body { font-family: var(--font-body); font-size: 15px; -webkit-font-smoothing: antialiased; }
+html[data-theme] h1, html[data-theme] h2, html[data-theme] h3,
+html[data-theme] .ask-heading, html[data-theme] .btn, html[data-theme] .tabbar .tab small {
+  font-family: var(--font-head);
+}
+
+/* Headers: a soft wash of the theme colour behind the title. */
+html[data-theme] .topbar { background: var(--head-bg); padding: 18px 18px 12px; }
+html[data-theme] .topbar h1 { color: var(--head-ink); font-size: 21px; font-weight: 700; letter-spacing: -0.01em; }
+
+/* Cards */
+html[data-theme] .panel {
+  background: var(--secondary-bg);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  box-shadow: var(--card-shadow);
+}
+html[data-theme] .muted { color: var(--hint); }
+
+/* Buttons */
+html[data-theme] .btn {
+  background: var(--button); color: var(--button-text);
+  border-radius: 12px; font-weight: 600; letter-spacing: 0.01em;
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--button) 30%, transparent);
+}
+html[data-theme] .btn.secondary { background: var(--primary-soft); color: var(--link); box-shadow: none; }
+html[data-theme] .btn:disabled { opacity: 0.45; box-shadow: none; }
+html[data-theme] .mini-btn,
+html[data-theme] .ask-compose-tools .mini-btn,
+html[data-theme] .ask-turn-tools .mini-btn,
+html[data-theme] .web-tools .mini-btn,
+html[data-theme] .web-site-actions .mini-btn {
+  background: var(--primary-soft); color: var(--link); border: 1px solid transparent; border-radius: 10px; font-weight: 600;
+}
+
+/* Inputs */
+html[data-theme] input[type="text"], html[data-theme] input[type="url"], html[data-theme] input[type="number"],
+html[data-theme] textarea, html[data-theme] select, html[data-theme] .drug-input, html[data-theme] .compose-box,
+html[data-theme] #ask-question, html[data-theme] .ask-select {
+  background: var(--bg); color: var(--text); border: 1.5px solid var(--border); font-family: var(--font-body);
+}
+html[data-theme] .compose-box:focus, html[data-theme] #ask-question:focus, html[data-theme] .drug-input:focus {
+  border-color: var(--button); box-shadow: 0 0 0 3px color-mix(in srgb, var(--button) 18%, transparent);
+}
+
+/* Tab bar: the active tab gets a pill. */
+html[data-theme] .tabbar { background: var(--secondary-bg); border-top: 1px solid var(--border); box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.04); }
+html[data-theme] .tabbar .tab { color: var(--hint); padding: 7px 0 6px; }
+html[data-theme] .tabbar .tab span { width: 52px; height: 28px; display: flex; align-items: center; justify-content: center; border-radius: 14px; transition: background 0.15s; }
+html[data-theme] .tabbar .tab.is-active { color: var(--link); }
+html[data-theme] .tabbar .tab.is-active span { background: var(--primary-soft); }
+html[data-theme] .tabbar .tab small { font-weight: 600; }
+
+/* Sub-tabs (Drugs) */
+html[data-theme] .subtabs .subtab { background: var(--secondary-bg); color: var(--text); border: 1px solid var(--border); border-radius: 12px; font-family: var(--font-head); font-weight: 600; }
+html[data-theme] .subtabs .subtab.is-active { background: var(--button); color: var(--button-text); border-color: var(--button); }
+
+/* Chat bubbles */
+html[data-theme] .qa-msg { border-radius: 16px; font-size: 15px; }
+html[data-theme] .qa-msg.q { background: var(--button); color: var(--button-text); border-bottom-right-radius: 6px; }
+html[data-theme] .qa-msg.a { background: var(--secondary-bg); border: 1px solid var(--border); border-bottom-left-radius: 6px; box-shadow: var(--card-shadow); }
+html[data-theme] .cite-marker { color: var(--link); }
+html[data-theme] .qa-sources { border-top-color: var(--border); }
+
+/* Lists and chips */
+html[data-theme] .check-row { border-bottom-color: var(--border); }
+html[data-theme] .chip { background: var(--primary-soft); color: var(--link); border: none; }
+html[data-theme] .topic-row { border-bottom-color: var(--border); }
+html[data-theme] .action-sheet { background: var(--secondary-bg); }
+
+/* Shelf: the wood becomes the theme's own colour. */
+html[data-theme] #view-shelf { background: var(--shelf-bg); color: var(--shelf-ink); }
+html[data-theme] #view-shelf .topbar { background: var(--head-bg); }
+html[data-theme] #view-shelf .topbar h1 { color: var(--head-ink); }
+html[data-theme] #view-shelf .muted,
+html[data-theme] #view-shelf .empty-state { color: var(--shelf-hint); }
+html[data-theme] #view-shelf .book-title-label { color: var(--shelf-ink); font-weight: 600; }
+html[data-theme] #view-shelf .link-btn { background: var(--secondary-bg); color: var(--link); border: 1px solid var(--border); font-weight: 600; }
+html[data-theme] .shelf-ledge {
+  height: 10px; border-radius: 6px;
+  box-shadow: 0 6px 12px rgba(0, 0, 0, 0.10), inset 0 1px 0 rgba(255, 255, 255, 0.35);
+}
+html[data-theme] .book-cover { border-radius: 4px 8px 8px 4px; box-shadow: 0 4px 10px rgba(0, 0, 0, 0.16); }
+html[data-theme] .shelf-tabs .subtab { background: var(--secondary-bg); }
