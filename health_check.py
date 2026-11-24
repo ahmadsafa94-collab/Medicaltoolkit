@@ -69,6 +69,10 @@ async def run_checks() -> list[tuple[str, bool, str]]:
     async def openfda():
         await drug_lookup.lookup_drug("ibuprofen")
 
+    async def web_browser():
+        import web_sources
+        await web_sources.self_test()
+
     return list(
         await asyncio.gather(
             _check(f"Anthropic ({CLAUDE_MODEL})", anthropic_main),
@@ -76,6 +80,7 @@ async def run_checks() -> list[tuple[str, bool, str]]:
             _check(f"Voyage search ({VOYAGE_MODEL})", voyage_embed),
             _check(f"Voyage rerank ({VOYAGE_RERANK_MODEL})", voyage_rerank),
             _check("openFDA drug labels", openfda),
+            _check("Web browser (web sources)", web_browser),
         )
     )
 

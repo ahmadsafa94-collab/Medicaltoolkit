@@ -480,6 +480,18 @@ async def _looks_logged_out(page) -> bool:
         return False
 
 
+async def self_test() -> None:
+    """Start Chromium and draw a page: the startup check that the browser works on this server."""
+    _touch()
+    ctx = await _new_context(None)
+    try:
+        page = await ctx.new_page()
+        await page.set_content("<p>ok</p>")
+        await page.screenshot(type="jpeg", quality=30)
+    finally:
+        await ctx.close()
+
+
 # ---------------------------------------------------------------------
 # The admin's live browser
 # ---------------------------------------------------------------------
