@@ -113,6 +113,8 @@ from bot_instance import bot
 from webapp_api import app as webapp_app
 
 logging.basicConfig(level=logging.INFO)
+# httpx logs every request URL at INFO -- including openFDA's ?api_key=...
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 dp = Dispatcher()
