@@ -56,7 +56,7 @@ MAX_DRUGS = 15
 
 _LOOKUP_TIMEOUT_SECONDS = 25
 _RESOLVE_TIMEOUT_SECONDS = 15
-_ANALYZE_TIMEOUT_SECONDS = 45
+_ANALYZE_TIMEOUT_SECONDS = 85  # a structured block per pair takes a while to write
 
 
 @router.message(Command("interactions"))
@@ -146,6 +146,7 @@ async def handle_ix_check(callback: CallbackQuery, state: FSMContext):
         return
 
     status = await callback.message.answer("Processing...")
+    await interaction_ai.add_drug_classes(drugs)  # best effort, never raises
     try:
         text = await asyncio.wait_for(
             asyncio.to_thread(
@@ -174,7 +175,7 @@ async def handle_ix_check(callback: CallbackQuery, state: FSMContext):
         pass  # not critical if the "Processing..." message can't be deleted (e.g. already gone)
 
     with ui_text.untranslated():  # interaction_ai already wrote this in the user's language
-        ok = await send_long_text(callback.message.answer, text)
+        ok = await send_long_text(callback.message.answer, interaction_ai.to_telegram_markdown(text))
     if not ok:
         await callback.message.answer("Couldn't send the results (Telegram rejected the message).")
 

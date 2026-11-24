@@ -23,16 +23,28 @@ than Claude's own training knowledge of any specific drug:
      drug_qa.py uses for single-drug Q&A.
 """
 
+import asyncio
 import logging
+import re
 
 import cost_ledger
 import name_resolver
+import rxclass
 from config import CLAUDE_MODEL
 from pdf_processor import client  # reuse the one Anthropic client instance
 
 logger = logging.getLogger(__name__)
 
 _RELEVANT_FIELD_LABELS = ["Drug Interactions", "Contraindications"]
+
+_HEADING_RE = re.compile(r"(?m)^\s*#{1,4}\s+(.+?)\s*$")
+_BOLD2_RE = re.compile(r"\*\*(.+?)\*\*")
+
+
+def to_telegram_markdown(text: str) -> str:
+    """The answer's '### A + B' headings and **bold** as Telegram's legacy Markdown (*bold*)."""
+    text = _HEADING_RE.sub(lambda m: "*" + m.group(1).replace("*", "") + "*", text)
+    return _BOLD2_RE.sub(r"*\1*", text)
 
 
 class InteractionAIError(Exception):
@@ -57,8 +69,18 @@ def resolve_drug_name(raw_input: str) -> str | None:
     return names[0] if names else None
 
 
-def _label_context(name: str, sections: dict) -> str:
+def _label_context(drug: dict, scale: float = 1.0) -> str:
+    name, sections = drug["name"], drug["sections"]
     lines = [f"== {name} =="]
+    generic = sections.get("_generic")
+    if generic and generic.lower() != name.lower():
+        lines.append(f"(generic name: {generic})")
+
+    classes = drug.get("classes") or []
+    if classes:
+        lines.append("-- Drug classes (FDA label classes and NIH RxClass; for matching class-level statements) --")
+        lines.extend(f"- {c}" for c in classes)
+
     found = False
     for label in _RELEVANT_FIELD_LABELS:
         data = sections.get(label) or {}
@@ -78,40 +100,102 @@ def _label_context(name: str, sections: dict) -> str:
             lines.append(block)
     if not found:
         lines.append("(No Drug Interactions or Contraindications section in this label.)")
+
+    # Boxed warning, interaction-relevant warnings, metabolism/transporters
+    # (drug_lookup.INTERACTION_EXTRA) -- shortened when many drugs are checked.
+    for label, text in (sections.get("_interaction_extra") or {}).items():
+        limit = max(400, int(len(text) * scale))
+        if len(text) > limit:
+            text = text[:limit].rsplit(" ", 1)[0] + " [...]"
+        lines.append(f"-- {label} --")
+        lines.append(text)
     return "\n".join(lines)
+
+
+async def add_drug_classes(drugs: list[dict]) -> None:
+    """
+    Attach each drug's classes (d["classes"]): the label's own FDA classes
+    plus NIH RxClass (rxclass.py), looked up in parallel. Never raises -- a
+    failed lookup only means less to match class-level warnings against.
+    """
+    async def one(d):
+        sections = d.get("sections") or {}
+        own = list(sections.get("_pharm_classes") or [])
+        try:
+            extra = await rxclass.drug_classes(sections.get("_generic") or d["name"])
+        except Exception:
+            logger.exception("RxClass lookup failed for %r", d.get("name"))
+            extra = []
+        seen, merged = set(), []
+        for c in own + extra:
+            key = re.sub(r"\s*[\[(].*$", "", c.split(": ", 1)[-1]).strip().lower()
+            if key and key not in seen:
+                seen.add(key)
+                merged.append(c)
+        d["classes"] = merged[:25]
+
+    await asyncio.gather(*(one(d) for d in drugs))
+
 
 
 def analyze_interactions(drugs: list[dict], language: str = "English") -> str:
     """
-    drugs: [{"name": str, "sections": <drug_lookup.lookup_drug() result>}, ...],
-    at least 2. Asks Claude to read each drug's own Drug Interactions/
-    Contraindications excerpts and describe what they say (or don't say)
-    about the others -- grounded ONLY in that fetched FDA text.
+    drugs: [{"name": str, "sections": <drug_lookup.lookup_drug() result>,
+    "classes": [...] (optional, from add_drug_classes)}, ...], at least 2.
+    Asks Claude to read each drug's own FDA label text (interactions,
+    contraindications, boxed warning, relevant warnings, metabolism) and
+    class data, and report every pair in a fixed, scannable format --
+    grounded ONLY in that fetched text.
     """
     names = ", ".join(d["name"] for d in drugs)
-    context = "\n\n".join(_label_context(d["name"], d["sections"]) for d in drugs)
+    # Up to 5 drugs get the full extra sections; beyond that they shrink so
+    # a 15-drug check stays a sensible size.
+    scale = min(1.0, 5 / len(drugs))
+    context = "\n\n".join(_label_context(d, scale) for d in drugs)
 
     system_prompt = (
-        f"You are analyzing possible interactions between these medications: {names}. Below are the "
-        "Drug Interactions and Contraindications excerpts from EACH drug's own official FDA label "
-        "(openFDA) -- the same source this bot's /dose command shows verbatim. Follow these rules "
-        "strictly:\n"
-        "1. Base your analysis ONLY on the excerpts given below -- never your own memorized/training "
-        "knowledge of these drugs, even if you're confident about it, since the excerpts are the "
-        "authoritative, current source here and outside knowledge can be outdated or wrong for this "
-        "specific product.\n"
-        "2. For each pair of drugs, state plainly whether either one's label mentions the other -- by "
-        "name, or by drug class (e.g. 'other CNS depressants', 'strong CYP3A4 inhibitors') -- and if "
-        "so, summarize what it says and which drug's label it came from.\n"
-        "3. If neither label mentions a given pair at all, say so plainly -- do not invent a mechanism, "
-        "severity rating, or clinical recommendation that isn't in the text.\n"
-        "4. Be concise and direct -- this will be read on a phone screen.\n"
-        f"4b. Write your entire answer in {language}. Drug names, and abbreviations normally left in "
-        "English (CYP3A4, QT), stay as they are.\n"
-        "5. End with one line noting this reads each drug's own label text only: it is not a substitute "
-        "for a dedicated interaction-checker database or pharmacist consult, and a label not mentioning "
-        "something does not rule out a real interaction.\n"
-        f"\nFDA LABEL EXCERPTS:\n{context}"
+        f"You are checking for interactions between these medications: {names}. Below, for EACH drug, "
+        "is text from its own official FDA label (openFDA): Drug Interactions, Contraindications, Boxed "
+        "Warning, the interaction-relevant sentences of its Warnings and its Metabolism/Pharmacokinetics "
+        "sections, and its drug classes (the FDA's label classes and the NIH's RxClass). Rules:\n"
+        "1. Use ONLY the material below -- never your own memorized knowledge of these drugs, even if "
+        "confident. It is the authoritative, current source here.\n"
+        "2. Check EVERY pair. A pair interacts when either label names the other drug, or names a class "
+        "or property the other drug has according to ITS material (classes list, metabolism, warnings) -- "
+        "e.g. A's label says 'avoid strong CYP3A4 inhibitors' and B is listed as a 'Cytochrome P450 3A4 "
+        "Inhibitor'; or A is 'metabolized by CYP2D6' and B's label calls it a strong CYP2D6 inhibitor; or "
+        "both labels warn of QT prolongation, serotonin syndrome, bleeding, CNS/respiratory depression, "
+        "hyperkalemia etc. (an additive effect). Say which way you matched it.\n"
+        "3. Severity -- take it from the label's own wording, never invent it:\n"
+        "   🔴 Contraindicated: 'contraindicated', 'do not use/coadminister'.\n"
+        "   🟠 Major: 'avoid', a boxed warning about the combination, or wording like serious, "
+        "life-threatening, fatal.\n"
+        "   🟡 Moderate: 'monitor', 'adjust/reduce the dose', 'use with caution', 'consider'.\n"
+        "   🟢 Minor: the label says the effect is not clinically significant or needs no action.\n"
+        "   When the match is only an inference from classes/metabolism (no label states this "
+        "combination or its class), write 'Possible — not graded by the labels' instead of a colour, "
+        "and say what would make it clinically relevant. The FDA class does not tell potency: do not "
+        "call an inhibitor 'strong'/'moderate' unless a label says so.\n"
+        "4. Exact format (Markdown, for a phone screen):\n"
+        "**Bottom line:** one or two sentences: the most important finding(s) and what to do.\n"
+        "Then one block per interacting pair, most severe first:\n"
+        "### <Drug A> + <Drug B>\n"
+        "- **Severity:** <emoji + level, or 'Possible — not graded by the labels'>\n"
+        "- **Mechanism:** <how, e.g. B inhibits CYP3A4, which clears A -- only as the material states>\n"
+        "- **What can happen:** <the clinical effect the label describes>\n"
+        "- **What to do:** <the label's management advice: avoid, dose change, monitoring; "
+        "'Not stated in the labels' if absent>\n"
+        "- **Source:** <which drug's label and section, or 'class data (RxClass)'>\n"
+        "Finally, one line: **No interaction found in the labels:** <the remaining pairs, "
+        "comma-separated> (omit if none). Do not write a block for those pairs.\n"
+        "5. Be concise: short phrases, no repetition, no preamble.\n"
+        f"6. Write the whole answer in {language}, including the field names (Severity, Mechanism...). "
+        "Drug names and abbreviations normally left in English (CYP3A4, QT, INR) stay as they are; keep "
+        "the colour emoji.\n"
+        "7. End with one short line: based on each drug's FDA label and class data only -- not a "
+        "substitute for a dedicated interaction database or a pharmacist; a label not mentioning "
+        "something does not rule out an interaction.\n"
+        f"\nFDA LABEL MATERIAL:\n{context}"
     )
 
     try:
@@ -120,9 +204,9 @@ def analyze_interactions(drugs: list[dict], language: str = "English") -> str:
             # Sonnet 5 thinks by default when this is omitted, and thinking
             # tokens count against max_tokens -- which is sized for the answer.
             thinking={"type": "disabled"},
-            max_tokens=1500,
+            max_tokens=3000,
             system=system_prompt,
-            messages=[{"role": "user", "content": f"Analyze possible interactions among: {names}"}],
+            messages=[{"role": "user", "content": f"Check interactions among: {names}"}],
         )
     except Exception:
         logger.exception("AI request failed")

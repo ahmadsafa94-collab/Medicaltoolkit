@@ -1468,6 +1468,8 @@ _WEBAPP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webapp")
 
 _DRUG_LOOKUP_TIMEOUT_SECONDS = 15   # openFDA is either quick or not coming back
 _DRUG_ANSWER_TIMEOUT_SECONDS = 55
+# An interaction check writes a structured block per pair, so it gets longer.
+_INTERACTION_ANSWER_TIMEOUT_SECONDS = 85
 _DRUG_RESOLVE_TIMEOUT_SECONDS = 15
 _MAX_INTERACTION_DRUGS = 15  # mirrors interaction_flow.MAX_DRUGS
 
@@ -1617,6 +1619,7 @@ async def drug_interactions(request: Request):
         for name in names:
             sections = await _fetch_label(name)
             drugs.append({"name": sections.get("_name") or name, "sections": sections})
+        await interaction_ai.add_drug_classes(drugs)  # best effort, never raises
 
         # Charged only here, once every label was found: a misspelled drug
         # or an openFDA hiccup used to cost a question before any AI ran.
@@ -1625,7 +1628,7 @@ async def drug_interactions(request: Request):
                 asyncio.to_thread(
                     interaction_ai.analyze_interactions, drugs, subscriptions.get_language(user["id"])
                 ),
-                timeout=_DRUG_ANSWER_TIMEOUT_SECONDS,
+                timeout=_INTERACTION_ANSWER_TIMEOUT_SECONDS,
             )
         return answer, [d["name"] for d in drugs]
 

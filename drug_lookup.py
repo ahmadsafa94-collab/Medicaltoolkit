@@ -48,6 +48,77 @@ DISCLAIMER = (
 
 MAX_CHARS_PER_BULLET = 600  # safety net only, for pathologically long single sentences
 
+# Extra label text read ONLY by the interaction checker (interaction_ai.py),
+# never shown by /dose. A label's Drug Interactions section often speaks in
+# classes ("strong CYP3A4 inhibitors", "serotonergic drugs") and the facts
+# needed to match them -- which enzyme clears this drug, a boxed warning
+# about respiratory depression with benzodiazepines, QT prolongation -- sit
+# in other sections. Long sections are cut to the sentences that matter
+# for interactions, so a 15-drug check stays a sensible size.
+_INTERACTION_HINT_RE = re.compile(
+    r"(?i)(concomitant|co-?administ|combination|combined with|together with|with other|inhibitor|inducer|"
+    r"\bCYP|cytochrome|P-gp|P-glycoprotein|\bQTc?\b|torsade|serotonin|CNS depress|respiratory depression|"
+    r"sedat|bleeding|hemorrhag|anticoagul|antiplatelet|NSAID|hyperkal|potassium|hypotension|hypoglyc|"
+    r"seizure|anticholinergic|MAOI|monoamine oxidase|lithium|alcohol|nephrotox|hepatotox|myopathy|"
+    r"rhabdomyolysis|neuroleptic malignant|opioid|benzodiazepine|grapefruit|digoxin|warfarin|\bINR\b)"
+)
+_PK_STRONG_RE = re.compile(
+    r"(?i)(\bCYP|cytochrome|P-gp|P-glycoprotein|BCRP|OATP|\bOCT\d|\bMATE|\bUGT|transporter|substrate)"
+)
+_PK_WEAK_RE = re.compile(
+    r"(?i)(\binhibitors?\b|\binducers?\b|metaboli|half-life|eliminat|excret|renal clearance|protein[- ]bound)"
+)
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.;])\s+(?=[A-Z(•])")
+
+# (label, [record keys in priority order], sentence filter(s) or None, char cap)
+INTERACTION_EXTRA = [
+    ("Boxed Warning", ["boxed_warning"], None, 2500),
+    ("Warnings (interaction-relevant sentences)", ["warnings_and_cautions", "warnings"], (_INTERACTION_HINT_RE,), 4000),
+    ("Metabolism & Pharmacokinetics (interaction-relevant sentences)",
+     ["pharmacokinetics", "clinical_pharmacology"], (_PK_STRONG_RE, _PK_WEAK_RE), 3000),
+    ("Mechanism of Action", ["mechanism_of_action"], None, 800),
+]
+
+
+def _cap(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[:limit].rsplit(" ", 1)[0] + " [...]"
+
+
+def _relevant_sentences(text: str, filters, limit: int) -> str:
+    """Sentences matching the first filter, then the next one while room is left, kept in label order."""
+    sentences = [s.strip() for s in _SENTENCE_SPLIT_RE.split(re.sub(r"\s+", " ", text)) if s.strip()]
+    chosen, used = set(), 0
+    for pattern in filters:
+        for i, sentence in enumerate(sentences):
+            if i in chosen or not pattern.search(sentence):
+                continue
+            if used + len(sentence) > limit:
+                break
+            chosen.add(i)
+            used += len(sentence) + 1
+    return " ".join(sentences[i] for i in sorted(chosen))
+
+
+def interaction_extra(record: dict) -> dict[str, str]:
+    out = {}
+    for label, keys, filters, limit in INTERACTION_EXTRA:
+        raw = next((record[k][0] for k in keys if record.get(k)), None)
+        if not raw:
+            continue
+        text = _relevant_sentences(raw, filters, limit) if filters else _cap(re.sub(r"\s+", " ", raw).strip(), limit)
+        if text:
+            out[label] = text
+    return out
+
+
+def pharm_classes(record: dict) -> list[str]:
+    """The label's own FDA pharmacologic classes, e.g. 'Cytochrome P450 3A4 Inhibitors [MoA]'."""
+    openfda = record.get("openfda", {})
+    out = []
+    for key in ("pharm_class_epc", "pharm_class_moa", "pharm_class_pe"):
+        out.extend(openfda.get(key) or [])
+    return out
+
 
 class DrugNotFoundError(Exception):
     pass
@@ -247,7 +318,12 @@ async def lookup_drug(drug_name: str) -> dict:
     )
     generic = (openfda.get("generic_name") or [None])[0]
 
-    sections = {"_name": display_name, "_generic": generic}
+    sections = {
+        "_name": display_name,
+        "_generic": generic,
+        "_interaction_extra": interaction_extra(record),
+        "_pharm_classes": pharm_classes(record),
+    }
     filled_concepts = set()
 
     for concept, field_label, emoji, keys in FIELDS:
@@ -266,7 +342,7 @@ async def lookup_drug(drug_name: str) -> dict:
     if {"pregnancy", "pediatric_use", "geriatric_use"} & filled_concepts:
         sections.pop("Other Specific Populations", None)
 
-    if len(sections) <= 2:
+    if not any(not k.startswith("_") for k in sections):
         raise DrugNotFoundError(
             f"Found a label for '{display_name}' but it had no dosing/usage sections."
         )
