@@ -155,7 +155,21 @@ def _public(site_id: str, site: dict) -> dict:
     }
 
 
+def _purge_login_steps() -> None:
+    """Logins are manual-only: recordings saved before that (with encrypted passwords) are deleted."""
+    with _lock:
+        sites = _load(strict=True)
+        if any(s.get("login_steps") for s in sites.values()):
+            for s in sites.values():
+                s.pop("login_steps", None)
+            _write_json(_SITES_PATH, sites)
+
+
 def list_sites() -> list[dict]:
+    try:
+        _purge_login_steps()
+    except Exception:
+        logger.exception("Couldn't remove old login recordings")
     sites = _load()
     out = [_public(sid, s) for sid, s in sites.items()]
     out.sort(key=lambda s: (s["name"] or "").lower())
@@ -991,9 +1005,7 @@ async def live_save(name: str | None, keep_steps: bool = True) -> dict:
         raise WebSourceError("The browser is closed. Open a website first.")
     _touch()
     state = await live.ctx.storage_state()
-    steps = list(live.steps) if keep_steps else []
-    if len(steps) <= 1:
-        steps = []  # just opening the start page: nothing to replay
+    steps = []  # manual-only logins: no steps (and no password) are kept
     with _lock:
         sites = _load(strict=True)
         site_id = live.site_id
@@ -1047,129 +1059,15 @@ async def live_close() -> None:
 # Logging in again by itself, and reading a site
 # ---------------------------------------------------------------------
 
-_relogin_locks: dict[str, asyncio.Lock] = {}
 _fetch_semaphore = asyncio.Semaphore(2)
 _fetches_running = 0
 
 
-async def _replay(site: dict, ctx) -> None:
-    page = await ctx.new_page()
-    for step in site.get("login_steps") or []:
-        kind = step.get("a")
-        open_tabs = [pg for pg in ctx.pages if not pg.is_closed()]
-        if page.is_closed() and open_tabs:
-            page = open_tabs[-1]  # a sign-in popup that closed itself, as in the live browser
-        if kind in ("tab", "close_tab"):
-            i = step.get("i")
-            if not isinstance(i, int) or not 0 <= i < len(open_tabs):
-                raise WebSourceError("The login opened different tabs this time. Log in again from the admin panel.")
-            if kind == "tab":
-                page = open_tabs[i]
-            elif len(open_tabs) > 1:
-                await open_tabs[i].close()
-                if page.is_closed():
-                    page = [pg for pg in ctx.pages if not pg.is_closed()][-1]
-            continue
-        if kind == "goto":
-            await _goto(page, step["url"])
-            continue
-        if kind == "click":
-            done = False
-            if step.get("sel"):
-                try:
-                    await page.locator(step["sel"]).first.click(timeout=_STEP_TIMEOUT_MS)
-                    done = True
-                except Exception:
-                    pass
-            if not done:
-                await _tap(page, step["x"], step["y"])
-        elif kind == "type":
-            secret = bool(step.get("secret"))
-            text = _decrypt(step["secret"]) if secret else step.get("text", "")
-            done = False
-            if step.get("sel"):
-                try:
-                    # Typed, not filled: recording appended to what the field
-                    # held, so "admin@" + "example.com" must stay one address.
-                    target = page.locator(step["sel"]).first
-                    await target.focus(timeout=_STEP_TIMEOUT_MS)
-                    await target.press_sequentially(text, delay=15, timeout=_STEP_TIMEOUT_MS * 4)
-                    done = True
-                except Exception:
-                    pass
-            if not done:
-                if secret:
-                    # Never typed blind: whatever has focus could be a search
-                    # box that sends the password to the site in the clear.
-                    raise WebSourceError("The login page changed (the password field wasn't found). Log in again from the admin panel.")
-                await page.keyboard.type(text, delay=15)
-        elif kind == "key":
-            await page.keyboard.press(step["key"])
-        elif kind == "back":
-            try:
-                await page.go_back(wait_until="domcontentloaded")
-            except Exception:
-                pass
-        await _settle(page)
-    if page.is_closed():
-        open_tabs = [pg for pg in ctx.pages if not pg.is_closed()]
-        if open_tabs:
-            page = open_tabs[-1]
-    # A login that finishes with a background request needs longer than the
-    # usual settle before its session cookie exists.
-    try:
-        await page.wait_for_load_state("networkidle", timeout=10000)
-    except Exception:
-        pass
-    return page
-
-
-_RELOGIN_PAUSE_SECONDS = 1800
 
 
 async def relogin(site_id: str) -> None:
-    """Replay the recorded login steps in a fresh browser and save the new session."""
-    site = get_site(site_id)
-    if site is None:
-        raise WebSourceError("That website isn't saved anymore.")
-    if not site.get("login_steps"):
-        raise WebSourceError("No login steps were recorded for this website. Log in from the browser and save.")
-    asked_at = time.time()
-    lock = _relogin_locks.setdefault(site_id, asyncio.Lock())
-    async with lock:
-        # Another request logged in while this one waited for the lock.
-        try:
-            if os.path.getmtime(_state_path(site_id)) > asked_at:
-                return
-        except OSError:
-            pass
-        # After a failed login, no automatic retry for a while: every user
-        # question re-submitting a changed (or CAPTCHA-blocked) password
-        # would get the site account locked.
-        site = get_site(site_id) or site
-        if site.get("last_login_ok") is False and time.time() - (site.get("last_login") or 0) < _RELOGIN_PAUSE_SECONDS:
-            raise WebSourceError(f"{site['name']} needs a new login. Open it from the admin panel and log in again.")
-        _touch()
-        ctx = await _new_context(None)
-        try:
-            page = await _replay(site, ctx)
-            # Logged in for real? Check the page the searches start from.
-            check_url_ = site.get("search_url", "").replace("{query}", "test") or site["start_url"]
-            await _goto(page, check_url_)
-            if await _looks_logged_out(page):
-                raise WebSourceError("Logging in again didn't work (the site still asks for a login). Open it from the admin panel and log in.")
-            _save_state(site_id, await ctx.storage_state())
-            _set_login_result(site_id, True)
-            logger.info("Web source %s: logged in again by replaying %d steps", site_id, len(site["login_steps"]))
-        except WebSourceError as e:
-            _set_login_result(site_id, False, str(e))
-            raise
-        except Exception as e:
-            _set_login_result(site_id, False, f"Login replay failed: {type(e).__name__}")
-            logger.exception("Web source %s: login replay failed", site_id)
-            raise WebSourceError("Logging in again didn't work. Open the website from the admin panel and log in.")
-        finally:
-            await ctx.close()
+    """Logins are manual-only: the admin logs in again in the live browser."""
+    raise WebSourceError("Automatic login is off. Open the website and log in yourself.")
 
 
 def _link_matcher(pattern: str):
@@ -1255,7 +1153,9 @@ async def search(site_id: str, query: str) -> list[dict]:
         _fetches_running += 1
         _touch()
         try:
-            for attempt in (1, 2):
+            # Manual-only logins: the admin logs in themselves in the live
+            # browser; an expired login is reported, never replayed.
+            for attempt in (1,):
                 try:
                     loaded_at = os.path.getmtime(_state_path(site_id))
                 except OSError:
@@ -1276,13 +1176,10 @@ async def search(site_id: str, query: str) -> list[dict]:
                         pass
                     return results
                 except _LoggedOut:
-                    if attempt == 2 or not site.get("login_steps"):
-                        _set_login_result(site_id, False, "The website asked for a login.")
-                        raise WebSourceError(f"{site['name']} asked for a login. Log in again from the admin panel.")
+                    _set_login_result(site_id, False, "The login expired. Log in again from Drugs > Websites.")
+                    raise WebSourceError(f"{site['name']}: the login expired. The admin needs to log in again.")
                 finally:
                     await ctx.close()
-                await relogin(site_id)
-                site = get_site(site_id) or site
         finally:
             _fetches_running -= 1
             _touch()

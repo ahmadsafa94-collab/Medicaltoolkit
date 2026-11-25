@@ -92,14 +92,14 @@ def answer_question(
     web_passages = (web_passages or [])[:MAX_WEB_PASSAGES]
     web_block = ""
     if web_passages:
-        web_block = "\n\nWEBSITE PASSAGES (searched for this question; cite each one you use as [n]):\n" + "\n\n".join(
+        web_block = "\n\nSOURCE PASSAGES (PubMed abstracts and websites searched for this question; cite each one you use as [n]):\n" + "\n\n".join(
             f"[{n}] (Website: \"{p['title']}\", {p['url']})\n{p['text']}" for n, p in enumerate(web_passages, 1)
         )
 
     system_prompt = (
         f"You are answering questions about the drug '{drug_name}' using ONLY the FDA label excerpts "
         "below (from openFDA, the same source this bot's /dose command shows verbatim)"
-        + (" and the website passages after them" if web_passages else "")
+        + (" and the source passages (PubMed abstracts, websites) after them" if web_passages else "")
         + ". Follow these rules strictly:\n"
         + (
             "0. The FDA label is the primary source. Use a website passage only where it adds to the label "

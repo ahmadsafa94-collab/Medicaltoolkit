@@ -64,6 +64,7 @@ import subscriptions
 import drug_lookup
 import drug_qa
 import interaction_ai
+import pubmed
 import web_sources
 import lexidrug
 import name_resolver
@@ -1778,7 +1779,11 @@ async def drug_ask(request: Request):
     if not isinstance(raw_webs, list) or len(raw_webs) > 5:
         raise ApiError(status_code=400, detail="Invalid websites.")
     webs = []
+    use_pubmed = False
     for wid in dict.fromkeys(w for w in raw_webs if isinstance(w, str)):
+        if wid == pubmed.SOURCE_ID:
+            use_pubmed = True  # NCBI's API: no login, always available
+            continue
         site = web_sources.get_site(wid[4:]) if wid.startswith("web:") and web_sources.valid_id(wid[4:]) else None
         if site is None or not site.get("enabled") or not site.get("search_url"):
             continue  # switched off since the list was loaded: just not searched
@@ -1788,18 +1793,20 @@ async def drug_ask(request: Request):
     resolved = sections.get("_name") or name
 
     web_passages, skipped = [], []
-    if webs:
+    if webs or use_pubmed:
         terms = await web_sources.search_terms(f"{resolved}: {question}")
         if resolved.lower() not in terms.lower():
             terms = f"{resolved} {terms}"[:200]
+        sources = ([(pubmed.SOURCE_TITLE, pubmed.passages(terms), 20)] if use_pubmed else []) + [
+            (w["title"], web_sources.passages(w["id"], terms), _WEB_FETCH_TIMEOUT_SECONDS) for w in webs
+        ]
         results = await asyncio.gather(
-            *(asyncio.wait_for(web_sources.passages(w["id"], terms), timeout=_WEB_FETCH_TIMEOUT_SECONDS) for w in webs),
-            return_exceptions=True,
+            *(asyncio.wait_for(coro, timeout=limit) for _, coro, limit in sources), return_exceptions=True
         )
-        for w, r in zip(webs, results):
+        for (title, _, _), r in zip(sources, results):
             if isinstance(r, BaseException):
-                logger.warning("Web source %s failed for a drug question: %r", w["id"], r)
-                skipped.append(w["title"])
+                logger.warning("Source %s failed for a drug question: %r", title, r)
+                skipped.append(title)
             else:
                 web_passages += r
         web_passages = web_passages[:drug_qa.MAX_WEB_PASSAGES]
@@ -1840,7 +1847,9 @@ async def drug_ask(request: Request):
 async def drug_websites(request: Request):
     """The websites Drug LookUp can also search, and whether this user manages them (the admin)."""
     user = require_user(request)
-    sites = [{"id": s["book_id"], "title": s["title"]} for s in web_sources.ask_sources()]
+    sites = [{"id": pubmed.SOURCE_ID, "title": pubmed.SOURCE_TITLE}] + [
+        {"id": s["book_id"], "title": s["title"]} for s in web_sources.ask_sources()
+    ]
     return JSONResponse({"sites": sites, "is_admin": subscriptions.is_admin(user["id"])})
 
 

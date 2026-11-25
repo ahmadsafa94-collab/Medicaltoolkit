@@ -4028,10 +4028,9 @@ async function loadWebSites() {
 function webStatusLine(s) {
   const parts = [];
   parts.push(s.has_session ? `${ic("circle-check")} Login saved` : "No login saved");
-  if (s.login_steps) parts.push(`${s.login_steps} login steps${s.secret_steps ? " (password encrypted)" : ""}`);
   if (s.last_login) {
     const when = new Date(s.last_login * 1000).toLocaleString();
-    parts.push(s.last_login_ok === false ? `<span class="bad">${ic("triangle-alert")} Last login failed ${when}: ${escapeHtml(s.last_error || "")}</span>` : `last login ${when}`);
+    parts.push(s.last_login_ok === false ? `<span class="bad">${ic("triangle-alert")} Needs you to log in again (${when}): ${escapeHtml(s.last_error || "")}</span>` : `logged in ${when}`);
   }
   parts.push(s.enabled ? `${ic("circle", " ic-on")} Searched in Drug LookUp` : `${ic("circle")} Not searched in Drug LookUp`);
   return parts.join(" · ");
@@ -4069,9 +4068,8 @@ function renderWebSites() {
         `<span class="muted">${escapeHtml(new URL(s.start_url).hostname)}</span></div>` +
         `<div class="web-site-status">${webStatusLine(s)}</div>` +
         `<div class="web-site-actions">` +
-        `<button class="mini-btn" data-web-open="${s.site_id}">${ic("globe")} Open</button>` +
+        `<button class="mini-btn" data-web-open="${s.site_id}">${ic("key-round")} Open &amp; log in</button>` +
         `<button class="mini-btn" data-web-settings="${s.site_id}">${ic("settings")} Where to search</button>` +
-        (s.login_steps ? `<button class="mini-btn" data-web-relogin="${s.site_id}">${ic("key-round")} Log in again now</button>` : "") +
         `<button class="mini-btn" data-web-del="${s.site_id}">${ic("trash-2")}</button></div>${form}</div>`
       );
     })
@@ -4167,7 +4165,6 @@ function webShow(frame) {
   webSetFocus(frame.focus || {});
   const url = document.getElementById("web-url");
   if (document.activeElement !== url) url.value = frame.url;
-  document.getElementById("web-steps").textContent = frame.steps;
   renderWebTabs(frame.tabs || []);
   const notice = document.getElementById("web-notice");
   notice.hidden = !frame.notice;
@@ -4480,6 +4477,5 @@ function wireWebSources() {
     b.addEventListener("pointerdown", (e) => e.preventDefault());
     b.addEventListener("click", () => webKey(b.dataset.key));
   });
-  document.getElementById("web-rec-restart").addEventListener("click", () => webAction({ type: "restart_recording" }));
   document.getElementById("web-save").addEventListener("click", webSave);
 }

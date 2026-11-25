@@ -17,11 +17,11 @@
   -->
   <link rel="icon" type="image/png" href="favicon.png" />
   <link rel="apple-touch-icon" href="icon-192.png" />
-  <link rel="stylesheet" href="style.css?v=31" />
-  <link rel="stylesheet" href="fonts.css?v=31" />
-  <link rel="stylesheet" href="themes.css?v=31" />
+  <link rel="stylesheet" href="style.css?v=32" />
+  <link rel="stylesheet" href="fonts.css?v=32" />
+  <link rel="stylesheet" href="themes.css?v=32" />
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
-  <script src="theme.js?v=31"></script>
+  <script src="theme.js?v=32"></script>
   <!-- pdf.js 3.11.174 (Apache-2.0), self-hosted: same bytes as cdnjs (SRI-checked). -->
   <script src="vendor/pdf.min.js"></script>
 </head>
@@ -31,7 +31,7 @@
 
   <!-- Welcome splash (splash.js): plays over the app while it loads, then dissolves. -->
   <div id="splash"></div>
-  <script src="splash.js?v=31"></script>
+  <script src="splash.js?v=32"></script>
 
   <!-- ============ SHELF (root) ============ -->
   <section id="view-shelf" class="view">
@@ -144,8 +144,8 @@
       <!-- Admin only: websites the bot logs in to and searches (web_sources.py). -->
       <div id="web-admin" class="panel">
         <p><strong><svg class="ic" aria-hidden="true"><use href="#i-globe"/></svg> Web sources</strong> <span class="muted">(admin only)</span></p>
-        <p class="muted">Open a website in the bot's browser and log in once. The bot keeps the login (and logs
-          in again by itself when it expires), then searches the site when someone asks about a drug in Drug LookUp.</p>
+        <p class="muted">Open a website in the bot's browser and log in yourself. The bot keeps that login and searches the site
+          when someone asks about a drug in Drug LookUp. When the login expires, log in again here.</p>
         <div class="drug-input-row">
           <input id="web-new-url" class="drug-input" type="url" placeholder="Address, e.g. pubmed.ncbi.nlm.nih.gov"
                  autocomplete="off" enterkeyhint="go" />
@@ -373,12 +373,9 @@
     <p class="muted web-hint">Tap to click, swipe to scroll. Tap a field on the page and type: every letter goes
       straight into it. Password fields are hidden as you type and stored encrypted.</p>
     <div class="panel">
-      <p class="muted">Recorded so far: <strong id="web-steps">0</strong> steps. They are replayed to log in
-        again when the saved login expires. Passwords typed with <svg class="ic" aria-hidden="true"><use href="#i-lock"/></svg> are stored encrypted. If you browsed
-        around first, open the login page and tap “Start recording here”.</p>
-      <div class="ask-compose-tools">
-        <button id="web-rec-restart" class="mini-btn"><svg class="ic" aria-hidden="true"><use href="#i-circle-dot"/></svg> Start recording here</button>
-      </div>
+      <p class="muted">Log in on the page yourself, then tap Save. The bot uses that login until it expires; it never
+        logs in by itself and no password is kept. When the login expires, the site shows a warning under
+        Drugs &gt; Websites: open it and log in again.</p>
       <input id="web-save-name" class="drug-input web-save-name" type="text" maxlength="80" placeholder="Name, e.g. PubMed" />
       <button id="web-save" class="btn ask-send-btn"><svg class="ic" aria-hidden="true"><use href="#i-save"/></svg> Save login & close</button>
     </div>
@@ -453,6 +450,6 @@
     <button class="tab" data-tab="view-drugs"><span><svg class="ic" aria-hidden="true"><use href="#i-pill"/></svg></span><small>Drugs</small></button>
   </nav>
 
-  <script src="app.js?v=31"></script>
+  <script src="app.js?v=32"></script>
 </body>
 </html>
