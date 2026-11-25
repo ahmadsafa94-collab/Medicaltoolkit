@@ -2567,7 +2567,21 @@ async def upload_start(request: Request):
     else:
         raise ApiError(status_code=400, detail="Invalid upload target.")
 
-    if sum(1 for u in _uploads.values() if u["user_id"] == user["id"]) >= _MAX_OPEN_UPLOADS_PER_USER:
+    # An upload the app gave up on (closed, cancelled, failed) is kept for a
+    # while so it can resume after a restart -- but it must not block a new
+    # one: at the limit, this user's idle uploads (nothing received for a
+    # minute) make room, oldest first.
+    mine = sorted(
+        ((uid, u) for uid, u in _uploads.items() if u["user_id"] == user["id"]), key=lambda x: x[1]["touched"]
+    )
+    now = time.time()
+    while len(mine) >= _MAX_OPEN_UPLOADS_PER_USER and not mine[0][1]["writers"] and now - mine[0][1]["touched"] > 60:
+        old_id, old_up = mine.pop(0)
+        _uploads.pop(old_id, None)
+        old_up["closed"] = True
+        _safe_remove(old_up["path"])
+        _safe_remove(_upload_meta_path(old_id))
+    if len(mine) >= _MAX_OPEN_UPLOADS_PER_USER:
         raise ApiError(status_code=429, detail="You already have uploads in progress. Wait for them to finish.")
 
     upload_id = uuid.uuid4().hex
