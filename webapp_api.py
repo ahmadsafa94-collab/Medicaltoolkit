@@ -32,6 +32,7 @@ import contextvars
 import logging
 import os
 import tempfile
+import json
 import re
 import shutil
 import time
@@ -2425,23 +2426,76 @@ async def shared_delete_book(request: Request):
 # to check the PDF and register it. The old /api/upload stays for clients
 # still running a cached older app.js.
 
-# 4 MB parts, sent 4 at a time by the client: on a mobile link a dropped
+# 2 MB parts, sent 6 at a time by the client: on a slow mobile link a dropped
 # connection loses at most one small part, and more parallel streams use a
 # high-latency route (far from the Amsterdam server) better than fewer.
-UPLOAD_CHUNK_BYTES = 4 * 1024 * 1024
+UPLOAD_CHUNK_BYTES = 2 * 1024 * 1024
 _WRITE_BUFFER_BYTES = 1024 * 1024
 _UPLOAD_TTL_SECONDS = 2 * 3600
 _UPLOAD_MAX_LIFETIME_SECONDS = 6 * 3600  # however busy, an upload can't hold its space forever
 _MAX_OPEN_UPLOADS_PER_USER = 3
 _uploads: dict[str, dict] = {}
 
-# Parts are assembled here, not at the book's final path: a restart forgets
-# every upload in progress, and this folder is emptied at startup, so an
-# abandoned upload can't leave a file behind in someone's library. The
-# finished file is moved into place only after it passed the checks.
+# Parts are assembled here, not at the book's final path, so an abandoned
+# upload can't leave a file behind in someone's library; the finished file
+# is moved into place only after it passed the checks. Each upload's state
+# is kept next to its parts ({id}.json), so a restart -- every deploy is
+# one -- doesn't lose an upload in progress: the client's next part picks
+# it up again. Leftovers older than the longest an upload may live are
+# removed at startup.
 _UPLOAD_PARTS_DIR = os.path.join(STORAGE_DIR, "_uploads")
-shutil.rmtree(_UPLOAD_PARTS_DIR, ignore_errors=True)
 os.makedirs(_UPLOAD_PARTS_DIR, exist_ok=True)
+_UPLOAD_ID_RE = re.compile(r"[0-9a-f]{32}")
+
+
+def _sweep_upload_leftovers() -> None:
+    cutoff = time.time() - 6 * 3600
+    for name in os.listdir(_UPLOAD_PARTS_DIR):
+        path = os.path.join(_UPLOAD_PARTS_DIR, name)
+        try:
+            if os.path.getmtime(path) < cutoff:
+                os.remove(path)
+        except OSError:
+            pass
+
+
+_sweep_upload_leftovers()
+
+
+def _upload_meta_path(upload_id: str) -> str:
+    return os.path.join(_UPLOAD_PARTS_DIR, f"{upload_id}.json")
+
+
+def _save_upload_meta(upload_id: str, up: dict) -> None:
+    data = {k: v for k, v in up.items() if k not in ("writers", "closed", "received")}
+    data["received"] = sorted(up["received"])
+    tmp = f"{_upload_meta_path(upload_id)}.{uuid.uuid4().hex[:8]}.tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(data, f)
+        os.replace(tmp, _upload_meta_path(upload_id))
+    except OSError:
+        logger.exception("Couldn't save the state of upload %s", upload_id)
+        _safe_remove(tmp)
+
+
+def _load_upload(upload_id: str) -> dict | None:
+    """An upload from before a restart, if its parts file and state are still here."""
+    if not _UPLOAD_ID_RE.fullmatch(upload_id or ""):
+        return None
+    try:
+        with open(_upload_meta_path(upload_id)) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not os.path.exists(data.get("path") or ""):
+        return None
+    data["received"] = set(data.get("received") or [])
+    data["writers"] = 0
+    data["closed"] = False
+    _uploads[upload_id] = data
+    logger.info("Upload %s picked up again after a restart (%d/%d parts)", upload_id, len(data["received"]), data["chunks"])
+    return data
 
 
 def _expire_uploads() -> None:
@@ -2453,6 +2507,7 @@ def _expire_uploads() -> None:
             _uploads.pop(uid, None)
             u["closed"] = True
             _safe_remove(u["path"])
+            _safe_remove(_upload_meta_path(uid))
 
 
 async def upload_start(request: Request):
@@ -2506,12 +2561,13 @@ async def upload_start(request: Request):
         "chunks": -(-size // UPLOAD_CHUNK_BYTES), "dest_dir": dest_dir, "filename": filename,
         "writers": 0, "closed": False,
     }
+    await asyncio.to_thread(_save_upload_meta, upload_id, _uploads[upload_id])
     return JSONResponse({"upload_id": upload_id, "chunk_size": UPLOAD_CHUNK_BYTES, "chunks": _uploads[upload_id]["chunks"]})
 
 
 def _owned_upload(request: Request, user_id: int) -> tuple[str, dict]:
     upload_id = request.path_params["upload_id"]
-    up = _uploads.get(upload_id)
+    up = _uploads.get(upload_id) or _load_upload(upload_id)
     if up is None or up["user_id"] != user_id:
         raise ApiError(status_code=404, detail="This upload expired. Please start it again.")
     return upload_id, up
@@ -2568,6 +2624,7 @@ async def upload_chunk(request: Request):
         raise ApiError(status_code=400, detail="Chunk incomplete -- please retry.")
     up["received"].add(index)
     up["touched"] = time.time()
+    await asyncio.to_thread(_save_upload_meta, request.path_params["upload_id"], up)
     return JSONResponse({"ok": True, "received": len(up["received"])})
 
 
@@ -2583,6 +2640,7 @@ async def upload_finish(request: Request):
     # the file that is checked is exactly the file that is kept.
     up["closed"] = True
     _uploads.pop(upload_id, None)
+    _safe_remove(_upload_meta_path(upload_id))
     secs = max(0.001, time.time() - up["started"])
     logger.info(
         "Upload by %s: %.1f MB in %.0f s (%.2f MB/s, %d parts)",
@@ -2655,6 +2713,7 @@ async def upload_cancel(request: Request):
     _uploads.pop(upload_id, None)
     up["closed"] = True
     _safe_remove(up["path"])
+    _safe_remove(_upload_meta_path(upload_id))
     return JSONResponse({"cancelled": True})
 
 

@@ -177,6 +177,19 @@ let maxUploadMb = 500;
 
 let shelfLoadSeq = 0;
 
+// Book title search: case and accents ignored, every typed word must appear.
+function bookQueryWords(q) {
+  return (q || "").normalize("NFD").replace(/\p{M}/gu, "").toLowerCase().split(/\s+/).filter(Boolean);
+}
+function titleMatches(title, words) {
+  if (!words.length) return true;
+  const t = (title || "").normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
+  return words.every((w) => t.includes(w));
+}
+
+let shelfBooks = [];   // the user's own books, as last loaded (the search filters these)
+let shelfQuery = "";
+
 async function loadShelf() {
   const grid = document.getElementById("shelf-grid");
   const empty = document.getElementById("shelf-empty");
@@ -190,8 +203,8 @@ async function loadShelf() {
     // From the server, not books.length: paid 📚 Requested Books sit on the
     // shelf but don't count toward the free cap.
     shelfCount = shelf_used ?? books.length;
-    empty.hidden = books.length > 0;
-    renderShelf(grid, books);
+    shelfBooks = books;
+    renderMyShelf();
   } catch (e) {
     // TEMPORARY diagnostics appended to the error itself -- this specific
     // failure (401 "missing sign-in data") has resisted two rounds of
@@ -256,15 +269,55 @@ async function loadSpecialtyShelf() {
   renderSpecialtyShelf();
 }
 
+function renderMyShelf() {
+  const grid = document.getElementById("shelf-grid");
+  const empty = document.getElementById("shelf-empty");
+  const words = bookQueryWords(shelfQuery);
+  const books = shelfBooks.filter((b) => titleMatches(b.title, words));
+  grid.innerHTML = "";
+  empty.hidden = books.length > 0;
+  empty.innerHTML = shelfBooks.length && words.length
+    ? `<p>No book on your shelf matches “${escapeHtml(shelfQuery)}”.</p>`
+    : `<p>No books yet.</p><p class="muted">Tap + to upload your first PDF.</p>`;
+  renderShelf(grid, books);
+}
+
 function renderSpecialtyShelf() {
   const grid = document.getElementById("shelf-spec-grid");
   const empty = document.getElementById("shelf-spec-empty");
   grid.innerHTML = "";
-  const spec = (shelfCatalog || []).find((x) => x.name === shelfSpecialty);
-  const books = spec ? spec.books : [];
+  const words = bookQueryWords(shelfQuery);
+  let books;
+  if (words.length) {
+    // A search looks through every specialty, not just the one picked.
+    const seen = new Set();
+    books = (shelfCatalog || []).flatMap((x) => x.books).filter((b) => {
+      if (seen.has(b.book_id) || !titleMatches(b.title, words)) return false;
+      seen.add(b.book_id);
+      return true;
+    });
+  } else {
+    const spec = (shelfCatalog || []).find((x) => x.name === shelfSpecialty);
+    books = spec ? spec.books : [];
+  }
+  document.getElementById("shelf-specialty").disabled = words.length > 0;
   empty.hidden = books.length > 0;
-  empty.textContent = shelfCatalog && shelfCatalog.length ? "No books in this specialty yet." : "No specialty libraries yet.";
+  empty.textContent = words.length
+    ? `No specialty book matches “${shelfQuery}”.`
+    : shelfCatalog && shelfCatalog.length ? "No books in this specialty yet." : "No specialty libraries yet.";
   renderShelf(grid, books, { shared: true });
+}
+
+{
+  let t = null;
+  document.getElementById("shelf-search").addEventListener("input", (e) => {
+    clearTimeout(t);
+    t = setTimeout(() => {
+      shelfQuery = e.target.value.trim();
+      if (shelfTab === "spec") renderSpecialtyShelf();
+      else renderMyShelf();
+    }, 120);
+  });
 }
 
 function bookTile(book, { shared = false } = {}) {
@@ -638,13 +691,17 @@ document.getElementById("file-input").addEventListener("change", (e) => {
 // ---------------------------------------------------------------------
 // Chunked upload (shelf books, and specialty books for the admin)
 // ---------------------------------------------------------------------
-// The file goes up in 8 MB parts, UPLOAD_PARALLEL at a time, each written
-// straight into place on the server. Several streams use a slow or
-// far-away connection much better than one, and a part that fails is
-// retried on its own instead of the whole book starting over.
+// The file goes up in small parts (the server sets the size, 2 MB),
+// UPLOAD_PARALLEL at a time, each written straight into place on the
+// server. Several streams use a slow or far-away connection much better
+// than one, and a part that fails is retried on its own instead of the
+// whole book starting over. The server keeps an upload's progress on disk,
+// so a restart (every deploy is one) only pauses it: parts are retried for
+// about two minutes, which outlasts a restart, and carry on where they were.
 
-const UPLOAD_PARALLEL = 4;
-const UPLOAD_RETRIES = 5;
+const UPLOAD_PARALLEL = 6;
+const UPLOAD_RETRIES = 16;
+const uploadRetryDelay = (attempt) => Math.min(2000 * attempt, 10000);
 
 // --- stay on the latest deployed version -------------------------------
 // Telegram keeps a mini app's page alive between opens, so a user can run
@@ -723,15 +780,17 @@ async function chunkedUpload(file, opts) {
   if (await reloadIfOutdated()) throw new Error("The app was just updated -- please start the upload again.");
   uploadsInFlight++;
   try {
-    return await _chunkedUpload(file, opts);
+    return await _chunkedUploadAwake(file, opts);
   } finally {
     uploadsInFlight--;
   }
 }
 
-async function _chunkedUpload(file, { target = "shelf", title, specialty, onProgress }) {
+async function _chunkedUploadAwake(file, { target = "shelf", title, specialty, onProgress }) {
   // Keep the screen on: Android pauses a backgrounded WebView, and a
-  // sleeping screen is the usual reason a long upload "stops".
+  // sleeping screen is the usual reason a long upload "stops". (This used
+  // to share its name with _chunkedUpload below, which replaced it, so the
+  // screen was never actually kept on.)
   let wakeLock = null;
   try { if (navigator.wakeLock) wakeLock = await navigator.wakeLock.request("screen"); } catch (_) { /* not supported */ }
   try {
@@ -772,7 +831,8 @@ async function _chunkedUpload(file, { target, title, specialty, onProgress }) {
           const permanent = e.status && e.status !== 400 && e.status < 500;
           if (permanent || attempt >= UPLOAD_RETRIES) throw e;
           loaded[i] = 0;
-          await new Promise((r) => setTimeout(r, 1000 * attempt));
+          report();
+          await new Promise((r) => setTimeout(r, uploadRetryDelay(attempt)));
         }
       }
     }
@@ -784,7 +844,17 @@ async function _chunkedUpload(file, { target, title, specialty, onProgress }) {
     throw e;
   }
   if (onProgress) onProgress(1, "Checking the file…");
-  return api(`/api/uploads/${id}/finish`, { method: "POST" });
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await api(`/api/uploads/${id}/finish`, { method: "POST" });
+    } catch (e) {
+      // Only while the server is unreachable (a restart): anything it
+      // actually answered is final.
+      const unreachable = !e.status || e.status === 502 || e.status === 503;
+      if (!unreachable || attempt >= 8) throw e;
+      await new Promise((r) => setTimeout(r, uploadRetryDelay(attempt)));
+    }
+  }
 }
 
 function uploadFile(file) {
@@ -3328,27 +3398,47 @@ function renderAskSpecialtyOptions() {
     .join("");
 }
 
+let askQuery = "";  // the picker's search box
+
 function renderAskLibrary() {
   if (!askLib) return;
   const select = document.getElementById("ask-specialty");
   const sharedBox = document.getElementById("ask-shared-books");
   const mineBox = document.getElementById("ask-my-books");
 
+  const words = bookQueryWords(askQuery);
   if (askLib.specialties.length) {
     select.hidden = false;
+    select.disabled = words.length > 0;
     renderAskSpecialtyOptions();
-    const spec = askLib.specialties.find((s) => s.name === askSpecialty);
-    sharedBox.innerHTML = spec && spec.books.length
-      ? spec.books.map((b) => askRowHtml(b, { shared: true })).join("")
-      : `<p class="muted">No books in this specialty yet.</p>`;
+    if (words.length) {
+      // A search looks through every specialty, not just the one picked.
+      const seen = new Set();
+      const hits = askLib.specialties.flatMap((s) => s.books).filter((b) => {
+        if (seen.has(b.book_id) || !titleMatches(b.title, words)) return false;
+        seen.add(b.book_id);
+        return true;
+      });
+      sharedBox.innerHTML = hits.length
+        ? hits.map((b) => askRowHtml(b, { shared: true })).join("")
+        : `<p class="muted">No specialty book matches “${escapeHtml(askQuery)}”.</p>`;
+    } else {
+      const spec = askLib.specialties.find((s) => s.name === askSpecialty);
+      sharedBox.innerHTML = spec && spec.books.length
+        ? spec.books.map((b) => askRowHtml(b, { shared: true })).join("")
+        : `<p class="muted">No books in this specialty yet.</p>`;
+    }
   } else {
     select.hidden = true;
     sharedBox.innerHTML = `<p class="muted">No specialty libraries yet.</p>`;
   }
 
-  mineBox.innerHTML = askLib.my_books.length
-    ? askLib.my_books.map((b) => askRowHtml(b, { shared: false })).join("")
-    : `<p class="muted">No books on your shelf yet. Add one from the ${ic("library-big")} Shelf tab.</p>`;
+  const mine = askLib.my_books.filter((b) => titleMatches(b.title, words));
+  mineBox.innerHTML = mine.length
+    ? mine.map((b) => askRowHtml(b, { shared: false })).join("")
+    : askLib.my_books.length
+      ? `<p class="muted">None of your books matches “${escapeHtml(askQuery)}”.</p>`
+      : `<p class="muted">No books on your shelf yet. Add one from the ${ic("library-big")} Shelf tab.</p>`;
   loadCoverThumbs(document.getElementById("view-ask"));
 
   const admin = document.getElementById("ask-admin");
@@ -3368,7 +3458,7 @@ function renderAskSpecActions() {
   const spec = askLib && askLib.specialties.find((x) => x.name === askSpecialty);
   const ready = spec ? spec.books.filter((b) => b.qa_indexed) : [];
   const btn = document.getElementById("ask-tick-all");
-  btn.hidden = ready.length === 0;
+  btn.hidden = ready.length === 0 || bookQueryWords(askQuery).length > 0;  // ticks one specialty: not while searching
   btn.innerHTML = ready.length && ready.every((b) => askSelected.has(b.book_id)) ? `${ic("square")} Untick all` : `${ic("square-check")} Tick all`;
   document.getElementById("ask-suggest").hidden = !askLib;
 }
@@ -4969,3 +5059,14 @@ document.getElementById("reader-night-btn").addEventListener("click", () => {
   readerApplyNight();
 });
 readerApplyNight();
+
+{
+  let t = null;
+  document.getElementById("ask-book-search").addEventListener("input", (e) => {
+    clearTimeout(t);
+    t = setTimeout(() => {
+      askQuery = e.target.value.trim();
+      renderAskLibrary();
+    }, 120);
+  });
+}

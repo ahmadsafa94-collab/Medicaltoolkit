@@ -836,3 +836,11 @@ html[data-theme="midnight"] .web-notice { background: #3a2a10; color: #ffd9a0; b
   background: #0d3b66; color: #fff; padding: 8px 14px; border-radius: 99px; font-size: 13px; box-shadow: 0 4px 14px rgba(0,0,0,0.25); }
 #view-reader.is-night #reader-canvas-wrap { background: #0b1220; }
 #view-reader.is-night #reader-canvas { filter: invert(0.9) hue-rotate(180deg); }
+
+/* ---------- Book search boxes (Shelf and Choose resources) ---------- */
+.book-search { position: relative; display: flex; align-items: center; margin: 4px 0 10px; }
+.shelf-search { margin: 0 16px 10px; }
+.book-search .ic { position: absolute; left: 12px; color: var(--hint); pointer-events: none; }
+.book-search input { width: 100%; box-sizing: border-box; padding: 10px 12px 10px 38px; border-radius: 12px;
+  border: 1px solid var(--border); background: var(--secondary-bg); color: var(--text); font: inherit; font-size: 15px; }
+.book-search input:focus { outline: none; border-color: var(--button); box-shadow: 0 0 0 3px var(--primary-soft); }
