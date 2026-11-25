@@ -3125,6 +3125,13 @@ async def backfill_shared_chapters() -> None:
     uploaded before division became automatic. Runs once at startup, one
     book at a time; a book that fails is simply left for next time.
     """
+    # A specialty book whose indexing was cut off by a restart (every
+    # deploy is one) starts again by itself, instead of sitting at "Not
+    # ready yet" until the admin taps Retry. One that failed keeps its error.
+    for book_id, book in list(shared_library.list_books().items()):
+        if not book.get("qa_indexed") and not book.get("index_error"):
+            logger.info("Resuming the indexing of specialty book %s after a restart", book_id)
+            _start_shared_index(book_id)
     for book_id, book in list(shared_library.list_books().items()):
         if not book.get("qa_indexed") or book.get("chapters"):
             continue
