@@ -4169,6 +4169,21 @@ function webShow(frame) {
   if (document.activeElement !== url) url.value = frame.url;
   document.getElementById("web-steps").textContent = frame.steps;
   renderWebTabs(frame.tabs || []);
+  const notice = document.getElementById("web-notice");
+  notice.hidden = !frame.notice;
+  notice.textContent = frame.notice || "";
+}
+
+// A ring where the finger landed, so a tap visibly registered.
+function webTapMark(clientX, clientY) {
+  const screen = document.querySelector("#view-web .web-screen");
+  const r = screen.getBoundingClientRect();
+  const dot = document.createElement("span");
+  dot.className = "web-tap";
+  dot.style.left = `${clientX - r.left}px`;
+  dot.style.top = `${clientY - r.top}px`;
+  screen.appendChild(dot);
+  setTimeout(() => dot.remove(), 650);
 }
 
 // The browser's tabs: shown once a site opens a second one. A new tab never
@@ -4355,6 +4370,7 @@ function wireWebScreen() {
     if (cancelled || webBusy) { shot.style.transform = ""; return; }
     if (!d.moved) {
       if (Date.now() - d.t > 900) return;  // a long press: nothing
+      webTapMark(d.x, d.y);
       await webFlushTyping();
       webFocusAfterTap = true;
       await webAction({ type: "click", x: px, y: py });

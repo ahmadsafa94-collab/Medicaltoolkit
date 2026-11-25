@@ -786,3 +786,11 @@ body.has-tabbar .fab { bottom: calc(76px + env(safe-area-inset-bottom, 0px)); }
 .flash-rate-btn .ic { width: 1.25em; height: 1.25em; }
 .quiz-summary-row .ic { color: var(--button); }
 @media (prefers-reduced-motion: reduce) { .spinner-line .ic { animation: none; } }
+
+.web-notice { margin: 0 16px 8px; padding: 10px 12px; border-radius: 10px; font-size: 13px; line-height: 1.4;
+  background: #fff4e5; color: #7a4a00; border: 1px solid #f3c98b; }
+html[data-theme="midnight"] .web-notice { background: #3a2a10; color: #ffd9a0; border-color: #6b4a17; }
+.web-tap { position: absolute; width: 34px; height: 34px; margin: -17px 0 0 -17px; border-radius: 50%;
+  border: 3px solid var(--button); background: rgba(43, 140, 232, 0.25); pointer-events: none;
+  animation: web-tap 0.6s ease-out forwards; }
+@keyframes web-tap { from { transform: scale(0.4); opacity: 1; } to { transform: scale(1.4); opacity: 0; } }

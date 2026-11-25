@@ -649,6 +649,21 @@ _JS_SCROLL = """([x, y, dx, dy]) => {
 }"""
 
 
+_BOT_CHECK_HOSTS = ("challenges.cloudflare.com", "www.google.com/recaptcha", "www.recaptcha.net", "hcaptcha.com")
+
+
+def _bot_check_notice(page, title: str) -> str | None:
+    """A "verify you are human" check on screen: those are built to refuse automated browsers like this one."""
+    try:
+        urls = [f.url for f in page.frames]
+    except Exception:
+        urls = []
+    if any(h in u for u in urls for h in _BOT_CHECK_HOSTS) or (title or "").strip().lower() in ("just a moment...", "attention required! | cloudflare"):
+        return ("This page shows a \"verify you are human\" check (CAPTCHA). Those are made to refuse automated "
+                "browsers like the bot's, so ticking it won't work here. Use a site or login page without one.")
+    return None
+
+
 async def _tap(page, x: float, y: float) -> None:
     try:
         await page.touchscreen.tap(x, y)
@@ -795,6 +810,7 @@ async def live_frame() -> dict:
         "url": page.url,
         "title": title,
         "tabs": tabs,
+        "notice": _bot_check_notice(page, title),
         "focus": focus,
         "width": VIEWPORT["width"],
         "height": VIEWPORT["height"],
@@ -841,6 +857,8 @@ async def live_action(action: dict) -> dict:
             # touch events, then the click a phone makes from them. A mouse
             # click missed controls that only listen for touches.
             await _tap(page, x, y)
+            logger.info("Admin browser tap on %s at (%.0f, %.0f): %s",
+                        urllib.parse.urlsplit(page.url).hostname, x, y, (selector or "?")[:160])
             _live.steps.append({"a": "click", "sel": selector, "x": x, "y": y})
             await _settle(page)
         elif kind == "type":
