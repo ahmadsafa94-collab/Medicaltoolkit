@@ -106,7 +106,7 @@ function confirmMsg(msg) {
 
 const views = [
   "view-shelf", "view-ask", "view-drugs", "view-bookmarks", "view-request-book",
-  "view-upload", "view-book", "view-reader", "view-web",
+  "view-upload", "view-book", "view-reader", "view-web", "view-accounts",
 ];
 
 // The tab bar's destinations. A root view resets the navigation stack
@@ -4197,6 +4197,7 @@ function wireAskTab() {
   wireDrugsTab();
   wireAskTab();
   wireWebSources();
+  setTimeout(() => { if (!me) loadMe({ prompt: true }); }, 0);  // if the sign-in data arrived late
   document.querySelectorAll("#view-shelf .subtab").forEach((t) =>
     t.addEventListener("click", () => setShelfTab(t.dataset.shelftab))
   );
@@ -5195,3 +5196,313 @@ readerApplyNight();
     }, 120);
   });
 }
+
+
+// ---------------------------------------------------------------------
+// Account: log in with a username and password from the admin (linked to
+// this Telegram account), or use the app as a guest with limits. The admin
+// manages accounts and reads each one's activity log (accounts.py).
+// ---------------------------------------------------------------------
+
+let me = null;  // {tier: admin|account|premium|guest, username, is_admin, full_access, guest?}
+
+function choiceKey() { return "guestChoice"; }
+function guestChosen() { try { return localStorage.getItem(choiceKey()) === "1"; } catch (_) { return false; } }
+function setGuestChosen(on) { try { on ? localStorage.setItem(choiceKey(), "1") : localStorage.removeItem(choiceKey()); } catch (_) {} }
+
+async function loadMe({ prompt = false } = {}) {
+  try {
+    me = await api("/api/me");
+  } catch (_) {
+    return;
+  }
+  renderAccountUI();
+  if (prompt && me.tier === "guest" && !guestChosen()) openLoginSheet();
+}
+
+function renderAccountUI() {
+  if (!me) return;
+  const btn = document.getElementById("btn-account");
+  if (me.tier === "guest") btn.innerHTML = `${ic("log-in")} <span>Log in</span>`;
+  else if (me.is_admin) btn.innerHTML = `${ic("shield-check")} <span>Admin</span>`;
+  else if (me.username) btn.innerHTML = `${ic("user-check")} <span>${escapeHtml(me.username)}</span>`;
+  else btn.innerHTML = `${ic("user-check")} <span>Premium</span>`;
+  btn.classList.toggle("is-guest", me.tier === "guest");
+  const banner = document.getElementById("guest-banner");
+  banner.hidden = me.tier !== "guest";
+  if (me.guest) {
+    const q = me.guest;
+    document.getElementById("guest-banner-text").textContent =
+      `${q.questions_left} of ${q.questions_per_day} AI questions left today · no uploads or saving`;
+    document.getElementById("guest-limit-q").textContent =
+      `${q.questions_per_day} AI questions a day (Ask, Drug LookUp, Explain)`;
+  }
+}
+
+function openLoginSheet(note) {
+  const sheet = document.getElementById("login-sheet");
+  const loggedIn = me && me.tier !== "guest";
+  document.getElementById("login-pane").hidden = loggedIn;
+  document.getElementById("account-pane").hidden = !loggedIn;
+  const err = document.getElementById("login-error");
+  err.hidden = !note;
+  err.textContent = note || "";
+  if (loggedIn) {
+    document.getElementById("account-title").textContent =
+      me.is_admin ? "Admin" : me.username ? `Logged in as ${me.username}` : "Premium";
+    document.getElementById("account-sub").textContent = me.is_admin
+      ? "You have full access and manage the accounts."
+      : me.username
+        ? "Full access. This account is linked to your Telegram account."
+        : "Full access through your Premium plan.";
+    document.getElementById("account-manage").hidden = !me.is_admin;
+    document.getElementById("account-logout").hidden = !me.username;
+  }
+  sheet.hidden = false;
+  if (!loggedIn) setTimeout(() => document.getElementById("login-user").focus(), 50);
+}
+
+function closeLoginSheet() {
+  document.getElementById("login-sheet").hidden = true;
+}
+
+async function doLogin() {
+  const user = document.getElementById("login-user").value.trim();
+  const pass = document.getElementById("login-pass").value;
+  const err = document.getElementById("login-error");
+  if (!user || !pass) {
+    err.hidden = false;
+    err.textContent = "Enter your username and password.";
+    return;
+  }
+  const btn = document.getElementById("login-go");
+  btn.disabled = true;
+  err.hidden = true;
+  try {
+    await api("/api/account/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: user, password: pass }),
+    });
+    document.getElementById("login-pass").value = "";
+    setGuestChosen(false);
+    await loadMe();
+    closeLoginSheet();
+    alertMsg(`Welcome, ${me && me.username ? me.username : user}! You now have full access.`);
+    loadShelf();
+  } catch (e) {
+    err.hidden = false;
+    err.textContent = e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+document.getElementById("btn-account").addEventListener("click", () => openLoginSheet());
+document.querySelectorAll("[data-open-login]").forEach((b) => b.addEventListener("click", () => openLoginSheet()));
+document.getElementById("login-go").addEventListener("click", doLogin);
+document.getElementById("login-pass").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); doLogin(); } });
+document.getElementById("login-user").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); document.getElementById("login-pass").focus(); }
+});
+document.getElementById("login-guest").addEventListener("click", () => { setGuestChosen(true); closeLoginSheet(); });
+document.getElementById("login-close").addEventListener("click", () => {
+  if (me && me.tier === "guest") setGuestChosen(true);
+  closeLoginSheet();
+});
+document.getElementById("login-sheet").addEventListener("click", (e) => {
+  if (e.target.id === "login-sheet") document.getElementById("login-close").click();
+});
+document.getElementById("account-logout").addEventListener("click", async () => {
+  if (!(await askConfirm("Log out? This Telegram account goes back to guest mode until you log in again."))) return;
+  try {
+    await api("/api/account/logout", { method: "POST" });
+  } catch (e) {
+    return alertMsg(e.message);
+  }
+  closeLoginSheet();
+  await loadMe();
+});
+document.getElementById("account-manage").addEventListener("click", () => {
+  closeLoginSheet();
+  openAccounts();
+});
+
+// Guests can't upload: say why before a file is picked, not after.
+document.getElementById("btn-add-book").addEventListener("click", (e) => {
+  if (me && me.tier === "guest") {
+    e.stopImmediatePropagation();
+    e.preventDefault();
+    openLoginSheet("Uploading your own books needs an account. Log in for full access.");
+  }
+}, true);
+
+// --- admin: accounts ---------------------------------------------------
+
+let accList = [];
+
+function fmtWhen(ts) {
+  if (!ts) return "never";
+  const d = new Date(ts * 1000);
+  const mins = Math.round((Date.now() - d.getTime()) / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins} min ago`;
+  if (mins < 48 * 60) return `${Math.round(mins / 60)} h ago`;
+  return d.toLocaleDateString();
+}
+
+async function openAccounts() {
+  showView("view-accounts");
+  document.getElementById("acc-list-pane").hidden = false;
+  document.getElementById("acc-log-pane").hidden = true;
+  document.getElementById("acc-created").hidden = true;
+  await loadAccounts();
+}
+
+async function loadAccounts() {
+  try {
+    accList = (await api("/api/admin/accounts")).accounts;
+  } catch (e) {
+    return alertMsg(e.message);
+  }
+  document.getElementById("acc-count").textContent = `${accList.length}`;
+  document.getElementById("acc-list").innerHTML = accList.length
+    ? accList
+        .map((a) => {
+          const status = a.disabled
+            ? `<span class="acc-tag off">${ic("ban")} Disabled</span>`
+            : a.telegram_id
+              ? `<span class="acc-tag on">${ic("user-check")} Linked</span>`
+              : `<span class="acc-tag">Not logged in yet</span>`;
+          const u = escapeHtml(a.username);
+          return `<div class="acc-row">
+            <div class="acc-head"><strong>${u}</strong>${status}</div>
+            <div class="muted acc-meta">${a.note ? escapeHtml(a.note) + " · " : ""}active ${fmtWhen(a.last_active)} · logged in ${fmtWhen(a.last_login)}</div>
+            <div class="acc-actions">
+              <button class="mini-btn" data-acc-log="${u}">${ic("activity")} Log &amp; stats</button>
+              <button class="mini-btn" data-acc-pass="${u}">${ic("key-round")} New password</button>
+              ${a.telegram_id ? `<button class="mini-btn" data-acc-unlink="${u}">${ic("unlink")} Unlink</button>` : ""}
+              <button class="mini-btn" data-acc-disable="${u}" data-on="${a.disabled ? 0 : 1}">${ic("ban")} ${a.disabled ? "Enable" : "Disable"}</button>
+              <button class="mini-btn" data-acc-del="${u}" aria-label="Delete ${u}">${ic("trash-2")}</button>
+            </div>
+          </div>`;
+        })
+        .join("")
+    : `<p class="muted">No accounts yet. Create the first one above.</p>`;
+}
+
+function showCreated(username, password, label) {
+  const box = document.getElementById("acc-created");
+  box.hidden = false;
+  box.innerHTML = `<p><strong>${escapeHtml(label)}</strong> Send these to the person; the password isn't shown again.</p>
+    <div class="acc-cred"><span>Username</span><code>${escapeHtml(username)}</code></div>
+    <div class="acc-cred"><span>Password</span><code>${escapeHtml(password)}</code></div>
+    <button class="mini-btn" id="acc-copy">${ic("copy")} Copy both</button>`;
+  document.getElementById("acc-copy").addEventListener("click", async () => {
+    const text = `Medic Toolkit login\nUsername: ${username}\nPassword: ${password}`;
+    try { await navigator.clipboard.writeText(text); alertMsg("Copied."); } catch (_) { alertMsg(text); }
+  });
+  box.scrollIntoView({ block: "nearest", behavior: "smooth" });
+}
+
+document.getElementById("acc-create").addEventListener("click", async () => {
+  const username = document.getElementById("acc-new-user").value.trim();
+  const password = document.getElementById("acc-new-pass").value.trim();
+  const note = document.getElementById("acc-new-note").value.trim();
+  if (!username) return alertMsg("Type a username first.");
+  try {
+    const r = await api("/api/admin/accounts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password: password || null, note }),
+    });
+    ["acc-new-user", "acc-new-pass", "acc-new-note"].forEach((id) => (document.getElementById(id).value = ""));
+    showCreated(r.username, r.password, "Account created.");
+    loadAccounts();
+  } catch (e) {
+    alertMsg(e.message);
+  }
+});
+
+document.getElementById("acc-list").addEventListener("click", async (e) => {
+  const b = e.target.closest("button");
+  if (!b) return;
+  const post = (path, body) => api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+  try {
+    if (b.dataset.accLog) return openAccountLog(b.dataset.accLog);
+    if (b.dataset.accPass) {
+      if (!(await askConfirm(`Give ${b.dataset.accPass} a new password? The old one stops working.`))) return;
+      const r = await post(`/api/admin/accounts/${encodeURIComponent(b.dataset.accPass)}/password`);
+      showCreated(b.dataset.accPass, r.password, "New password set.");
+    } else if (b.dataset.accUnlink) {
+      if (!(await askConfirm(`Unlink ${b.dataset.accUnlink} from its Telegram account? It can then be logged into again (from any Telegram account).`))) return;
+      await post(`/api/admin/accounts/${encodeURIComponent(b.dataset.accUnlink)}/unlink`);
+    } else if (b.dataset.accDisable) {
+      await post(`/api/admin/accounts/${encodeURIComponent(b.dataset.accDisable)}/disable`, { disabled: b.dataset.on === "1" });
+    } else if (b.dataset.accDel) {
+      if (!(await askConfirm(`Delete the account ${b.dataset.accDel} and its log? Its Telegram account goes back to guest mode.`))) return;
+      await api(`/api/admin/accounts/${encodeURIComponent(b.dataset.accDel)}`, { method: "DELETE" });
+    }
+    loadAccounts();
+  } catch (err) {
+    alertMsg(err.message);
+  }
+});
+
+async function openAccountLog(username) {
+  let data;
+  try {
+    data = await api(`/api/admin/accounts/${encodeURIComponent(username)}/log`);
+  } catch (e) {
+    return alertMsg(e.message);
+  }
+  document.getElementById("acc-list-pane").hidden = true;
+  document.getElementById("acc-log-pane").hidden = false;
+  document.getElementById("acc-log-title").textContent = username;
+  const s = data.stats;
+  const card = (label, value, warn) => `<div class="stat-card${warn ? " warn" : ""}"><span>${escapeHtml(label)}</span><strong>${escapeHtml(String(value ?? "–"))}</strong></div>`;
+  const maxDay = Math.max(1, ...s.per_day.map(([, n]) => n));
+  document.getElementById("acc-log-stats").innerHTML =
+    `<div class="stat-grid">` +
+    card("Requests (24 h)", s.requests_24h) + card("Requests (7 days)", s.requests_7d) + card("All requests", s.requests) +
+    card("AI calls", s.ai_calls_total) + card("Errors (7 days)", s.errors_7d, s.errors_7d > 0) + card("Server errors", s.server_errors, s.server_errors > 0) +
+    card("Typical response", s.median_ms != null ? `${s.median_ms} ms` : "–") + card("Logins", s.logins) +
+    card("Failed logins", s.failed_logins, s.failed_logins > 0) +
+    `</div>` +
+    (s.per_day.length
+      ? `<p class="stat-label">Requests per day (last 14 days)</p><div class="day-bars">` +
+        s.per_day.map(([d, n]) => `<div class="day-bar" title="${d}: ${n}"><i style="height:${Math.round((n / maxDay) * 100)}%"></i><span>${d.slice(8)}</span></div>`).join("") +
+        `</div>`
+      : "") +
+    (Object.keys(s.ai_calls).length
+      ? `<p class="stat-label">AI use</p><div class="kv">` + Object.entries(s.ai_calls).map(([k, v]) => `<span>${escapeHtml(k)}</span><b>${v}</b>`).join("") + `</div>`
+      : "") +
+    (s.top_endpoints.length
+      ? `<p class="stat-label">Most used</p><div class="kv">` + s.top_endpoints.map(([k, v]) => `<span><code>${escapeHtml(k)}</code></span><b>${v}</b>`).join("") + `</div>`
+      : "") +
+    `<p class="muted">Logged since ${s.since ? new Date(s.since * 1000).toLocaleString() : "–"}.</p>`;
+  const row = (e) => {
+    const when = new Date(e.ts * 1000).toLocaleString();
+    if (e.kind === "api") {
+      const bad = e.s >= 400;
+      return `<div class="acc-event${bad ? " bad" : ""}"><span class="ev-when">${when}</span>` +
+        `<span class="ev-what"><b>${e.s}</b> ${escapeHtml(e.m)} <code>${escapeHtml(e.p)}</code> · ${e.ms} ms</span>` +
+        (e.err ? `<span class="ev-err">${escapeHtml(e.err)}</span>` : "") + `</div>`;
+    }
+    const labels = { login: "Logged in", logout: "Logged out", login_failed: "Wrong password", login_refused: "Login refused (linked elsewhere)",
+      created: "Account created", password_reset: "Password reset", unlinked: "Unlinked by admin", disabled: "Disabled", enabled: "Enabled" };
+    return `<div class="acc-event${/failed|refused/.test(e.kind) ? " bad" : ""}"><span class="ev-when">${when}</span>` +
+      `<span class="ev-what">${escapeHtml(labels[e.kind] || e.kind)}${e.telegram_id ? ` · Telegram ${Number(e.telegram_id)}` : ""}</span></div>`;
+  };
+  document.getElementById("acc-log-errors").innerHTML = data.errors.length ? data.errors.map(row).join("") : `<p class="muted">No errors.</p>`;
+  document.getElementById("acc-log-events").innerHTML = data.events.length ? data.events.slice(0, 150).map(row).join("") : `<p class="muted">Nothing yet.</p>`;
+  window.scrollTo(0, 0);
+}
+
+document.getElementById("acc-log-back").addEventListener("click", () => {
+  document.getElementById("acc-log-pane").hidden = true;
+  document.getElementById("acc-list-pane").hidden = false;
+  loadAccounts();
+});
+
+loadMe({ prompt: true });

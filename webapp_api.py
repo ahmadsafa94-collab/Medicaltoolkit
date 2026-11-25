@@ -58,6 +58,7 @@ import flashcards
 import library
 import notes
 import pdf_export
+import accounts
 import reader_tools
 import recommended_books
 import pdf_qa
@@ -109,6 +110,7 @@ class ApiError(HTTPException):
 
 
 async def _api_error_handler(request: Request, exc: HTTPException):
+    request.state.error_detail = exc.detail  # for the account activity log
     return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
 
 
@@ -133,6 +135,7 @@ def require_user(request: Request) -> dict:
     if not subscriptions.is_admin(user["id"]) and subscriptions.is_blocked(user["id"]):
         raise ApiError(status_code=403, detail="Your access to this bot has been suspended.")
     _request_user_id.set(user["id"])
+    request.state.user_id = user["id"]  # for the account activity log (AccountLogMiddleware)
     return user
 
 
@@ -1818,12 +1821,28 @@ async def _fetch_label(name: str) -> dict:
         )
 
 
+def has_full_access(user_id: int) -> bool:
+    """Logged in to an account, Premium, or the admin. Everyone else is a guest."""
+    return subscriptions.is_premium(user_id)
+
+
+def _full_only(endpoint, what: str):
+    """Guests can't save or export: the endpoint answers 403 with a pointer to logging in."""
+    async def guarded(request: Request):
+        user = require_user(request)
+        if not has_full_access(user["id"]):
+            raise ApiError(status_code=403, detail=f"{what} isn't available in guest mode. Log in (Shelf > Log in) for full access.")
+        return await endpoint(request)
+    guarded.__name__ = endpoint.__name__
+    return guarded
+
+
 def _save_drug_turn(
     user_id: int, topic_id, kind: str, drugs: list[str], question: str, answer: str, title: str, sources: list | None = None
 ) -> None:
     """Keep a Drugs-tab answer as a saved topic (best effort), like Ask-your-books answers."""
-    if not ask_sessions.valid_id(topic_id):
-        return
+    if not ask_sessions.valid_id(topic_id) or not has_full_access(user_id):
+        return  # guests' answers aren't saved
     try:
         ask_sessions.append_turn(
             user_id, topic_id, [{"book_id": f"drug:{d}", "title": d} for d in drugs], question, answer, sources or [],
@@ -2271,7 +2290,7 @@ async def ask_multi(request: Request):
     # continued or exported later. Best effort: a failed save must not cost
     # the user the answer they just got.
     topic_id = body.get("topic_id")
-    if ask_sessions.valid_id(topic_id):
+    if ask_sessions.valid_id(topic_id) and has_full_access(user["id"]):  # guests' answers aren't saved
         try:
             ask_sessions.append_turn(user["id"], topic_id, books, question, result["answer"], result["sources"])
         except Exception:
@@ -3016,6 +3035,97 @@ async def backfill_shared_chapters() -> None:
             logger.exception("Couldn't divide specialty book %s into chapters (will retry next start)", book_id)
 
 
+# ---------------------------------------------------------------------------
+# Accounts (accounts.py): log in / guest mode, and the admin's account list
+# with each account's activity log.
+# ---------------------------------------------------------------------------
+
+async def me_endpoint(request: Request):
+    user = require_user(request)
+    uid = user["id"]
+    username = accounts.username_for(uid)
+    admin = subscriptions.is_admin(uid)
+    full = has_full_access(uid)
+    tier = "admin" if admin else "account" if username else "premium" if full else "guest"
+    out = {"tier": tier, "username": username, "is_admin": admin, "full_access": full}
+    if not full:
+        summary = subscriptions.usage_summary(uid)
+        out["guest"] = {
+            "questions_left": max(0, subscriptions.FREE_LIMITS["questions"] - summary["usage"].get("questions", 0)),
+            "questions_per_day": subscriptions.FREE_LIMITS["questions"],
+        }
+    return JSONResponse(out)
+
+
+async def login_endpoint(request: Request):
+    user = require_user(request)
+    body = await _json_body(request)
+    try:
+        name = await asyncio.to_thread(accounts.login, user["id"], body.get("username"), body.get("password"))
+    except accounts.AccountError as e:
+        raise ApiError(status_code=400, detail=str(e))
+    return JSONResponse({"username": name})
+
+
+async def logout_endpoint(request: Request):
+    user = require_user(request)
+    accounts.logout(user["id"])
+    return JSONResponse({"ok": True})
+
+
+def _account_call(fn, *args):
+    try:
+        return fn(*args)
+    except accounts.AccountError as e:
+        raise ApiError(status_code=400, detail=str(e))
+
+
+async def admin_accounts_list(request: Request):
+    _require_admin(request)
+    return JSONResponse({"accounts": accounts.list_accounts()})
+
+
+async def admin_account_create(request: Request):
+    _require_admin(request)
+    body = await _json_body(request)
+    name, password = await asyncio.to_thread(
+        _account_call, accounts.create_account, body.get("username"), (body.get("password") or None), _text(body, "note", 200)
+    )
+    return JSONResponse({"username": name, "password": password})
+
+
+async def admin_account_password(request: Request):
+    _require_admin(request)
+    body = await _json_body(request)
+    password = await asyncio.to_thread(_account_call, accounts.reset_password, request.path_params["username"], body.get("password") or None)
+    return JSONResponse({"password": password})
+
+
+async def admin_account_unlink(request: Request):
+    _require_admin(request)
+    _account_call(accounts.unlink, request.path_params["username"])
+    return JSONResponse({"ok": True})
+
+
+async def admin_account_disable(request: Request):
+    _require_admin(request)
+    body = await _json_body(request)
+    _account_call(accounts.set_disabled, request.path_params["username"], bool(body.get("disabled")))
+    return JSONResponse({"ok": True})
+
+
+async def admin_account_delete(request: Request):
+    _require_admin(request)
+    _account_call(accounts.delete_account, request.path_params["username"])
+    return JSONResponse({"ok": True})
+
+
+async def admin_account_log(request: Request):
+    _require_admin(request)
+    return JSONResponse(await asyncio.to_thread(_account_call, accounts.read_log, request.path_params["username"]))
+
+
+
 routes = [
     Route("/api/books", list_books, methods=["GET"]),
     Route("/api/upload", upload_book, methods=["POST"]),
@@ -3028,16 +3138,16 @@ routes = [
     Route("/api/books/{book_id}", delete_book, methods=["DELETE"]),
     Route("/api/books/{book_id}/rename", rename_book, methods=["POST"]),
     Route("/api/books/{book_id}/cover", set_cover_color, methods=["POST"]),
-    Route("/api/books/{book_id}/bookmark", set_bookmark, methods=["POST"]),
+    Route("/api/books/{book_id}/bookmark", _full_only(set_bookmark, "Saving bookmarks"), methods=["POST"]),
     Route("/api/books/{book_id}/file", get_book_file, methods=["GET"]),
     Route("/api/books/{book_id}/jobs/{job_type}", get_job_status, methods=["GET"]),
     Route("/api/books/{book_id}/chapters", divide_into_chapters, methods=["POST"]),
-    Route("/api/books/{book_id}/chapters/send", send_chapter_files, methods=["POST"]),
+    Route("/api/books/{book_id}/chapters/send", _full_only(send_chapter_files, "Sending chapter files"), methods=["POST"]),
     Route("/api/books/{book_id}/summarize", summarize, methods=["POST"]),
-    Route("/api/books/{book_id}/summarize/export", export_summary_pdf, methods=["POST"]),
+    Route("/api/books/{book_id}/summarize/export", _full_only(export_summary_pdf, "Exporting"), methods=["POST"]),
     Route("/api/books/{book_id}/index", index_book, methods=["POST"]),
     Route("/api/books/{book_id}/ask", ask_book, methods=["POST"]),
-    Route("/api/books/{book_id}/ask/export", export_answer_pdf, methods=["POST"]),
+    Route("/api/books/{book_id}/ask/export", _full_only(export_answer_pdf, "Exporting"), methods=["POST"]),
     Route("/api/books/{book_id}/qa/sessions", list_qa_sessions_endpoint, methods=["GET"]),
     Route("/api/books/{book_id}/qa/sessions/{session_id}", get_qa_session_endpoint, methods=["GET"]),
     Route("/api/books/{book_id}/quiz", create_quiz, methods=["POST"]),
@@ -3048,14 +3158,14 @@ routes = [
     Route("/api/books/{book_id}/flashcards", delete_flashcards_endpoint, methods=["DELETE"]),
     Route("/api/books/{book_id}/flashcards/generate", generate_flashcards_endpoint, methods=["POST"]),
     Route("/api/books/{book_id}/flashcards/review", review_flashcard_endpoint, methods=["POST"]),
-    Route("/api/books/{book_id}/flashcards/export", export_flashcards_endpoint, methods=["POST"]),
+    Route("/api/books/{book_id}/flashcards/export", _full_only(export_flashcards_endpoint, "Exporting"), methods=["POST"]),
     Route("/api/books/{book_id}/notes", list_notes_endpoint, methods=["GET"]),
-    Route("/api/books/{book_id}/notes", add_note_endpoint, methods=["POST"]),
+    Route("/api/books/{book_id}/notes", _full_only(add_note_endpoint, "Saving notes"), methods=["POST"]),
     Route("/api/books/{book_id}/notes/{note_id}", delete_note_endpoint, methods=["DELETE"]),
     Route("/api/books/{book_id}/highlights", list_highlights_endpoint, methods=["GET"]),
-    Route("/api/books/{book_id}/highlights", add_highlight_endpoint, methods=["POST"]),
-    Route("/api/books/{book_id}/highlights/export", export_highlights_pdf, methods=["POST"]),
-    Route("/api/books/{book_id}/highlights/{hl_id}", update_highlight_endpoint, methods=["PATCH"]),
+    Route("/api/books/{book_id}/highlights", _full_only(add_highlight_endpoint, "Highlighting"), methods=["POST"]),
+    Route("/api/books/{book_id}/highlights/export", _full_only(export_highlights_pdf, "Exporting"), methods=["POST"]),
+    Route("/api/books/{book_id}/highlights/{hl_id}", _full_only(update_highlight_endpoint, "Highlighting"), methods=["PATCH"]),
     Route("/api/books/{book_id}/highlights/{hl_id}", delete_highlight_endpoint, methods=["DELETE"]),
     Route("/api/books/{book_id}/search", search_book_endpoint, methods=["GET"]),
     Route("/api/books/{book_id}/explain", explain_selection_endpoint, methods=["POST"]),
@@ -3066,12 +3176,22 @@ routes = [
     Route("/api/drugs/interactions", drug_interactions, methods=["POST"]),
     Route("/api/drugs/ask", drug_ask, methods=["POST"]),
     Route("/api/drugs/websites", drug_websites, methods=["GET"]),
+    Route("/api/me", me_endpoint, methods=["GET"]),
+    Route("/api/account/login", login_endpoint, methods=["POST"]),
+    Route("/api/account/logout", logout_endpoint, methods=["POST"]),
+    Route("/api/admin/accounts", admin_accounts_list, methods=["GET"]),
+    Route("/api/admin/accounts", admin_account_create, methods=["POST"]),
+    Route("/api/admin/accounts/{username}/password", admin_account_password, methods=["POST"]),
+    Route("/api/admin/accounts/{username}/unlink", admin_account_unlink, methods=["POST"]),
+    Route("/api/admin/accounts/{username}/disable", admin_account_disable, methods=["POST"]),
+    Route("/api/admin/accounts/{username}/log", admin_account_log, methods=["GET"]),
+    Route("/api/admin/accounts/{username}", admin_account_delete, methods=["DELETE"]),
     Route("/api/ask/library", ask_library, methods=["GET"]),
     Route("/api/ask/multi", ask_multi, methods=["POST"]),
     Route("/api/ask/topics", ask_topics, methods=["GET"]),
     Route("/api/ask/topics/{topic_id}", ask_topic, methods=["GET"]),
     Route("/api/ask/topics/{topic_id}", ask_topic_delete, methods=["DELETE"]),
-    Route("/api/ask/export", ask_export, methods=["POST"]),
+    Route("/api/ask/export", _full_only(ask_export, "Exporting"), methods=["POST"]),
     Route("/api/admin/web/sites", web_sites, methods=["GET"]),
     Route("/api/admin/web/sites/{site_id}", web_site_update, methods=["POST"]),
     Route("/api/admin/web/sites/{site_id}", web_site_delete, methods=["DELETE"]),
@@ -3108,6 +3228,53 @@ _UNLIMITED_BODY_PATHS = re.compile(r"^/api/(uploads/[^/]+/chunk|upload|shared/up
 
 class _BodyTooLarge(Exception):
     pass
+
+
+class AccountLogMiddleware:
+    """
+    Every /api request made by a logged-in account goes into that account's
+    activity log: endpoint, status, time taken, and the error message of a
+    failed one. A request that crashes is logged as a 500 before the error
+    goes on to the server's own handling.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        path = scope.get("path", "")
+        if scope["type"] != "http" or not path.startswith("/api/"):
+            return await self.app(scope, receive, send)
+        started = time.monotonic()
+        status = {"code": 500}
+
+        async def capture(message):
+            if message["type"] == "http.response.start":
+                status["code"] = message["status"]
+            await send(message)
+
+        crashed = None
+        try:
+            await self.app(scope, receive, capture)
+        except Exception as e:
+            crashed = e
+            raise
+        finally:
+            state = scope.get("state") or {}
+            uid = state.get("user_id")
+            if uid is not None:
+                try:
+                    username = accounts.username_for(uid)
+                    if username:
+                        detail = state.get("error_detail")
+                        if crashed is not None:
+                            detail = f"Server error: {type(crashed).__name__}"
+                        accounts.log_request(
+                            username, scope.get("method", ""), path, status["code"],
+                            (time.monotonic() - started) * 1000, detail if isinstance(detail, str) else None,
+                        )
+                except Exception:
+                    logger.exception("Couldn't write the account activity log")
 
 
 class BodySizeLimitMiddleware:
@@ -3211,5 +3378,5 @@ _WEBAPP_CSP = "; ".join([
 app = Starlette(
     routes=routes,
     exception_handlers={HTTPException: _api_error_handler},
-    middleware=[Middleware(BodySizeLimitMiddleware), Middleware(NoCacheStaticMiddleware)],
+    middleware=[Middleware(AccountLogMiddleware), Middleware(BodySizeLimitMiddleware), Middleware(NoCacheStaticMiddleware)],
 )

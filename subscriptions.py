@@ -73,7 +73,12 @@ class QuotaExceeded(Exception):
     def __init__(self, feature: str, needed: int = 1, remaining: int = 0):
         self.feature = feature
         label = FEATURE_LABELS.get(feature, feature)
-        if needed > 1 and remaining > 0:
+        if FREE_LIMITS.get(feature, 0) == 0:
+            msg = (
+                f"{label[0].upper() + label[1:]} aren't available in guest mode. Log in to your account "
+                "(Shelf > Log in) for full access, or get Premium (⭐ My Plan)."
+            )
+        elif needed > 1 and remaining > 0:
             # A multi-unit request (a whole-book summary is one unit per
             # chapter) can fail with allowance left -- say so, rather than
             # claiming it's all used up.
@@ -84,8 +89,8 @@ class QuotaExceeded(Exception):
             )
         else:
             msg = (
-                f"You've used all {FREE_LIMITS.get(feature, '?')} free {label} today. Upgrade to "
-                "Premium (⭐ My Plan) for unlimited access, or come back tomorrow."
+                f"You've used all {FREE_LIMITS.get(feature, '?')} guest {label} for today. Log in to your "
+                "account (Shelf > Log in) or get Premium (⭐ My Plan) for full access, or come back tomorrow."
             )
         super().__init__(msg)
 
@@ -96,11 +101,13 @@ class ShelfLimitReached(Exception):
     def __init__(self, current_count: int):
         self.current_count = current_count
         self.limit = FREE_SHELF_BOOKS
-        super().__init__(
-            f"Your free plan holds {FREE_SHELF_BOOKS} books on the shelf at a time, and you have "
-            f"{current_count}. Delete a book you're done with to free up a slot, or upgrade to Premium "
-            "(⭐ My Plan) for an unlimited shelf."
-        )
+        if FREE_SHELF_BOOKS == 0:
+            msg = ("Uploading books isn't available in guest mode. Log in to your account (Shelf > Log in) "
+                   "or get Premium (⭐ My Plan) to add your own books.")
+        else:
+            msg = (f"Guests can keep {FREE_SHELF_BOOKS} books on the shelf, and you have {current_count}. "
+                   "Log in to your account or get Premium (⭐ My Plan) for an unlimited shelf.")
+        super().__init__(msg)
 
 
 
@@ -225,6 +232,11 @@ def is_premium(user_id: int) -> bool:
     free for everyone else.
     """
     if is_admin(user_id):
+        return True
+    # A username/password account linked to this Telegram account (logged in
+    # in the mini app) has full access, like Premium.
+    import accounts  # lazy: accounts imports nothing from here, but keep the import graph flat
+    if accounts.username_for(user_id):
         return True
     sub = _load(user_id)
     if sub["plan"] == "premium" and sub["premium_until"] and sub["premium_until"] > time.time():

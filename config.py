@@ -192,17 +192,21 @@ SUPPORT_ADMIN_USERNAME = os.environ.get("SUPPORT_ADMIN_USERNAME", "").lstrip("@"
 # makes the free tier feel broken rather than limited; a daily allowance
 # refills every morning, so it stays useful while still being a steady,
 # visible nudge toward Premium.
-FREE_DAILY_SUMMARIES = 3
-FREE_DAILY_QUIZZES = 3
-FREE_DAILY_QUESTIONS = 10
+#
+# These are now the GUEST limits: anyone not logged in to an account (see
+# accounts.py), not Premium and not the admin. A guest gets a small daily
+# taste of the AI and no uploads; logging in gives full access.
+FREE_DAILY_SUMMARIES = 0
+FREE_DAILY_QUIZZES = 0
+FREE_DAILY_QUESTIONS = 3
 # Flashcard generation used to draw from the summaries allowance, which
 # confused users ("why did making cards use up a summary?").
-FREE_DAILY_FLASHCARD_SETS = 3
+FREE_DAILY_FLASHCARD_SETS = 0
 # Uploading a PDF (or re-dividing one) runs an AI chapter split over up to
 # 1,000 pages -- the single most expensive thing a free user can trigger,
 # and repeatable by deleting and re-uploading. (Indexing for "Ask my book"
 # is not metered: Voyage embeddings cost cents even for a 1,000-page book.)
-FREE_DAILY_BOOK_PROCESSING = 3
+FREE_DAILY_BOOK_PROCESSING = 0
 
 # How many books a FREE user may keep on their 📚 Book Shelf at once. Unlike
 # the monthly caps above this is a standing limit on stored books, not a
@@ -210,7 +214,7 @@ FREE_DAILY_BOOK_PROCESSING = 3
 # a book immediately frees the slot. Premium is unlimited. Existing shelves
 # already over the limit are never touched -- the check only blocks ADDING
 # a book, so nobody loses a book they already uploaded.
-FREE_SHELF_BOOKS = 2
+FREE_SHELF_BOOKS = 0  # guests can't upload (books already on a shelf stay)
 
 # Telegram Stars pricing (currency code "XTR" in sendInvoice), in the order
 # the plans are offered in ⭐ My Plan. 1 Star was roughly $0.016 to purchase
