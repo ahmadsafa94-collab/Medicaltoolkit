@@ -31,6 +31,7 @@ from aiogram.types import (
     InputTextMessageContent,
     CallbackQuery,
     BufferedInputFile,
+    FSInputFile,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
     WebAppInfo,
@@ -295,15 +296,46 @@ async def cmd_start(message: Message):
             if referrer_id is not None:
                 subscriptions.register_referral(user_id, referrer_id)
 
-    await message.answer(
+    text = (
         "Welcome to the Medical Toolkit bot 👋\n\n"
         "I am an AI based Bot designed to help you study for your Medical exams or manage your "
         "patients clinically.\n\n"
-        "Lets Go.",
-        reply_markup=main_menu_kb(
-            WEBAPP_URL, is_admin=subscriptions.is_admin(user_id), language=subscriptions.get_language(user_id)
-        ),
+        "Lets Go."
     )
+    keyboard = main_menu_kb(
+        WEBAPP_URL, is_admin=subscriptions.is_admin(user_id), language=subscriptions.get_language(user_id)
+    )
+    await _send_welcome(message, text, keyboard)
+
+
+# The welcome animation (branding/welcome.mp4: the logo's case opens and the
+# books, a capsule and a stethoscope land in front of it). Sent as an MP4
+# "animation" -- what Telegram turns every GIF into anyway, at a fraction of
+# the size. Uploaded once per process; after that Telegram's file_id is reused.
+_WELCOME_ANIMATION = os.path.join(os.path.dirname(os.path.abspath(__file__)), "branding", "welcome.mp4")
+_welcome_file_id: str | None = None
+
+
+async def _send_welcome(message: Message, text: str, keyboard) -> None:
+    global _welcome_file_id
+    if os.path.exists(_WELCOME_ANIMATION):
+        try:
+            sent = await message.answer_animation(
+                animation=_welcome_file_id or FSInputFile(_WELCOME_ANIMATION, filename="welcome.mp4"),
+                caption=text,
+                width=640,
+                height=640,
+                reply_markup=keyboard,
+            )
+            if sent.animation:
+                _welcome_file_id = sent.animation.file_id
+            return
+        except Exception:
+            # A stale file_id or a failed upload must never cost a user the
+            # welcome and the menu keyboard: fall back to the plain text.
+            logger.exception("Welcome animation failed; sending text only")
+            _welcome_file_id = None
+    await message.answer(text, reply_markup=keyboard)
 
 
 @dp.message(ButtonText(BTN_SHELF))
