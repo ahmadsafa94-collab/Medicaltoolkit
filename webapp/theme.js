@@ -17,6 +17,7 @@
       } catch (e) {}
     }
   }
+  window.applyTheme = apply;  // splash.js restores the theme's colours with it
   apply();
   if (tg && tg.onEvent) tg.onEvent("themeChanged", apply);
 })();
