@@ -250,6 +250,87 @@ def sync_existing(book_paths: list[str]) -> None:
     evict()
 
 
+# --- uploads straight from the phone to the bucket ---------------------------
+# The mini app gets presigned URLs for the parts of a multipart upload and
+# PUTs each part to the bucket itself; the server only creates and completes
+# the upload, then fetches the finished file once (bucket to server, same
+# region) to check it. The file lands under _incoming/ until it is accepted.
+
+DIRECT_PART_BYTES = 5 * 1024 * 1024   # S3's smallest part (except the last)
+_PRESIGN_SECONDS = 6 * 3600
+
+
+def incoming_key(upload_id: str) -> str:
+    return f"_incoming/{upload_id}.pdf"
+
+
+def start_direct_upload(upload_id: str, size: int) -> dict:
+    """{key, mpu, part_size, urls}: one presigned PUT URL per part. Blocking."""
+    key = incoming_key(upload_id)
+    s3 = _s3()
+    mpu = s3.create_multipart_upload(Bucket=BUCKET, Key=key, ContentType="application/pdf")["UploadId"]
+    parts = max(1, -(-size // DIRECT_PART_BYTES))
+    urls = [
+        s3.generate_presigned_url(
+            "upload_part",
+            Params={"Bucket": BUCKET, "Key": key, "UploadId": mpu, "PartNumber": n},
+            ExpiresIn=_PRESIGN_SECONDS,
+        )
+        for n in range(1, parts + 1)
+    ]
+    return {"key": key, "mpu": mpu, "part_size": DIRECT_PART_BYTES, "urls": urls}
+
+
+def complete_direct_upload(key: str, mpu: str, parts: list[dict], dest_path: str) -> None:
+    """Join the parts in the bucket, then fetch the file to dest_path (for the server's checks). Blocking."""
+    s3 = _s3()
+    s3.complete_multipart_upload(
+        Bucket=BUCKET, Key=key, UploadId=mpu,
+        MultipartUpload={"Parts": [{"PartNumber": p["n"], "ETag": p["etag"]} for p in sorted(parts, key=lambda p: p["n"])]},
+    )
+    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+    s3.download_file(BUCKET, key, dest_path)
+
+
+def abort_direct_upload(key: str, mpu: str) -> None:
+    try:
+        _s3().abort_multipart_upload(Bucket=BUCKET, Key=key, UploadId=mpu)
+    except Exception as e:
+        logger.info("Abort of %s: %r", key, e)
+
+
+def delete_key(key: str) -> None:
+    try:
+        _s3().delete_object(Bucket=BUCKET, Key=key)
+    except Exception as e:
+        logger.info("Delete of %s: %r", key, e)
+
+
+def bucket_origins() -> list[str]:
+    """Where the mini app sends parts (for its Content-Security-Policy)."""
+    from urllib.parse import urlsplit
+
+    host = urlsplit(os.environ.get("BOOKS_BUCKET_ENDPOINT") or "").hostname
+    if not enabled() or not host:
+        return []
+    return [f"https://{host}", f"https://*.{host}"]
+
+
+def configure_cors(app_origins: list[str]) -> None:
+    """Let the mini app's page PUT parts to the bucket and read their ETag. Blocking; best effort."""
+    try:
+        _s3().put_bucket_cors(Bucket=BUCKET, CORSConfiguration={"CORSRules": [{
+            "AllowedOrigins": app_origins,
+            "AllowedMethods": ["PUT"],
+            "AllowedHeaders": ["*"],
+            "ExposeHeaders": ["ETag"],
+            "MaxAgeSeconds": 3600,
+        }]})
+        logger.info("Book store: bucket CORS set for %s", app_origins)
+    except Exception as e:
+        logger.warning("Book store: couldn't set the bucket's CORS (direct uploads fall back to the server): %r", e)
+
+
 def all_book_paths() -> list[str]:
     """Every book PDF on the volume: each user's library and the specialty library."""
     import glob
@@ -268,6 +349,13 @@ def start_background_sync() -> None:
 
     def run():
         try:
+            from urllib.parse import urlsplit
+
+            from config import WEBAPP_URL
+
+            if WEBAPP_URL:
+                u = urlsplit(WEBAPP_URL)
+                configure_cors([f"{u.scheme}://{u.netloc}"])
             sync_existing(all_book_paths())
             logger.info("Book store: %s", status())
         except Exception:

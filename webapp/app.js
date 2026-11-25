@@ -886,13 +886,106 @@ async function _chunkedUploadAwake(file, { target = "shelf", title, specialty, o
   }
 }
 
+// One part straight to the bucket (a presigned URL: no sign-in header, which
+// the bucket wouldn't accept). Resolves with the part's ETag.
+function putPart(url, blob, onBytes) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("PUT", url);
+    xhr.upload.addEventListener("progress", (e) => { if (e.lengthComputable) onBytes(e.loaded); });
+    xhr.onload = () => {
+      const etag = xhr.getResponseHeader("ETag");
+      if (xhr.status >= 200 && xhr.status < 300 && etag) return resolve(etag);
+      const err = new Error(`Upload failed (${xhr.status}${etag ? "" : ", no ETag"})`);
+      err.status = xhr.status || 0;
+      reject(err);
+    };
+    xhr.onerror = () => { const err = new Error("Network error"); err.status = 0; reject(err); };
+    xhr.send(blob);
+  });
+}
+
+// The phone sends the parts to the bucket itself (book_store.py), skipping the
+// server's long route. Returns null if the bucket can't be reached at all, so
+// the caller falls back to uploading through the server.
+async function _directUpload(file, start, onProgress, startedAt) {
+  const { upload_id: id, part_size: size, urls } = start;
+  const loaded = new Array(urls.length).fill(0);
+  const etags = new Array(urls.length).fill(null);
+  let anyDone = false;
+  const report = () => {
+    if (!onProgress) return;
+    const done = loaded.reduce((a, b) => a + b, 0);
+    onProgress(done / file.size, uploadProgressText(done / file.size, done, file.size, startedAt));
+  };
+  let next = 0;
+  const worker = async () => {
+    while (next < urls.length) {
+      const i = next++;
+      const blob = file.slice(i * size, Math.min(file.size, (i + 1) * size));
+      for (let attempt = 1; ; attempt++) {
+        try {
+          etags[i] = await putPart(urls[i], blob, (b) => { loaded[i] = b; report(); });
+          loaded[i] = blob.size;
+          anyDone = true;
+          report();
+          break;
+        } catch (e) {
+          // Never reached the bucket even once (blocked, CORS): give up on
+          // the direct route quickly and let the server take the file.
+          if (!anyDone && attempt >= 2) throw Object.assign(e, { unreachable: true });
+          if (attempt >= UPLOAD_RETRIES) throw e;
+          loaded[i] = 0;
+          report();
+          await new Promise((r) => setTimeout(r, uploadRetryDelay(attempt)));
+        }
+      }
+    }
+  };
+  try {
+    await Promise.all(Array.from({ length: Math.min(UPLOAD_PARALLEL, urls.length) }, worker));
+  } catch (e) {
+    api(`/api/uploads/${id}`, { method: "DELETE" }).catch(() => {});
+    if (e.unreachable) return null;
+    throw e;
+  }
+  if (onProgress) onProgress(1, "Checking the file…");
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await api(`/api/uploads/${id}/complete`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ parts: etags.map((etag, i) => ({ n: i + 1, etag })) }),
+      });
+    } catch (e) {
+      const unreachable = !e.status || e.status === 502 || e.status === 503;
+      if (!unreachable || attempt >= 8) throw e;
+      await new Promise((r) => setTimeout(r, uploadRetryDelay(attempt)));
+    }
+  }
+}
+
+let directUploadBroken = false;  // the bucket couldn't be reached once: use the server for the rest of this visit
+
 async function _chunkedUpload(file, { target, title, specialty, onProgress }) {
   const startedAt = Date.now();
-  const start = await api("/api/uploads", {
+  const startBody = { filename: file.name, size: file.size, title, target, specialty };
+  let start = await api("/api/uploads", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ filename: file.name, size: file.size, title, target, specialty }),
+    body: JSON.stringify({ ...startBody, direct: !directUploadBroken }),
   });
+  if (start.mode === "direct") {
+    const done = await _directUpload(file, start, onProgress, startedAt);
+    if (done) return done;
+    directUploadBroken = true;
+    if (onProgress) onProgress(0, "Uploading through the server…");
+    start = await api("/api/uploads", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(startBody),
+    });
+  }
   const { upload_id: id, chunk_size: size, chunks } = start;
   const loaded = new Array(chunks).fill(0);
   const report = () => {

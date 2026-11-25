@@ -34,6 +34,7 @@ import logging
 import os
 import tempfile
 import json
+import threading
 import re
 import shutil
 import time
@@ -2552,6 +2553,8 @@ def _expire_uploads() -> None:
             u["closed"] = True
             _safe_remove(u["path"])
             _safe_remove(_upload_meta_path(uid))
+            if u.get("direct"):
+                threading.Thread(target=book_store.abort_direct_upload, args=(u["direct"]["key"], u["direct"]["mpu"]), daemon=True).start()
 
 
 async def upload_start(request: Request):
@@ -2603,15 +2606,26 @@ async def upload_start(request: Request):
         old_up["closed"] = True
         _safe_remove(old_up["path"])
         _safe_remove(_upload_meta_path(old_id))
+        if old_up.get("direct"):
+            threading.Thread(target=book_store.abort_direct_upload, args=(old_up["direct"]["key"], old_up["direct"]["mpu"]), daemon=True).start()
     if len(mine) >= _MAX_OPEN_UPLOADS_PER_USER:
         raise ApiError(status_code=429, detail="You already have uploads in progress. Wait for them to finish.")
 
     upload_id = uuid.uuid4().hex
     path = os.path.join(_UPLOAD_PARTS_DIR, f"{upload_id}.part")
-    # Reserve the full size up front, so every chunk can be written at its
-    # own offset in any order.
-    with open(path, "wb") as f:
-        f.truncate(size)
+    direct = None
+    if body.get("direct") and book_store.enabled():
+        # Straight to the bucket: the phone PUTs the parts there itself.
+        try:
+            direct = await asyncio.to_thread(book_store.start_direct_upload, upload_id, size)
+        except Exception:
+            logger.exception("Couldn't start a direct-to-bucket upload; using the server instead")
+            direct = None
+    if direct is None:
+        # Reserve the full size up front, so every chunk can be written at its
+        # own offset in any order.
+        with open(path, "wb") as f:
+            f.truncate(size)
 
     _uploads[upload_id] = {
         "user_id": user["id"], "path": path, "size": size, "title": title, "target": target,
@@ -2619,7 +2633,12 @@ async def upload_start(request: Request):
         "chunks": -(-size // UPLOAD_CHUNK_BYTES), "chunk_size": UPLOAD_CHUNK_BYTES, "dest_dir": dest_dir, "filename": filename,
         "writers": 0, "closed": False,
     }
+    if direct:
+        _uploads[upload_id]["direct"] = {"key": direct["key"], "mpu": direct["mpu"]}
+        _uploads[upload_id]["chunks"] = len(direct["urls"])
     await asyncio.to_thread(_save_upload_meta, upload_id, _uploads[upload_id])
+    if direct:
+        return JSONResponse({"upload_id": upload_id, "mode": "direct", "part_size": direct["part_size"], "urls": direct["urls"]})
     return JSONResponse({"upload_id": upload_id, "chunk_size": UPLOAD_CHUNK_BYTES, "chunks": _uploads[upload_id]["chunks"]})
 
 
@@ -2703,6 +2722,49 @@ async def upload_finish(request: Request):
     up["closed"] = True
     _uploads.pop(upload_id, None)
     _safe_remove(_upload_meta_path(upload_id))
+    return await _accept_upload(user, up)
+
+
+async def upload_complete_direct(request: Request):
+    """The phone sent every part to the bucket: join them, fetch the file once, and check it like any upload."""
+    user = require_user(request)
+    upload_id, up = _owned_upload(request, user["id"])
+    direct = up.get("direct")
+    if not direct:
+        raise ApiError(status_code=400, detail="This upload goes through the server.")
+    body = await _json_body(request)
+    raw = body.get("parts")
+    if not isinstance(raw, list) or len(raw) != up["chunks"]:
+        raise ApiError(status_code=409, detail="Some parts of the file are missing. Please retry.")
+    parts = []
+    for p in raw:
+        n, etag = (p or {}).get("n"), (p or {}).get("etag")
+        if not isinstance(n, int) or isinstance(n, bool) or not (1 <= n <= up["chunks"]) or not isinstance(etag, str) or len(etag) > 200:
+            raise ApiError(status_code=400, detail="Invalid upload parts.")
+        parts.append({"n": n, "etag": etag})
+    if len({p["n"] for p in parts}) != up["chunks"]:
+        raise ApiError(status_code=409, detail="Some parts of the file are missing. Please retry.")
+    if up["closed"]:
+        raise ApiError(status_code=409, detail="This upload is already finished.")
+    up["closed"] = True
+    try:
+        await asyncio.to_thread(book_store.complete_direct_upload, direct["key"], direct["mpu"], parts, up["path"])
+    except Exception:
+        logger.exception("Completing direct upload %s failed", upload_id)
+        up["closed"] = False
+        raise ApiError(status_code=502, detail="Couldn't put the file together. Please try again.")
+    _uploads.pop(upload_id, None)
+    _safe_remove(_upload_meta_path(upload_id))
+    # The joined copy under _incoming/ goes; the accepted book is stored under its own path.
+    asyncio.get_running_loop().run_in_executor(None, book_store.delete_key, direct["key"])
+    if os.path.getsize(up["path"]) != up["size"]:
+        _safe_remove(up["path"])
+        raise ApiError(status_code=400, detail="The file arrived incomplete. Please upload it again.")
+    return await _accept_upload(user, up)
+
+
+async def _accept_upload(user: dict, up: dict):
+    """Check a fully received upload and put it in the library (or the specialty library)."""
     secs = max(0.001, time.time() - up["started"])
     logger.info(
         "Upload by %s: %.1f MB in %.0f s (%.2f MB/s, %d parts)",
@@ -2778,6 +2840,8 @@ async def upload_cancel(request: Request):
     up["closed"] = True
     _safe_remove(up["path"])
     _safe_remove(_upload_meta_path(upload_id))
+    if up.get("direct"):
+        asyncio.get_running_loop().run_in_executor(None, book_store.abort_direct_upload, up["direct"]["key"], up["direct"]["mpu"])
     return JSONResponse({"cancelled": True})
 
 
@@ -3197,6 +3261,7 @@ routes = [
     Route("/api/uploads", upload_start, methods=["POST"]),
     Route("/api/uploads/{upload_id}/chunk", upload_chunk, methods=["PUT"]),
     Route("/api/uploads/{upload_id}/finish", upload_finish, methods=["POST"]),
+    Route("/api/uploads/{upload_id}/complete", upload_complete_direct, methods=["POST"]),
     Route("/api/uploads/{upload_id}", upload_cancel, methods=["DELETE"]),
     Route("/api/books/{book_id}", get_book, methods=["GET"]),
     Route("/api/books/{book_id}", delete_book, methods=["DELETE"]),
@@ -3432,7 +3497,8 @@ _WEBAPP_CSP = "; ".join([
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data: blob:",
     "font-src 'self'",
-    "connect-src 'self'",
+    # The book bucket too: uploads go from the phone straight to it (book_store).
+    "connect-src " + " ".join(["'self'"] + book_store.bucket_origins()),
     "worker-src 'self' blob:",
     "frame-src 'none'",
     "object-src 'none'",
