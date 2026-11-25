@@ -1626,13 +1626,15 @@ async def _fetch_label(name: str) -> dict:
         )
 
 
-def _save_drug_turn(user_id: int, topic_id, kind: str, drugs: list[str], question: str, answer: str, title: str) -> None:
+def _save_drug_turn(
+    user_id: int, topic_id, kind: str, drugs: list[str], question: str, answer: str, title: str, sources: list | None = None
+) -> None:
     """Keep a Drugs-tab answer as a saved topic (best effort), like Ask-your-books answers."""
     if not ask_sessions.valid_id(topic_id):
         return
     try:
         ask_sessions.append_turn(
-            user_id, topic_id, [{"book_id": f"drug:{d}", "title": d} for d in drugs], question, answer, [],
+            user_id, topic_id, [{"book_id": f"drug:{d}", "title": d} for d in drugs], question, answer, sources or [],
             kind=kind, title=title,
         )
     except Exception:
@@ -1770,8 +1772,37 @@ async def drug_ask(request: Request):
             raise ApiError(status_code=400, detail="Invalid history entry.")
         history.append({"question": q[:_HISTORY_Q_CHARS], "answer": a[:_HISTORY_A_CHARS]})
 
+    # Websites the admin logged the bot in to (web_sources.py), ticked by the
+    # user: searched for this drug and question, and cited next to the label.
+    raw_webs = body.get("web_ids") or []
+    if not isinstance(raw_webs, list) or len(raw_webs) > 5:
+        raise ApiError(status_code=400, detail="Invalid websites.")
+    webs = []
+    for wid in dict.fromkeys(w for w in raw_webs if isinstance(w, str)):
+        site = web_sources.get_site(wid[4:]) if wid.startswith("web:") and web_sources.valid_id(wid[4:]) else None
+        if site is None or not site.get("enabled") or not site.get("search_url"):
+            continue  # switched off since the list was loaded: just not searched
+        webs.append({"id": wid[4:], "title": site["name"]})
+
     sections = await _fetch_label(name)
     resolved = sections.get("_name") or name
+
+    web_passages, skipped = [], []
+    if webs:
+        terms = await web_sources.search_terms(f"{resolved}: {question}")
+        if resolved.lower() not in terms.lower():
+            terms = f"{resolved} {terms}"[:200]
+        results = await asyncio.gather(
+            *(asyncio.wait_for(web_sources.passages(w["id"], terms), timeout=_WEB_FETCH_TIMEOUT_SECONDS) for w in webs),
+            return_exceptions=True,
+        )
+        for w, r in zip(webs, results):
+            if isinstance(r, BaseException):
+                logger.warning("Web source %s failed for a drug question: %r", w["id"], r)
+                skipped.append(w["title"])
+            else:
+                web_passages += r
+        web_passages = web_passages[:drug_qa.MAX_WEB_PASSAGES]
 
     try:
         with subscriptions.metered(user["id"], "questions"):
@@ -1783,6 +1814,7 @@ async def drug_ask(request: Request):
                     question,
                     history,
                     subscriptions.get_language(user["id"]),
+                    web_passages,
                 ),
                 timeout=_DRUG_ANSWER_TIMEOUT_SECONDS,
             )
@@ -1796,8 +1828,20 @@ async def drug_ask(request: Request):
         logger.exception("Mini app drug Q&A failed for %r", resolved)
         raise ApiError(status_code=500, detail="Couldn't answer that just now (not counted). Please try again.")
 
-    _save_drug_turn(user["id"], body.get("topic_id"), "drug", [resolved], question, answer, title=f"{resolved}: {question}")
-    return JSONResponse({"answer": answer, "drug": resolved})
+    sources = [
+        {"n": i, "title": p["title"], "url": p["url"], "text": p["text"][:600]} for i, p in enumerate(web_passages, 1)
+    ]
+    _save_drug_turn(
+        user["id"], body.get("topic_id"), "drug", [resolved], question, answer, title=f"{resolved}: {question}", sources=sources
+    )
+    return JSONResponse({"answer": answer, "drug": resolved, "sources": sources, "skipped": skipped})
+
+
+async def drug_websites(request: Request):
+    """The websites Drug LookUp can also search, and whether this user manages them (the admin)."""
+    user = require_user(request)
+    sites = [{"id": s["book_id"], "title": s["title"]} for s in web_sources.ask_sources()]
+    return JSONResponse({"sites": sites, "is_admin": subscriptions.is_admin(user["id"])})
 
 
 # ---------------------------------------------------------------------
@@ -1953,7 +1997,6 @@ async def ask_library(request: Request):
         {
             "my_books": my_books,
             "specialties": _shared_catalog(),
-            "web_sources": web_sources.ask_sources(),
             "is_admin": subscriptions.is_admin(user["id"]),
             "max_books": pdf_qa.MAX_BOOKS_PER_QUESTION,
             "max_upload_mb": MAX_SHELF_UPLOAD_BYTES // 1024 // 1024,
@@ -1979,41 +2022,21 @@ async def ask_multi(request: Request):
     # Every id is resolved against what THIS user may read: their own
     # shelf, or the shared libraries. An id that is neither is refused, so
     # a guessed id can never reach another user's book.
-    books, webs, seen = [], [], set()
+    books, seen = [], set()
     for bid in raw_ids:
         if not isinstance(bid, str) or bid in seen:
             continue
         seen.add(bid)
         if bid.startswith("web:"):
-            site = web_sources.get_site(bid[4:])
-            if site is None or not site.get("enabled") or not site.get("search_url"):
-                raise ApiError(status_code=404, detail="One of the selected websites isn't available anymore. Refresh and try again.")
-            webs.append({"book_id": bid, "title": site["name"]})
-            continue
+            continue  # websites moved to Drug LookUp; an old saved selection just drops them
         book = shared_library.get_book(bid) if shared_library.is_shared_id(bid) else library.get_book(user["id"], bid)
         if book is None:
             raise ApiError(status_code=404, detail="One of the selected books isn't available anymore. Refresh and try again.")
         if not book.get("qa_indexed"):
             raise ApiError(status_code=409, detail=f"\"{book['title']}\" isn't indexed for questions yet.")
         books.append({"book_id": bid, "title": book["title"]})
-    if not books and not webs:
+    if not books:
         raise ApiError(status_code=400, detail="Tick at least one book to ask.")
-
-    async def web_fetch(search_question: str):
-        """Search every ticked website at once; one that fails is reported as skipped, not fatal."""
-        terms = await web_sources.search_terms(search_question)
-        results = await asyncio.gather(
-            *(asyncio.wait_for(web_sources.passages(w["book_id"][4:], terms), timeout=_WEB_FETCH_TIMEOUT_SECONDS) for w in webs),
-            return_exceptions=True,
-        )
-        found, skipped = [], []
-        for w, r in zip(webs, results):
-            if isinstance(r, BaseException):
-                logger.warning("Web source %s failed: %r", w["book_id"], r)
-                skipped.append(w["title"])
-            else:
-                found += r
-        return found, skipped
 
     raw_history = body.get("history") or []
     if not isinstance(raw_history, list):
@@ -2029,9 +2052,8 @@ async def ask_multi(request: Request):
             result = await asyncio.wait_for(
                 pdf_qa.answer_question_multi(
                     books, question, history=history, language=subscriptions.get_language(user["id"]),
-                    web_fetch=web_fetch if webs else None,
                 ),
-                timeout=_MULTI_ASK_TIMEOUT_SECONDS + (_WEB_FETCH_TIMEOUT_SECONDS if webs else 0),
+                timeout=_MULTI_ASK_TIMEOUT_SECONDS,
             )
     except subscriptions.QuotaExceeded as e:
         raise ApiError(status_code=402, detail=str(e))
@@ -2049,7 +2071,7 @@ async def ask_multi(request: Request):
     topic_id = body.get("topic_id")
     if ask_sessions.valid_id(topic_id):
         try:
-            ask_sessions.append_turn(user["id"], topic_id, books + webs, question, result["answer"], result["sources"])
+            ask_sessions.append_turn(user["id"], topic_id, books, question, result["answer"], result["sources"])
         except Exception:
             logger.exception("Couldn't save Ask topic %s", topic_id)
     return JSONResponse(result)
@@ -2775,6 +2797,7 @@ routes = [
     Route("/api/drugs/resolve", drug_resolve, methods=["POST"]),
     Route("/api/drugs/interactions", drug_interactions, methods=["POST"]),
     Route("/api/drugs/ask", drug_ask, methods=["POST"]),
+    Route("/api/drugs/websites", drug_websites, methods=["GET"]),
     Route("/api/ask/library", ask_library, methods=["GET"]),
     Route("/api/ask/multi", ask_multi, methods=["POST"]),
     Route("/api/ask/topics", ask_topics, methods=["GET"]),

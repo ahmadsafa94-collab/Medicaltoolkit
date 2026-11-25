@@ -27,6 +27,7 @@ from pdf_processor import client  # reuse the one Anthropic client instance
 logger = logging.getLogger(__name__)
 
 MAX_HISTORY_TURNS = 6  # older turns are dropped rather than growing the prompt without bound
+MAX_WEB_PASSAGES = 8   # website passages (web_sources.py) given next to the label
 
 
 class DrugQAError(Exception):
@@ -62,7 +63,12 @@ def _label_context(sections: dict) -> str:
 
 
 def answer_question(
-    drug_name: str, sections: dict, question: str, history: list[dict] | None = None, language: str = "English"
+    drug_name: str,
+    sections: dict,
+    question: str,
+    history: list[dict] | None = None,
+    language: str = "English",
+    web_passages: list[dict] | None = None,
 ) -> str:
     """
     Synchronous -- run via asyncio.to_thread from an async handler.
@@ -83,12 +89,27 @@ def answer_question(
         raise DrugQAError(f"No usable label sections for {drug_name} to answer questions from.")
 
     history = (history or [])[-MAX_HISTORY_TURNS:]
+    web_passages = (web_passages or [])[:MAX_WEB_PASSAGES]
+    web_block = ""
+    if web_passages:
+        web_block = "\n\nWEBSITE PASSAGES (searched for this question; cite each one you use as [n]):\n" + "\n\n".join(
+            f"[{n}] (Website: \"{p['title']}\", {p['url']})\n{p['text']}" for n, p in enumerate(web_passages, 1)
+        )
 
     system_prompt = (
         f"You are answering questions about the drug '{drug_name}' using ONLY the FDA label excerpts "
-        "below (from openFDA, the same source this bot's /dose command shows verbatim). Follow these "
-        "rules strictly:\n"
-        "1. Answer using only information in the excerpts -- never your own memorized/training "
+        "below (from openFDA, the same source this bot's /dose command shows verbatim)"
+        + (" and the website passages after them" if web_passages else "")
+        + ". Follow these rules strictly:\n"
+        + (
+            "0. The FDA label is the primary source. Use a website passage only where it adds to the label "
+            "or the label is silent, cite it inline as [n] right after the statement it supports, and say so "
+            "when a passage disagrees with the label rather than silently picking one. A passage that isn't "
+            "about this drug and question is ignored.\n"
+            if web_passages
+            else ""
+        )
+        + "1. Answer using only information in the excerpts -- never your own memorized/training "
         "knowledge of this drug, even if you're confident about it, since the excerpts are the "
         "authoritative, current source here and outside knowledge can be outdated or wrong for this "
         "specific product/formulation.\n"
@@ -109,6 +130,7 @@ def answer_question(
         )
         + f"7. Respond in {language}.\n"
         + f"\nFDA LABEL EXCERPTS FOR {drug_name.upper()}:\n{context}"
+        + web_block
     )
 
     messages = []

@@ -2508,6 +2508,8 @@ let interactionDrugs = [];
 let lookupDrug = null;
 let lookupThread = [];   // [{q, a}] -- sent back as history so follow-ups keep context
 let lookupTopicId = null;      // saved-topic id for this drug thread (kind "drug")
+let lookupWebSites = [];       // [{id, title}] websites Drug LookUp can also search (web_sources.py)
+const lookupWebOff = new Set(); // the ones this user unticked
 let interactionTopicId = null; // saved-topic id of the check on screen (kind "interactions")
 let drugsBusy = false;
 
@@ -2518,7 +2520,9 @@ function drugsTab(name) {
   document.getElementById("drugs-pane-interactions").hidden = name !== "interactions";
   document.getElementById("drugs-pane-lookup").hidden = name !== "lookup";
   document.getElementById("drugs-pane-lexi").hidden = name !== "lexi";
+  document.getElementById("drugs-pane-web").hidden = name !== "web";
   if (name === "lexi") checkLexiStatus();
+  if (name === "web") loadWebSites();
 }
 
 // --- shared name autocomplete ----------------------------------------
@@ -2771,6 +2775,35 @@ function wireDrugTopicsPanel(panelId, kind, emptyText, onOpen, onDeleted) {
 
 // --- drug lookup (Q&A against one label) ------------------------------
 
+// The websites an answer can also draw on, and (for the admin) the
+// 🌐 Websites tab where they are added. Refreshed after the admin changes one.
+async function loadDrugWebsites() {
+  let data;
+  try {
+    data = await api("/api/drugs/websites");
+  } catch (_) {
+    return;  // the label alone still answers
+  }
+  lookupWebSites = data.sites || [];
+  document.querySelector('#view-drugs .subtab[data-drugtab="web"]').hidden = !data.is_admin;
+  renderLookupWebsites();
+}
+
+function renderLookupWebsites() {
+  document.getElementById("lookup-web").hidden = lookupWebSites.length === 0;
+  document.getElementById("lookup-web-list").innerHTML = lookupWebSites
+    .map(
+      (w) =>
+        `<label class="check-row"><input type="checkbox" data-web-id="${escapeHtml(w.id)}" ${lookupWebOff.has(w.id) ? "" : "checked"} />` +
+        `<span class="web-row-icon">🌐</span><span class="check-title">${escapeHtml(w.title)}</span></label>`
+    )
+    .join("");
+}
+
+function lookupWebIds() {
+  return lookupWebSites.filter((w) => !lookupWebOff.has(w.id)).map((w) => w.id).slice(0, 5);
+}
+
 function renderLookupState() {
   const label = document.getElementById("lookup-current");
   const askPanel = document.getElementById("lookup-ask-panel");
@@ -2791,7 +2824,7 @@ function renderLookupThread() {
     .map(
       (t, i) =>
         `<div class="qa-msg q" dir="auto">${escapeHtml(t.q)}</div>` +
-        `<div class="qa-msg a">${richText(t.a)}` +
+        `<div class="qa-msg a" data-turn="${i}">${t.sources && t.sources.length ? askAnswerHtml(t.a, t.sources) : richText(t.a)}` +
         (t.done && lookupTopicId
           ? `<div class="ask-turn-tools"><button class="mini-btn" data-export-turn="${i}">📄 Save as PDF</button></div>`
           : "") +
@@ -2862,7 +2895,8 @@ async function askLookup() {
   const thread = lookupThread;
   const topicId = lookupTopicId || (lookupTopicId = genId());
   const askedDrug = lookupDrug;
-  const turn = { q: question, a: "…reading the label…" };
+  const webIds = lookupWebIds();
+  const turn = { q: question, a: webIds.length ? "…reading the label and searching the websites…" : "…reading the label…" };
   const history = thread.map((t) => ({ question: t.q, answer: t.a }));
   thread.push(turn);
   input.value = "";
@@ -2870,7 +2904,7 @@ async function askLookup() {
   let suggestionsShown = false;
 
   try {
-    const { answer, drug } = await api("/api/drugs/ask", {
+    const { answer, drug, sources, skipped } = await api("/api/drugs/ask", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -2878,9 +2912,11 @@ async function askLookup() {
         question,
         history,  // everything answered so far in this thread
         topic_id: topicId,
+        web_ids: webIds,
       }),
     });
-    Object.assign(turn, { a: answer, done: true });
+    const note = skipped && skipped.length ? `\n\n(Couldn't search: ${skipped.join(", ")}.)` : "";
+    Object.assign(turn, { a: answer + note, sources: sources || [], done: true });
     if (thread === lookupThread && drug && drug !== lookupDrug) {
       lookupDrug = drug;
       renderLookupState();
@@ -3091,8 +3127,21 @@ function wireDrugsTab() {
   document.getElementById("lookup-topic-pdf").addEventListener("click", (e) => exportTopic(e.currentTarget, lookupTopicId));
   document.getElementById("lookup-thread").addEventListener("click", (e) => {
     const btn = e.target.closest("button[data-export-turn]");
-    if (btn) exportTopic(btn, lookupTopicId, parseInt(btn.dataset.exportTurn, 10));
+    if (btn) return exportTopic(btn, lookupTopicId, parseInt(btn.dataset.exportTurn, 10));
+    // a [n] marker or source line: the website page it came from
+    const cite = e.target.closest(".cite-marker, .src-line");
+    const msg = cite && cite.closest(".qa-msg");
+    const t = msg && lookupThread[parseInt(msg.dataset.turn, 10)];
+    const src = t && t.sources && t.sources.find((x) => String(x.n) === cite.dataset.n);
+    if (src && src.url) openExternal(src.url);
   });
+  document.getElementById("lookup-web-list").addEventListener("change", (e) => {
+    const box = e.target.closest("input[data-web-id]");
+    if (!box) return;
+    if (box.checked) lookupWebOff.delete(box.dataset.webId);
+    else lookupWebOff.add(box.dataset.webId);
+  });
+  loadDrugWebsites();
   const lookupEmpty = "No saved drug questions yet. Every answer here is saved automatically.";
   document.getElementById("lookup-history").addEventListener("click", () =>
     showDrugTopics("lookup-topics", "drug", lookupEmpty)
@@ -3102,7 +3151,7 @@ function wireDrugsTab() {
     (topicId, topic) => {
       lookupTopicId = topicId;
       lookupDrug = (topic.books && topic.books[0] && topic.books[0].title) || null;
-      lookupThread = (topic.turns || []).map((t) => ({ q: t.q, a: t.a, done: true }));
+      lookupThread = (topic.turns || []).map((t) => ({ q: t.q, a: t.a, sources: t.sources || [], done: true }));
       document.getElementById("lookup-drug-input").value = lookupDrug || "";
       renderLookupState();
       document.getElementById("lookup-thread").scrollIntoView({ block: "start", behavior: "smooth" });
@@ -3175,7 +3224,7 @@ let askIndexingOwn = new Set();  // own books whose index job this tab started
 
 function askAllBooks() {
   if (!askLib) return [];
-  return askLib.my_books.concat(...askLib.specialties.map((s) => s.books), askLib.web_sources || []);
+  return askLib.my_books.concat(...askLib.specialties.map((s) => s.books));
 }
 
 async function loadAskLibrary({ quiet = false } = {}) {
@@ -3280,19 +3329,6 @@ function renderAskLibrary() {
     ? askLib.my_books.map((b) => askRowHtml(b, { shared: false })).join("")
     : `<p class="muted">No books on your shelf yet. Add one from the 📚 Shelf tab.</p>`;
   loadCoverThumbs(document.getElementById("view-ask"));
-
-  const webs = askLib.web_sources || [];
-  document.getElementById("ask-web-block").hidden = webs.length === 0;
-  document.getElementById("ask-web-books").innerHTML = webs
-    .map(
-      (b) =>
-        `<label class="check-row"><input type="checkbox" data-id="${b.book_id}" ${askSelected.has(b.book_id) ? "checked" : ""} />` +
-        `<span class="web-row-icon">🌐</span><span class="check-title">${escapeHtml(b.title)}</span></label>`
-    )
-    .join("");
-  const webAdmin = document.getElementById("web-admin");
-  webAdmin.hidden = !askLib.is_admin;
-  if (askLib.is_admin && !webSitesLoaded) loadWebSites();
 
   const admin = document.getElementById("ask-admin");
   admin.hidden = !askLib.is_admin;
@@ -3979,6 +4015,7 @@ async function loadWebSites() {
     return;
   }
   renderWebSites();
+  loadDrugWebsites();  // a site switched on or off changes what Drug LookUp can search
 }
 
 function webStatusLine(s) {
@@ -3989,7 +4026,7 @@ function webStatusLine(s) {
     const when = new Date(s.last_login * 1000).toLocaleString();
     parts.push(s.last_login_ok === false ? `<span class="bad">⚠️ Last login failed ${when}: ${escapeHtml(s.last_error || "")}</span>` : `last login ${when}`);
   }
-  parts.push(s.enabled ? "🟢 In Ask your books" : "⚪ Not in Ask your books");
+  parts.push(s.enabled ? "🟢 Searched in Drug LookUp" : "⚪ Not searched in Drug LookUp");
   return parts.join(" · ");
 }
 
@@ -4013,7 +4050,7 @@ function renderWebSites() {
                 <select class="ask-select" data-f="max_results">${[1, 2, 3, 4, 5]
                   .map((n) => `<option ${n === s.max_results ? "selected" : ""}>${n}</option>`)
                   .join("")}</select></label>
-              <label class="web-check"><input type="checkbox" data-f="enabled" ${s.enabled ? "checked" : ""} /> Available in Ask your books</label>
+              <label class="web-check"><input type="checkbox" data-f="enabled" ${s.enabled ? "checked" : ""} /> Search it in Drug LookUp</label>
               <button class="btn" data-web-save="${s.site_id}">Save settings</button>
               <div class="drug-input-row"><input class="drug-input" data-f="test" placeholder="Test search, e.g. lithium bipolar" />
                 <button class="btn secondary" data-web-test="${s.site_id}">Test</button></div>

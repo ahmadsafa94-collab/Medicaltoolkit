@@ -759,3 +759,4 @@ body.has-tabbar .fab { bottom: calc(76px + env(safe-area-inset-bottom, 0px)); }
   background: var(--button); box-shadow: 0 0 0 2px var(--bg); animation: web-tab-pulse 1.2s ease-in-out infinite;
 }
 @keyframes web-tab-pulse { 50% { transform: scale(1.35); } }
+.lookup-web { margin-top: 12px; }

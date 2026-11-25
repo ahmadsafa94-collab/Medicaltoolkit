@@ -163,7 +163,7 @@ def list_sites() -> list[dict]:
 
 
 def ask_sources() -> list[dict]:
-    """Switched-on sources with a search address: what users can tick in Ask your books."""
+    """Switched-on sources with a search address: what users can tick in Drug LookUp."""
     return [
         {"book_id": f"web:{s['site_id']}", "title": s["name"], "qa_indexed": True, "web": True}
         for s in list_sites()
@@ -202,7 +202,7 @@ def update_site(site_id: str, fields: dict) -> dict:
         if "enabled" in fields:
             site["enabled"] = bool(fields["enabled"])
             if site["enabled"] and not site.get("search_url"):
-                raise WebSourceError("Set the search address before making it available in Ask your books.")
+                raise WebSourceError("Set the search address before switching it on for Drug LookUp.")
         site["updated"] = int(time.time())
         sites[site_id] = site
         _write_json(_SITES_PATH, sites)
@@ -1289,7 +1289,7 @@ def _source_title(site_name: str, page_title: str) -> str:
 
 
 async def passages(site_id: str, query: str) -> list[dict]:
-    """Search results as passages for Ask your books: [{'text', 'title', 'url', 'book_id', 'page'}]."""
+    """Search results as passages for Drug LookUp answers: [{'text', 'title', 'url', 'book_id', 'page'}]."""
     site = get_site(site_id) or {}
     out = []
     for r in await search(site_id, query):
