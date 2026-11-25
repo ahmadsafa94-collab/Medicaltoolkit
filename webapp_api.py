@@ -2597,7 +2597,7 @@ async def upload_start(request: Request):
     _uploads[upload_id] = {
         "user_id": user["id"], "path": path, "size": size, "title": title, "target": target,
         "specialty": specialty, "received": set(), "touched": time.time(), "started": time.time(),
-        "chunks": -(-size // UPLOAD_CHUNK_BYTES), "dest_dir": dest_dir, "filename": filename,
+        "chunks": -(-size // UPLOAD_CHUNK_BYTES), "chunk_size": UPLOAD_CHUNK_BYTES, "dest_dir": dest_dir, "filename": filename,
         "writers": 0, "closed": False,
     }
     await asyncio.to_thread(_save_upload_meta, upload_id, _uploads[upload_id])
@@ -2623,8 +2623,12 @@ async def upload_chunk(request: Request):
     if not (0 <= index < up["chunks"]):
         raise ApiError(status_code=400, detail="Invalid chunk index.")
 
-    offset = index * UPLOAD_CHUNK_BYTES
-    expected = min(UPLOAD_CHUNK_BYTES, up["size"] - offset)
+    # Each upload keeps the part size it started with: one begun before a
+    # deploy that changed the size (2 MB, before chunk_size was stored) must
+    # still be assembled with its own.
+    part = up.get("chunk_size") or 2 * 1024 * 1024
+    offset = index * part
+    expected = min(part, up["size"] - offset)
     written = 0
     buf = bytearray()
 
