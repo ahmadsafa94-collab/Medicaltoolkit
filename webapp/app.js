@@ -656,7 +656,8 @@ const APP_VERSION = (() => {
 // flight, or text typed into a question box.
 function userIsBusy() {
   if (uploadsInFlight > 0 || askBusy || drugsBusy || (typeof lexiBusy !== "undefined" && lexiBusy)) return true;
-  return ["ask-question", "lookup-question", "lexi-question", "web-text", "web-secret"].some((id) => {
+  if (!document.getElementById("view-web").hidden) return true;  // a reload would drop the live browser
+  return ["ask-question", "lookup-question", "lexi-question", "web-live"].some((id) => {
     const el = document.getElementById(id);
     return el && el.value.trim();
   });
@@ -4116,7 +4117,10 @@ function webSetBusy(on) {
 
 function webShow(frame) {
   webFrame = frame;
-  document.getElementById("web-shot").src = `data:image/jpeg;base64,${frame.image}`;
+  const shot = document.getElementById("web-shot");
+  shot.src = `data:image/jpeg;base64,${frame.image}`;
+  shot.style.transform = "";  // a swipe's preview offset, now replaced by the real picture
+  webSetFocus(frame.focus || {});
   const url = document.getElementById("web-url");
   if (document.activeElement !== url) url.value = frame.url;
   document.getElementById("web-steps").textContent = frame.steps;
@@ -4173,12 +4177,20 @@ async function webCall(path, body) {
 // A quiet second picture: no busy overlay, and dropped if an action has
 // started meanwhile (that action brings its own picture).
 async function webRefresh() {
-  if (webBusy || document.getElementById("view-web").hidden) return;
-  try {
-    const frame = await api("/api/admin/web/browser/frame");
-    if (!webBusy) webShow(frame);
-  } catch (_) { /* the next action will show the state */ }
+  clearTimeout(webRefreshTimer);
+  if (document.getElementById("view-web").hidden || document.visibilityState !== "visible") return;
+  if (!webBusy && !webDrag && !webTypeTimer && !webTyping) {
+    try {
+      const frame = await api("/api/admin/web/browser/frame");
+      if (!webBusy && !webDrag) webShow(frame);
+    } catch (_) { /* the next action will show the state */ }
+  }
+  // Keep the picture live: pages load, pop-ups open, timers tick.
+  if (!document.getElementById("view-web").hidden) webRefreshTimer = setTimeout(webRefresh, 2500);
 }
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && !document.getElementById("view-web").hidden) webRefresh();
+});
 
 async function webOpen(url, siteId) {
   const site = siteId && webSites.find((s) => s.site_id === siteId);
@@ -4191,6 +4203,9 @@ async function webOpen(url, siteId) {
 
 function webClose() {
   clearTimeout(webRefreshTimer);
+  clearTimeout(webTypeTimer);
+  webTypeTimer = null;
+  webResetTyping();
   api("/api/admin/web/browser/close", { method: "POST" }).catch(() => {});
 }
 
@@ -4198,18 +4213,152 @@ function webAction(body) {
   return webCall("/api/admin/web/browser/action", body);
 }
 
-function webType(secret) {
-  if (webBusy) return;  // keep the text in the box until the browser is free
-  const input = document.getElementById(secret ? "web-secret" : "web-text");
-  const text = input.value;
-  if (!text) return alertMsg("Type the text into the box first, then tap the button.");
+// --- typing straight into the page ---------------------------------------
+// The bar under the picture mirrors the focused field: what is typed there is
+// sent a few letters at a time (corrections as backspaces), so the phone's own
+// keyboard writes into the website.
+
+let webSent = "";          // what the bar has already sent to the page
+let webTypeTimer = null;   // pending send (a short pause after the last key)
+let webTyping = 0;         // sends in flight
+let webTypeChain = Promise.resolve();
+let webFocusAfterTap = false;
+
+function webResetTyping() {
+  const input = document.getElementById("web-live");
   input.value = "";
-  webAction({ type: "type", text, secret });
+  webSent = "";
+}
+
+function webSetFocus(focus) {
+  const input = document.getElementById("web-live");
+  const bar = input.closest(".web-kbd");
+  bar.classList.toggle("is-on", !!focus.editable);
+  bar.classList.toggle("is-secret", !!(focus.editable && focus.password));
+  // Switch to a hidden field only between words, never mid-typing.
+  const type = focus.editable && focus.password ? "password" : "text";
+  if (input.type !== type && !input.value) input.type = type;
+  input.placeholder = !focus.editable
+    ? "Tap a field on the page, then type here"
+    : focus.password
+      ? "🔒 Password: goes straight into the page"
+      : `Typing into ${focus.label ? `“${focus.label}”` : "the selected field"}`;
+  if (webFocusAfterTap) {
+    webFocusAfterTap = false;
+    webResetTyping();
+    input.type = type;
+    if (focus.editable) input.focus({ preventScroll: true });  // opens the phone's keyboard
+  }
+}
+
+// Send what changed since the last send; returns once it has been typed.
+function webFlushTyping() {
+  clearTimeout(webTypeTimer);
+  webTypeTimer = null;
+  const input = document.getElementById("web-live");
+  const value = input.value;
+  let k = 0;
+  while (k < value.length && k < webSent.length && value[k] === webSent[k]) k++;
+  const backspaces = webSent.length - k;
+  const text = value.slice(k);
+  if (!backspaces && !text) return webTypeChain;
+  webSent = value;
+  const secret = input.type === "password";
+  const pieces = [];
+  for (let i = 0; i < text.length; i += 400) pieces.push(text.slice(i, i + 400));
+  if (!pieces.length) pieces.push("");
+  pieces.forEach((piece, i) => {
+    const body = { type: "edit", backspaces: i === 0 ? Math.min(backspaces, 500) : 0, text: piece, secret };
+    webTypeChain = webTypeChain.then(async () => {
+      webTyping++;
+      try {
+        const frame = await api("/api/admin/web/browser/action", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (!webDrag) webShow(frame);
+      } catch (e) {
+        alertMsg(e.message);
+      } finally {
+        webTyping--;
+      }
+    });
+  });
+  return webTypeChain;
+}
+
+async function webKey(key) {
+  await webFlushTyping();
+  webResetTyping();
+  webFocusAfterTap = true;  // Tab moves to the next field: follow it
+  await webAction({ type: "key", key });
+}
+
+// --- tapping and swiping on the picture -----------------------------------
+
+let webDrag = null;
+
+function wireWebScreen() {
+  const shot = document.getElementById("web-shot");
+  const end = async (e, cancelled) => {
+    const d = webDrag;
+    webDrag = null;
+    if (!d || !webFrame) return;
+    const dx = e.clientX - d.x, dy = e.clientY - d.y;
+    const sx = webFrame.width / d.rect.width, sy = webFrame.height / d.rect.height;
+    const px = (d.x - d.rect.left) * sx, py = (d.y - d.rect.top) * sy;
+    if (cancelled || webBusy) { shot.style.transform = ""; return; }
+    if (!d.moved) {
+      if (Date.now() - d.t > 900) return;  // a long press: nothing
+      await webFlushTyping();
+      webFocusAfterTap = true;
+      await webAction({ type: "click", x: px, y: py });
+      return;
+    }
+    const horizontal = Math.abs(dx) > Math.abs(dy);
+    await webAction({
+      type: "scroll", x: px, y: py,
+      dx: horizontal ? Math.round(-dx * sx) : 0,
+      dy: horizontal ? 0 : Math.round(-dy * sy),
+    });
+    shot.style.transform = "";
+  };
+  shot.addEventListener("pointerdown", (e) => {
+    if (!webFrame || e.button > 0) return;
+    shot.setPointerCapture(e.pointerId);
+    webDrag = { x: e.clientX, y: e.clientY, t: Date.now(), moved: false, rect: shot.getBoundingClientRect() };
+  });
+  shot.addEventListener("pointermove", (e) => {
+    if (!webDrag) return;
+    const dx = e.clientX - webDrag.x, dy = e.clientY - webDrag.y;
+    if (!webDrag.moved && Math.hypot(dx, dy) > 10) webDrag.moved = true;
+    if (webDrag.moved) {
+      shot.style.transform = Math.abs(dx) > Math.abs(dy) ? `translateX(${dx}px)` : `translateY(${dy}px)`;
+    }
+  });
+  shot.addEventListener("pointerup", (e) => end(e, false));
+  shot.addEventListener("pointercancel", (e) => end(e, true));
+
+  const input = document.getElementById("web-live");
+  input.addEventListener("input", () => {
+    clearTimeout(webTypeTimer);
+    webTypeTimer = setTimeout(webFlushTyping, 300);
+  });
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); webKey("Enter"); }
+    // Backspace on an empty bar still deletes in the page (text that was already there).
+    else if (e.key === "Backspace" && !input.value) {
+      e.preventDefault();
+      webTypeChain = webTypeChain.then(() => webAction({ type: "key", key: "Backspace" }));
+    }
+  });
 }
 
 async function webSave() {
   if (webBusy) return;
   const name = document.getElementById("web-save-name").value.trim();
+  await webFlushTyping();  // letters still waiting to be sent belong to the login
   webSetBusy(true);
   clearTimeout(webRefreshTimer);
   try {
@@ -4247,14 +4396,7 @@ function wireWebSources() {
     if (close) webAction({ type: "close_tab", i: Number(close.dataset.closeTab) });
     else if (open && !open.closest(".is-active")) webAction({ type: "tab", i: Number(open.dataset.tab) });
   });
-  document.getElementById("web-shot").addEventListener("click", (e) => {
-    if (!webFrame || webBusy) return;
-    const img = e.currentTarget;
-    const rect = img.getBoundingClientRect();
-    const x = ((e.clientX - rect.left) / rect.width) * webFrame.width;
-    const y = ((e.clientY - rect.top) / rect.height) * webFrame.height;
-    webAction({ type: "click", x, y });
-  });
+  wireWebScreen();
   const go = () => {
     const url = document.getElementById("web-url").value.trim();
     if (url) webAction({ type: "goto", url });
@@ -4273,17 +4415,11 @@ function wireWebSources() {
     else if (what === "down") webAction({ type: "scroll", dy: 500 });
     else webCall("/api/admin/web/browser/frame");
   });
-  document.getElementById("web-type").addEventListener("click", () => webType(false));
-  document.getElementById("web-type-secret").addEventListener("click", () => webType(true));
-  document.getElementById("web-text").addEventListener("keydown", (e) => {
-    if (e.key === "Enter") { e.preventDefault(); webType(false); }
+  document.querySelectorAll("#view-web [data-key]").forEach((b) => {
+    // keep the keyboard open: the tap must not take focus from the typing bar
+    b.addEventListener("pointerdown", (e) => e.preventDefault());
+    b.addEventListener("click", () => webKey(b.dataset.key));
   });
-  document.getElementById("web-secret").addEventListener("keydown", (e) => {
-    if (e.key === "Enter") { e.preventDefault(); webType(true); }
-  });
-  document.querySelectorAll("#view-web [data-key]").forEach((b) =>
-    b.addEventListener("click", () => webAction({ type: "key", key: b.dataset.key }))
-  );
   document.getElementById("web-rec-restart").addEventListener("click", () => webAction({ type: "restart_recording" }));
   document.getElementById("web-save").addEventListener("click", webSave);
 }

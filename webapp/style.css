@@ -648,7 +648,7 @@ body.has-tabbar .fab { bottom: calc(76px + env(safe-area-inset-bottom, 0px)); }
 .ask-send-btn { display: block; width: 100%; margin-top: 10px; padding: 12px; font-size: 16px; border-radius: 12px; }
 .ask-compose-tools { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 .mini-btn.ask-like, .ask-compose-tools .mini-btn, .ask-compose-head .mini-btn, .ask-pick-head .mini-btn,
-.web-tools .mini-btn, .web-type-btns .mini-btn, .web-site-actions .mini-btn {
+.web-tools .mini-btn, .web-kbd .mini-btn, .web-site-actions .mini-btn {
   padding: 7px 11px; border-radius: 9px; font: inherit; font-size: 13px; cursor: pointer;
   border: 1px solid rgba(128, 128, 128, 0.28); background: var(--bg); color: var(--link);
 }
@@ -693,14 +693,19 @@ body.has-tabbar .fab { bottom: calc(76px + env(safe-area-inset-bottom, 0px)); }
 .web-urlbar { display: flex; gap: 8px; padding: 0 16px; }
 .web-urlbar .drug-input { font-size: 14px; padding: 10px 12px; }
 .web-tools { display: flex; gap: 6px; padding: 10px 16px 6px; flex-wrap: wrap; }
-.web-screen { position: relative; margin: 4px 16px; border-radius: 12px; overflow: hidden;
+.web-screen { position: relative; margin: 4px auto; width: fit-content; max-width: calc(100% - 32px); border-radius: 12px; overflow: hidden;
   border: 1px solid rgba(128, 128, 128, 0.3); background: #fff; line-height: 0; }
-#web-shot { width: 100%; display: block; touch-action: manipulation; min-height: 200px; }
+/* Sized to leave room beside it: a swipe on the picture scrolls the website, not the app. */
+#web-shot { display: block; aspect-ratio: 390 / 740; height: min(60vh, calc((100vw - 32px) * 740 / 390)); width: auto; max-width: 100%;
+  touch-action: none; user-select: none; -webkit-user-select: none; -webkit-user-drag: none; -webkit-touch-callout: none;
+  }
 .web-busy { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
   background: rgba(0, 0, 0, 0.18); font-size: 32px; line-height: 1; }
 .web-hint { padding: 0 16px; }
-.web-type { padding: 8px 16px; }
-.web-type-btns { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.web-kbd { display: flex; gap: 6px; align-items: center; padding: 8px 16px 2px; }
+.web-kbd .drug-input { flex: 1; min-width: 0; font-size: 15px; padding: 10px 12px; transition: border-color .2s, box-shadow .2s; }
+.web-kbd.is-on .drug-input { border-color: var(--button); box-shadow: 0 0 0 3px var(--primary-soft); }
+.web-kbd .mini-btn { padding: 9px 13px; font-size: 15px; }
 .web-save-name { width: 100%; box-sizing: border-box; margin-top: 10px; }
 .web-sites { margin-top: 12px; display: flex; flex-direction: column; gap: 10px; }
 .web-site { border: 1px solid rgba(128, 128, 128, 0.25); border-radius: 12px; padding: 12px; }

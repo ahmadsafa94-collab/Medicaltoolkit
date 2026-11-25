@@ -618,6 +618,37 @@ _JS_ACTIVE = "() => {" + _JS_PATH + """
 }"""
 
 
+# What has focus: whether the keyboard should open in the mini app, and
+# hide what is typed (a password field).
+_JS_FOCUS = """() => {
+  const el = document.activeElement;
+  if (!el || el === document.body) return {editable: false};
+  const tag = el.tagName.toLowerCase();
+  const type = (el.getAttribute('type') || '').toLowerCase();
+  const textInput = tag === 'input' && !['button', 'submit', 'reset', 'checkbox', 'radio', 'file', 'image', 'range', 'color', 'hidden'].includes(type);
+  const editable = (textInput || tag === 'textarea' || el.isContentEditable) && !el.disabled && !el.readOnly;
+  const label = (el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.getAttribute('name') || '').slice(0, 60);
+  return {editable: !!editable, password: type === 'password', label};
+}"""
+
+
+_JS_SCROLL = """([x, y, dx, dy]) => {
+  let el = document.elementFromPoint(x, y);
+  while (el && el !== document.body && el !== document.documentElement) {
+    const st = getComputedStyle(el);
+    const canY = dy && /(auto|scroll|overlay)/.test(st.overflowY) && el.scrollHeight > el.clientHeight + 1;
+    const canX = dx && /(auto|scroll|overlay)/.test(st.overflowX) && el.scrollWidth > el.clientWidth + 1;
+    if (canY || canX) {
+      const before = [el.scrollLeft, el.scrollTop];
+      el.scrollBy({left: dx, top: dy, behavior: 'instant'});
+      if (el.scrollLeft !== before[0] || el.scrollTop !== before[1]) return;  // at its end: let the page scroll
+    }
+    el = el.parentElement;
+  }
+  window.scrollBy({left: dx, top: dy, behavior: 'instant'});
+}"""
+
+
 async def _page_text(page) -> str:
     try:
         text = await page.evaluate(
@@ -736,6 +767,10 @@ async def live_frame() -> dict:
     except Exception:
         title = ""
     _live.seen.add(id(page))
+    try:
+        focus = await asyncio.wait_for(page.evaluate(_JS_FOCUS), 2)
+    except Exception:
+        focus = {"editable": False}
     tabs = []
     for i, pg in enumerate(_live.tabs()):
         try:
@@ -753,6 +788,7 @@ async def live_frame() -> dict:
         "url": page.url,
         "title": title,
         "tabs": tabs,
+        "focus": focus,
         "width": VIEWPORT["width"],
         "height": VIEWPORT["height"],
         "steps": len(_live.steps),
@@ -819,6 +855,27 @@ async def live_action(action: dict) -> dict:
                 step["text"] = text
             _live.steps.append(step)
             await _settle(page, quick=True)
+        elif kind == "edit":
+            try:
+                backspaces = int(action.get("backspaces") or 0)
+            except (TypeError, ValueError):
+                backspaces = -1
+            text = action.get("text") or ""
+            if not 0 <= backspaces <= 500 or not isinstance(text, str) or len(text) > 500 or not (backspaces or text):
+                raise WebSourceError("Invalid typing.")
+            for _ in range(backspaces):
+                await page.keyboard.press("Backspace")
+            if text:
+                await page.keyboard.type(text, delay=10)
+            try:
+                selector = await page.evaluate(_JS_ACTIVE)
+                in_password_field = await page.evaluate(
+                    "() => !!document.activeElement && document.activeElement.type === 'password'"
+                )
+            except Exception:
+                selector, in_password_field = None, False
+            _record_edit(_live.steps, selector, backspaces, text, bool(action.get("secret") or in_password_field))
+            await _settle(page, quick=True)
         elif kind == "key":
             key = action.get("key")
             if key not in _ALLOWED_KEYS:
@@ -829,10 +886,23 @@ async def live_action(action: dict) -> dict:
         elif kind == "scroll":
             try:
                 dy = max(-3000, min(3000, int(action.get("dy", 500))))
+                dx = max(-3000, min(3000, int(action.get("dx", 0))))
             except (TypeError, ValueError):
-                dy = 500
-            await page.mouse.wheel(0, dy)
-            await asyncio.sleep(0.4)
+                dy, dx = 500, 0
+            try:
+                x = max(0, min(VIEWPORT["width"], float(action["x"])))
+                y = max(0, min(VIEWPORT["height"], float(action["y"])))
+            except (KeyError, TypeError, ValueError):
+                x, y = VIEWPORT["width"] / 2, VIEWPORT["height"] / 2
+            # By exactly the swipe's distance, in whatever scrolls under the
+            # finger (a list in a pop-up, not just the page). A mouse wheel in
+            # this phone-sized browser moves about 2.5 times as far.
+            try:
+                await page.evaluate(_JS_SCROLL, [x, y, dx, dy])
+            except Exception:
+                await page.mouse.move(x, y)
+                await page.mouse.wheel(dx / 2.5, dy / 2.5)
+            await asyncio.sleep(0.35)
         elif kind == "goto":
             url = check_url(action.get("url") or "")
             await _goto(page, url)
@@ -856,6 +926,34 @@ async def live_action(action: dict) -> dict:
         else:
             raise WebSourceError("Unknown action.")
     return await live_frame()
+
+
+def _record_edit(steps: list, selector, backspaces: int, text: str, secret: bool) -> None:
+    """
+    Record keyboard typing as one "type" step per field: the phone sends a
+    few letters at a time, and each correction (backspaces) is folded into
+    the text, so the replay types the final value once.
+    """
+    last = steps[-1] if steps else None
+    if last and last.get("a") == "type" and last.get("sel") == selector and bool(last.get("secret")) == secret:
+        current = _decrypt(last["secret"]) if secret else last.get("text", "")
+        if backspaces <= len(current):
+            current = current[: len(current) - backspaces] + text
+            if not current:
+                steps.pop()
+            elif secret:
+                last["secret"] = _encrypt(current)
+            else:
+                last["text"] = current
+            return
+    steps.extend({"a": "key", "key": "Backspace"} for _ in range(backspaces))
+    if text:
+        step = {"a": "type", "sel": selector}
+        if secret:
+            step["secret"] = _encrypt(text)
+        else:
+            step["text"] = text
+        steps.append(step)
 
 
 async def live_save(name: str | None, keep_steps: bool = True) -> dict:
