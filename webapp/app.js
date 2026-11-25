@@ -1059,7 +1059,7 @@ async function sendChapterFilesToChat() {
 // zoomFactor is a multiplier applied on top of the auto-fit-to-width scale
 // (1 = fit width, 1.4 = 40% zoomed in past fit-width, etc.) so zoom keeps
 // working sensibly across pages/devices with different fit-width scales.
-let readerState = { pdf: null, pageNum: 1, rendering: false, zoomFactor: 1, notes: [] };
+let readerState = { pdf: null, pageNum: 1, rendering: false, zoomFactor: 1, notes: [], highlights: [] };
 const ZOOM_STEP = 0.2;
 const ZOOM_MIN = 0.5;
 const ZOOM_MAX = 3;
@@ -1129,6 +1129,17 @@ async function openReader(targetPage) {
     } catch (_) {
       readerState.notes = [];  // non-fatal -- the reader still works without notes loaded
     }
+    try {
+      readerState.highlights = (await api(`/api/books/${bookId}/highlights`)).highlights || [];
+    } catch (_) {
+      readerState.highlights = [];
+    }
+    readerSearchTerm = "";
+    document.getElementById("reader-search-results").innerHTML = "";
+    document.getElementById("reader-search-status").textContent = "";
+    hideSelBar();
+    readerClosePanels();
+    readerApplyNight();
     if (seq !== readerSeq) return;
     renderReaderPage();
   } catch (e) {
@@ -1227,6 +1238,7 @@ async function _renderReaderPage(pdf, num) {
 
   showReaderSource();
   highlightSourceOnPage();
+  applyReaderMarks();
   document.getElementById("reader-page-label").textContent = `Page ${num} / ${pdf.numPages}`;
   updateBookmarkButton();
   updateNotesButton();
@@ -1464,6 +1476,8 @@ readerCanvasWrap.addEventListener(
     // of a pinch one finger at a time), which is not the end of a swipe.
     if (!start || e.touches.length > 0 || e.changedTouches.length !== 1) return;
     if (Date.now() - start.startedAt > SWIPE_MAX_MS) return;
+    const sel = window.getSelection();
+    if (sel && !sel.isCollapsed) return;  // dragging a text selection, not flipping
 
     const dx = e.changedTouches[0].clientX - start.x;
     const dy = e.changedTouches[0].clientY - start.y;
@@ -4479,3 +4493,479 @@ function wireWebSources() {
   });
   document.getElementById("web-save").addEventListener("click", webSave);
 }
+
+
+// ---------------------------------------------------------------------
+// Reader tools: highlights, things to do with selected text, search in the
+// book, the chapter list and night reading (reader_tools.py on the server).
+//
+// A highlight is anchored to the page's text layer -- the index of its first
+// and last text piece and the character offsets in them -- so it lands on the
+// same words at any zoom. Scanned pages have no text layer, so nothing can be
+// selected or highlighted on them.
+// ---------------------------------------------------------------------
+
+const HL_COLORS = ["yellow", "green", "blue", "pink"];
+let readerSel = null;       // {page, text, anchor} of the selection the bar acts on
+let readerSelEdit = null;   // a highlight tapped on the page (bar in edit mode)
+let readerSearchTerm = "";  // marked on the page after a search result is opened
+
+function textLayerSpans() {
+  const layer = document.getElementById("reader-text-layer");
+  return Array.from(layer.children).filter((el) => el.tagName === "SPAN");
+}
+
+// Wrap characters [a, b) of a text piece in a <mark>, across the text nodes
+// earlier marks may already have split it into.
+function markRange(span, a, b, cls, id) {
+  if (b <= a) return;
+  const walker = document.createTreeWalker(span, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) nodes.push(n);
+  let pos = 0;
+  for (const node of nodes) {
+    const len = node.data.length;
+    const from = Math.max(a, pos), to = Math.min(b, pos + len);
+    if (from < to) {
+      let target = node;
+      if (from > pos) target = target.splitText(from - pos);
+      if (to < pos + len) target.splitText(to - from);
+      const mark = document.createElement("mark");
+      mark.className = cls;
+      if (id) mark.dataset.hl = id;
+      target.parentNode.insertBefore(mark, target);
+      mark.appendChild(target);
+    }
+    pos += len;
+  }
+}
+
+function clearReaderMarks() {
+  const layer = document.getElementById("reader-text-layer");
+  layer.querySelectorAll("mark").forEach((m) => m.replaceWith(...m.childNodes));
+  layer.querySelectorAll(":scope > span").forEach((s) => s.normalize());
+}
+
+function applyReaderMarks() {
+  clearReaderMarks();
+  const spans = textLayerSpans();
+  if (!spans.length) return;
+  for (const h of readerState.highlights || []) {
+    if (h.page !== readerState.pageNum || !h.anchor) continue;
+    const { s, so, e, eo } = h.anchor;
+    for (let i = s; i <= e && i < spans.length; i++) {
+      const len = spans[i].textContent.length;
+      markRange(spans[i], i === s ? so : 0, i === e ? Math.min(eo, len) : len, `hl hl-${h.color}`, h.id);
+    }
+  }
+  if (readerSearchTerm) {
+    const term = readerSearchTerm.toLowerCase();
+    let first = null;
+    spans.forEach((span) => {
+      const t = span.textContent.toLowerCase();
+      const hits = [];
+      for (let i = t.indexOf(term); i >= 0; i = t.indexOf(term, i + term.length)) hits.push(i);
+      hits.reverse().forEach((i) => markRange(span, i, i + term.length, "search-hl"));
+      if (hits.length && !first) first = span;
+    });
+    if (first) first.scrollIntoView({ block: "center", behavior: "smooth" });
+  }
+}
+
+// The current text selection as a highlight anchor, or null when it isn't
+// a selection inside this page's text.
+function currentSelection() {
+  const sel = window.getSelection();
+  if (!sel || sel.isCollapsed || !sel.rangeCount) return null;
+  const range = sel.getRangeAt(0);
+  const layer = document.getElementById("reader-text-layer");
+  if (!layer.contains(range.commonAncestorContainer)) return null;
+  const spans = textLayerSpans();
+  const pieceOf = (node) => {
+    while (node && node.parentNode !== layer) node = node.parentNode;
+    return node;
+  };
+  const offsetIn = (span, node, off) => {
+    const r = document.createRange();
+    r.setStart(span, 0);
+    r.setEnd(node, off);
+    return r.toString().length;
+  };
+  let sNode = range.startContainer, sOff = range.startOffset;
+  let eNode = range.endContainer, eOff = range.endOffset;
+  if (sNode === layer) { sNode = layer.childNodes[sOff] || layer.lastChild; sOff = 0; }
+  if (eNode === layer) {
+    const prev = layer.childNodes[eOff - 1] || layer.firstChild;
+    eNode = prev; eOff = prev.childNodes.length;
+  }
+  const sSpan = pieceOf(sNode), eSpan = pieceOf(eNode);
+  let s = spans.indexOf(sSpan), e = spans.indexOf(eSpan);
+  if (s < 0 || e < 0) return null;
+  let so = sNode === sSpan && sOff === 0 ? 0 : offsetIn(sSpan, sNode, sOff);
+  let eo = offsetIn(eSpan, eNode, eOff);
+  if (s > e || (s === e && so >= eo)) return null;
+  const text = range.toString().replace(/\s+/g, " ").trim();
+  if (!text) return null;
+  return { page: readerState.pageNum, text, anchor: { s, so, e, eo } };
+}
+
+function showSelBar(editId) {
+  const bar = document.getElementById("reader-selbar");
+  readerSelEdit = editId || null;
+  bar.querySelector('[data-sel="delete"]').hidden = !editId;
+  const h = editId && (readerState.highlights || []).find((x) => x.id === editId);
+  bar.querySelectorAll(".selbar-color").forEach((b) => b.classList.toggle("is-current", !!h && b.dataset.color === h.color));
+  bar.hidden = false;
+}
+
+function hideSelBar() {
+  document.getElementById("reader-selbar").hidden = true;
+  readerSel = null;
+  readerSelEdit = null;
+}
+
+let selTimer = null;
+document.addEventListener("selectionchange", () => {
+  clearTimeout(selTimer);
+  selTimer = setTimeout(() => {
+    if (document.getElementById("view-reader").hidden) return;
+    const sel = currentSelection();
+    if (sel) {
+      readerSel = sel;
+      showSelBar(null);
+    } else if (!readerSelEdit && !document.getElementById("reader-selbar").matches(":hover")) {
+      // Collapsed: give a tap on the bar itself time to land first.
+      setTimeout(() => { if (!currentSelection() && !readerSelEdit) hideSelBar(); }, 350);
+    }
+  }, 220);
+});
+
+// A tap on a highlight: change its colour, remove it, or use its text.
+document.getElementById("reader-text-layer").addEventListener("click", (e) => {
+  const mark = e.target.closest("mark[data-hl]");
+  const sel = window.getSelection();
+  if (!mark || (sel && !sel.isCollapsed)) return;
+  const h = (readerState.highlights || []).find((x) => x.id === mark.dataset.hl);
+  if (!h) return;
+  readerSel = { page: h.page, text: h.text, anchor: h.anchor };
+  showSelBar(h.id);
+});
+
+let toastTimer = null;
+function readerToast(text) {
+  const t = document.getElementById("reader-toast");
+  t.textContent = text;
+  t.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.hidden = true; }, 2600);
+}
+
+async function addHighlight(color) {
+  const sel = readerSel;
+  if (!sel) return;
+  try {
+    const h = await api(`/api/books/${currentBook.book_id}/highlights`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ page: sel.page, text: sel.text, color, anchor: sel.anchor }),
+    });
+    readerState.highlights.push(h);
+    window.getSelection().removeAllRanges();
+    hideSelBar();
+    applyReaderMarks();
+    readerToast("Highlighted");
+  } catch (e) {
+    alertMsg(e.message);
+  }
+}
+
+async function recolorHighlight(id, color) {
+  try {
+    const h = await api(`/api/books/${currentBook.book_id}/highlights/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ color }),
+    });
+    const i = readerState.highlights.findIndex((x) => x.id === id);
+    if (i >= 0) readerState.highlights[i] = h;
+    hideSelBar();
+    applyReaderMarks();
+    renderHighlightsPanel();
+  } catch (e) {
+    alertMsg(e.message);
+  }
+}
+
+async function deleteHighlight(id) {
+  try {
+    await api(`/api/books/${currentBook.book_id}/highlights/${id}`, { method: "DELETE" });
+  } catch (e) {
+    if (e.status !== 404) return alertMsg(e.message);
+  }
+  readerState.highlights = readerState.highlights.filter((x) => x.id !== id);
+  hideSelBar();
+  applyReaderMarks();
+  renderHighlightsPanel();
+}
+
+function readerClosePanels(except) {
+  ["reader-search-panel", "reader-chapters-panel", "reader-hl-panel", "reader-explain", "reader-notes-panel"].forEach((id) => {
+    if (id !== except) document.getElementById(id).hidden = true;
+  });
+}
+
+function readerOpenPanel(id) {
+  const panel = document.getElementById(id);
+  const opening = panel.hidden;
+  readerClosePanels(id);
+  panel.hidden = !opening;
+  if (opening) panel.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  return opening;
+}
+
+function readerGoToPage(n) {
+  if (!readerState.pdf || n < 1 || n > readerState.pdf.numPages) return;
+  readerState.pageNum = n;
+  renderReaderPage();
+}
+
+async function explainSelection(sel) {
+  const panel = document.getElementById("reader-explain");
+  readerClosePanels("reader-explain");
+  panel.hidden = false;
+  panel.dataset.text = sel.text;
+  panel.dataset.page = sel.page;
+  document.getElementById("reader-explain-title").innerHTML = `${ic("sparkles")} Explaining page ${Number(sel.page)}`;
+  document.getElementById("reader-explain-body").innerHTML =
+    `<blockquote>${escapeHtml(sel.text.slice(0, 600))}</blockquote><p class="spinner-line">${ic("hourglass")} Thinking…</p>`;
+  document.getElementById("reader-explain-note").hidden = true;
+  panel.scrollIntoView({ block: "start", behavior: "smooth" });
+  try {
+    const { answer } = await api(`/api/books/${currentBook.book_id}/explain`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: sel.text, page: sel.page }),
+    });
+    panel.dataset.answer = answer;
+    document.getElementById("reader-explain-title").innerHTML = `${ic("sparkles")} Explained (page ${Number(sel.page)})`;
+    document.getElementById("reader-explain-body").innerHTML =
+      `<blockquote>${escapeHtml(sel.text.slice(0, 600))}</blockquote>${richText(answer)}`;
+    document.getElementById("reader-explain-note").hidden = false;
+  } catch (e) {
+    document.getElementById("reader-explain-body").innerHTML = `<p class="error-text">${escapeHtml(e.message)}</p>`;
+  }
+}
+
+async function flashcardFromSelection(sel) {
+  readerToast("Making a flashcard…");
+  try {
+    const { cards } = await api(`/api/books/${currentBook.book_id}/flashcards/from-selection`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: sel.text, page: sel.page }),
+    });
+    const panel = document.getElementById("reader-explain");
+    readerClosePanels("reader-explain");
+    panel.hidden = false;
+    document.getElementById("reader-explain-title").innerHTML =
+      `${ic("layers")} ${cards.length} flashcard${cards.length === 1 ? "" : "s"} added to this book's deck`;
+    document.getElementById("reader-explain-body").innerHTML = cards
+      .map((c) => `<div class="sel-card"><p><strong>${escapeHtml(c.front)}</strong></p><p class="muted">${escapeHtml(c.back)}</p></div>`)
+      .join("");
+    document.getElementById("reader-explain-note").hidden = true;
+    panel.scrollIntoView({ block: "start", behavior: "smooth" });
+  } catch (e) {
+    alertMsg(e.message);
+  }
+}
+
+async function noteFromText(page, text) {
+  try {
+    const note = await api(`/api/books/${currentBook.book_id}/notes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ page, text: text.slice(0, 10000) }),
+    });
+    readerState.notes.unshift(note);
+    updateNotesButton();
+    readerToast("Added to this page's notes");
+  } catch (e) {
+    alertMsg(e.message);
+  }
+}
+
+// The selection bar: buttons must not take the selection away when tapped.
+(() => {
+  const bar = document.getElementById("reader-selbar");
+  bar.addEventListener("pointerdown", (e) => e.preventDefault());
+  bar.addEventListener("mousedown", (e) => e.preventDefault());
+  bar.addEventListener("click", (e) => {
+    const sel = readerSel;
+    const colorBtn = e.target.closest(".selbar-color");
+    if (colorBtn) {
+      if (readerSelEdit) recolorHighlight(readerSelEdit, colorBtn.dataset.color);
+      else addHighlight(colorBtn.dataset.color);
+      return;
+    }
+    const btn = e.target.closest("[data-sel]");
+    if (!btn || !sel) return;
+    const what = btn.dataset.sel;
+    if (what === "delete" && readerSelEdit) return deleteHighlight(readerSelEdit);
+    window.getSelection().removeAllRanges();
+    hideSelBar();
+    if (what === "explain") explainSelection(sel);
+    else if (what === "card") flashcardFromSelection(sel);
+    else if (what === "note") noteFromText(sel.page, `“${sel.text}”`);
+  });
+})();
+
+document.getElementById("reader-explain-note").addEventListener("click", () => {
+  const panel = document.getElementById("reader-explain");
+  const page = parseInt(panel.dataset.page, 10) || readerState.pageNum;
+  noteFromText(page, `“${panel.dataset.text || ""}”\n\n${panel.dataset.answer || ""}`);
+});
+
+document.querySelectorAll("#view-reader .reader-panel-close").forEach((b) =>
+  b.addEventListener("click", () => { b.closest(".reader-panel").hidden = true; })
+);
+
+// --- highlights list ---
+
+function renderHighlightsPanel() {
+  const box = document.getElementById("reader-hl-list");
+  if (!box) return;
+  const items = (readerState.highlights || []).slice().sort((a, b) => a.page - b.page);
+  document.getElementById("reader-hl-export").hidden = items.length === 0;
+  box.innerHTML = items.length
+    ? items
+        .map(
+          (h) =>
+            `<div class="reader-list-row"><button class="reader-list-main" data-hl-page="${Number(h.page)}">` +
+            `<span class="hl-dot hl-${escapeHtml(h.color)}"></span><span class="reader-list-page">p.${Number(h.page)}</span>` +
+            `<span class="reader-list-text">${escapeHtml(h.text.slice(0, 220))}</span></button>` +
+            `<button class="mini-btn" data-hl-del="${escapeHtml(h.id)}" aria-label="Delete highlight">${ic("trash-2")}</button></div>`
+        )
+        .join("")
+    : `<p class="muted">No highlights yet. Long-press text on a page to select it, then pick a colour.</p>`;
+}
+
+document.getElementById("reader-hl-btn").addEventListener("click", () => {
+  if (readerOpenPanel("reader-hl-panel")) renderHighlightsPanel();
+});
+document.getElementById("reader-hl-list").addEventListener("click", (e) => {
+  const del = e.target.closest("[data-hl-del]");
+  if (del) return deleteHighlight(del.dataset.hlDel);
+  const go = e.target.closest("[data-hl-page]");
+  if (go) readerGoToPage(parseInt(go.dataset.hlPage, 10));
+});
+document.getElementById("reader-hl-export").addEventListener("click", async (e) => {
+  const btn = e.currentTarget;
+  const label = btn.innerHTML;
+  btn.disabled = true;
+  btn.textContent = "Sending…";
+  try {
+    await api(`/api/books/${currentBook.book_id}/highlights/export`, { method: "POST" });
+    btn.innerHTML = `${ic("circle-check")} Sent to your chat`;
+    setTimeout(() => { btn.innerHTML = label; btn.disabled = false; }, 2500);
+  } catch (err) {
+    btn.innerHTML = label;
+    btn.disabled = false;
+    alertMsg(err.message);
+  }
+});
+
+// --- search in the book ---
+
+async function runBookSearch() {
+  const input = document.getElementById("reader-search-input");
+  const q = input.value.trim();
+  const status = document.getElementById("reader-search-status");
+  const box = document.getElementById("reader-search-results");
+  if (q.length < 2) return alertMsg("Type at least 2 characters to search.");
+  status.textContent = "Searching the book… (the first search in a big book takes a little longer)";
+  box.innerHTML = "";
+  try {
+    const { results, total, pages_with_text } = await api(
+      `/api/books/${currentBook.book_id}/search?q=${encodeURIComponent(q)}`
+    );
+    readerSearchTerm = q;
+    if (!pages_with_text) {
+      status.textContent = "This book has no searchable text (it looks like scanned images).";
+      return;
+    }
+    status.textContent = total
+      ? `${total} match${total === 1 ? "" : "es"}${total > results.length ? ` (showing the first ${results.length})` : ""}`
+      : "No matches.";
+    box.innerHTML = results
+      .map((r) => {
+        const s = r.snippet;
+        const snip = escapeHtml(s.slice(0, r.start)) + `<mark class="search-hl">${escapeHtml(s.slice(r.start, r.end))}</mark>` + escapeHtml(s.slice(r.end));
+        return `<button class="reader-list-main reader-list-row" data-search-page="${Number(r.page)}">` +
+          `<span class="reader-list-page">p.${Number(r.page)}</span><span class="reader-list-text">${snip}</span></button>`;
+      })
+      .join("");
+  } catch (e) {
+    status.textContent = "";
+    alertMsg(e.message);
+  }
+}
+document.getElementById("reader-search-btn").addEventListener("click", () => {
+  if (readerOpenPanel("reader-search-panel")) document.getElementById("reader-search-input").focus();
+});
+document.getElementById("reader-search-go").addEventListener("click", runBookSearch);
+document.getElementById("reader-search-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); runBookSearch(); }
+});
+document.getElementById("reader-search-results").addEventListener("click", (e) => {
+  const r = e.target.closest("[data-search-page]");
+  if (!r) return;
+  const n = parseInt(r.dataset.searchPage, 10);
+  if (n === readerState.pageNum) applyReaderMarks();
+  else readerGoToPage(n);
+});
+
+// --- chapters ---
+
+function renderChaptersPanel() {
+  const box = document.getElementById("reader-chapters-list");
+  const chapters = (currentBook && currentBook.chapters) || [];
+  if (!chapters.length) {
+    box.innerHTML = `<p class="muted">This book hasn't been divided into chapters yet. Go back to the book and tap “Divide into chapters”.</p>`;
+    return;
+  }
+  const here = readerState.pageNum;
+  let current = -1;
+  chapters.forEach((c, i) => { if ((c.start_page || 0) <= here) current = i; });
+  box.innerHTML = chapters
+    .map(
+      (c, i) =>
+        `<button class="reader-list-main reader-list-row${i === current ? " is-current" : ""}" data-chapter-page="${Number(c.start_page)}">` +
+        `<span class="reader-list-text">${escapeHtml(c.title || `Chapter ${i + 1}`)}</span><span class="reader-list-page">p.${Number(c.start_page)}</span></button>`
+    )
+    .join("");
+}
+document.getElementById("reader-chapters-btn").addEventListener("click", () => {
+  if (readerOpenPanel("reader-chapters-panel")) renderChaptersPanel();
+});
+document.getElementById("reader-chapters-list").addEventListener("click", (e) => {
+  const c = e.target.closest("[data-chapter-page]");
+  if (!c) return;
+  readerGoToPage(parseInt(c.dataset.chapterPage, 10));
+  document.getElementById("reader-chapters-panel").hidden = true;
+});
+
+// --- night reading ---
+
+function readerNightOn() {
+  try { return localStorage.getItem("readerNight") === "1"; } catch (_) { return false; }
+}
+function readerApplyNight() {
+  const on = readerNightOn();
+  document.getElementById("view-reader").classList.toggle("is-night", on);
+  document.getElementById("reader-night-btn").innerHTML = on ? `${ic("sun")} Day` : `${ic("moon")} Night`;
+}
+document.getElementById("reader-night-btn").addEventListener("click", () => {
+  try { localStorage.setItem("readerNight", readerNightOn() ? "0" : "1"); } catch (_) {}
+  readerApplyNight();
+});
+readerApplyNight();

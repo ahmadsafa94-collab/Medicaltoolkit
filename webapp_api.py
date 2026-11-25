@@ -57,6 +57,7 @@ import flashcards
 import library
 import notes
 import pdf_export
+import reader_tools
 import pdf_qa
 import quiz_ai
 import shared_library
@@ -412,6 +413,7 @@ def _delete_user_book_data(user_id: int, book_id: str) -> None:
     library.delete_qa_sessions_for_book(user_id, book_id)
     library.delete_quiz_attempts_for_book(user_id, book_id)
     notes.delete_notes_for_book(user_id, book_id)
+    reader_tools.delete_highlights_for_book(user_id, book_id)
     flashcards.delete_deck(user_id, book_id)
 
 
@@ -1423,6 +1425,193 @@ async def delete_note_endpoint(request: Request):
     if not deleted:
         raise ApiError(status_code=404, detail="Note not found.")
     return JSONResponse({"deleted": True})
+
+
+# ---------------------------------------------------------------------------
+# 7b. Reader tools (reader_tools.py): highlights, search in the book, and
+# what can be done with selected text (explain it, make flashcards of it).
+# ---------------------------------------------------------------------------
+
+def _page_param(body: dict, book: dict, required: bool = True):
+    page = body.get("page")
+    if page is None and not required:
+        return None
+    if not isinstance(page, int) or isinstance(page, bool) or not (1 <= page <= (book.get("page_count") or 10**6)):
+        raise ApiError(status_code=400, detail="Invalid page number.")
+    return page
+
+
+async def list_highlights_endpoint(request: Request):
+    user = require_user(request)
+    book_id = request.path_params["book_id"]
+    _book_or_404(user["id"], book_id)
+    return JSONResponse({"highlights": reader_tools.list_highlights(user["id"], book_id)})
+
+
+async def add_highlight_endpoint(request: Request):
+    user = require_user(request)
+    book_id = request.path_params["book_id"]
+    book = _book_or_404(user["id"], book_id)
+    body = await _json_body(request)
+    text = _text(body, "text", 20000)
+    if not text:
+        raise ApiError(status_code=400, detail="Select some text first.")
+    try:
+        item = reader_tools.add_highlight(
+            user["id"], book_id, _page_param(body, book), text, body.get("color") or "yellow", body.get("anchor")
+        )
+    except ValueError as e:
+        raise ApiError(status_code=400, detail=str(e))
+    return JSONResponse(item)
+
+
+async def update_highlight_endpoint(request: Request):
+    user = require_user(request)
+    book_id = request.path_params["book_id"]
+    _book_or_404(user["id"], book_id)
+    body = await _json_body(request)
+    try:
+        item = reader_tools.update_highlight(user["id"], book_id, request.path_params["hl_id"], body.get("color"))
+    except ValueError as e:
+        raise ApiError(status_code=400, detail=str(e))
+    if item is None:
+        raise ApiError(status_code=404, detail="Highlight not found.")
+    return JSONResponse(item)
+
+
+async def delete_highlight_endpoint(request: Request):
+    user = require_user(request)
+    book_id = request.path_params["book_id"]
+    _book_or_404(user["id"], book_id)
+    if not reader_tools.delete_highlight(user["id"], book_id, request.path_params["hl_id"]):
+        raise ApiError(status_code=404, detail="Highlight not found.")
+    return JSONResponse({"deleted": True})
+
+
+async def export_highlights_pdf(request: Request):
+    """All of a book's highlights as a PDF, sent to the user's chat (same pattern as the summary export)."""
+    user = require_user(request)
+    book_id = request.path_params["book_id"]
+    book = _book_or_404(user["id"], book_id)
+    items = reader_tools.list_highlights(user["id"], book_id)
+    if not items:
+        raise ApiError(status_code=400, detail="No highlights in this book yet.")
+    title = book.get("title") or "Book"
+    try:
+        pdf_bytes = await asyncio.to_thread(
+            pdf_export.generate_text_pdf, f"Highlights: {title}", reader_tools.highlights_as_text(title, items)
+        )
+    except Exception:
+        logger.exception("Highlights PDF export failed for book_id=%s", book_id)
+        raise ApiError(status_code=500, detail="Couldn't build the PDF. Please try again.")
+    try:
+        await tg_bot.send_document(
+            chat_id=user["id"],
+            document=BufferedInputFile(pdf_bytes, filename=safe_pdf_filename(f"{title} - Highlights")),
+            caption=f"🖍 Highlights -- {title}",
+        )
+    except TelegramAPIError:
+        logger.exception("Failed to send highlights PDF to chat_id=%s", user["id"])
+        raise ApiError(
+            status_code=502,
+            detail="Couldn't send that to your Telegram chat. Make sure you've started a chat with the bot, then try again.",
+        )
+    return JSONResponse({"sent": True})
+
+
+async def search_book_endpoint(request: Request):
+    user = require_user(request)
+    book_id = request.path_params["book_id"]
+    book = _book_or_404(user["id"], book_id)
+    query = (request.query_params.get("q") or "").strip()
+    if len(query) < 2 or len(query) > 200:
+        raise ApiError(status_code=400, detail="Type at least 2 characters to search.")
+    try:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(reader_tools.search, book_id, book["pdf_path"], query), timeout=90
+        )
+    except asyncio.TimeoutError:
+        raise ApiError(status_code=504, detail="The book is still being read for search. Try again in a moment.")
+    except Exception:
+        logger.exception("Search failed in book %s", book_id)
+        raise ApiError(status_code=500, detail="Couldn't search this book. Please try again.")
+    return JSONResponse(result)
+
+
+def _chapter_at(book: dict, page: int | None) -> tuple[list[int], str]:
+    """The chapter a page is in (index list and title), for a flashcard made while reading."""
+    chapters = book.get("chapters") or []
+    if page:
+        for i in range(len(chapters) - 1, -1, -1):
+            if (chapters[i].get("start_page") or 0) <= page:
+                return [i], chapters[i].get("title") or f"Page {page}"
+    return [], f"Page {page}" if page else "Selection"
+
+
+async def explain_selection_endpoint(request: Request):
+    user = require_user(request)
+    book_id = request.path_params["book_id"]
+    book = _book_or_404(user["id"], book_id)
+    body = await _json_body(request)
+    passage = _text(body, "text", 6000)
+    if len(passage) < 3:
+        raise ApiError(status_code=400, detail="Select some text first.")
+    page = _page_param(body, book, required=False)
+    context = ""
+    if page:
+        try:
+            pages = await asyncio.wait_for(asyncio.to_thread(reader_tools.page_texts, book_id, book["pdf_path"]), timeout=60)
+            context = (pages[page - 1] if page <= len(pages) else "")[:6000]
+        except Exception:
+            logger.info("No page text for explain in %s p.%s", book_id, page)
+    try:
+        with subscriptions.metered(user["id"], "questions"):
+            answer = await asyncio.wait_for(
+                asyncio.to_thread(
+                    reader_tools.explain, book.get("title") or "Book", page, passage, context,
+                    subscriptions.get_language(user["id"]),
+                ),
+                timeout=60,
+            )
+    except subscriptions.QuotaExceeded as e:
+        raise ApiError(status_code=402, detail=str(e))
+    except asyncio.TimeoutError:
+        raise ApiError(status_code=504, detail="That took too long (not counted). Please try again.")
+    except Exception:
+        logger.exception("Explain failed in book %s", book_id)
+        raise ApiError(status_code=500, detail="Couldn't explain that just now (not counted). Please try again.")
+    return JSONResponse({"answer": answer})
+
+
+async def flashcards_from_selection_endpoint(request: Request):
+    user = require_user(request)
+    book_id = request.path_params["book_id"]
+    book = _book_or_404(user["id"], book_id)
+    body = await _json_body(request)
+    passage = _text(body, "text", 6000)
+    if len(passage) < 20:
+        raise ApiError(status_code=400, detail="Select a longer passage (a sentence or more) to make a flashcard.")
+    page = _page_param(body, book, required=False)
+    indices, chapter_title = _chapter_at(book, page)
+    num = 1 if len(passage) < 400 else 3
+    try:
+        with subscriptions.metered(user["id"], "questions"):
+            raw = await asyncio.wait_for(
+                asyncio.to_thread(
+                    chapter_ai.generate_flashcards, f"{book.get('title') or 'Book'}, page {page or '?'}", passage, num,
+                    subscriptions.get_language(user["id"]),
+                ),
+                timeout=60,
+            )
+    except subscriptions.QuotaExceeded as e:
+        raise ApiError(status_code=402, detail=str(e))
+    except asyncio.TimeoutError:
+        raise ApiError(status_code=504, detail="That took too long (not counted). Please try again.")
+    except Exception:
+        logger.exception("Flashcards from selection failed in book %s", book_id)
+        raise ApiError(status_code=500, detail="Couldn't make flashcards just now (not counted). Please try again.")
+    cards = flashcards.add_cards(user["id"], book_id, book.get("title") or "Book", chapter_title, indices, raw[:num])
+    return JSONResponse({"cards": [{"front": c["front"], "back": c["back"]} for c in cards]})
 
 
 # ---------------------------------------------------------------------------
@@ -2801,6 +2990,14 @@ routes = [
     Route("/api/books/{book_id}/notes", list_notes_endpoint, methods=["GET"]),
     Route("/api/books/{book_id}/notes", add_note_endpoint, methods=["POST"]),
     Route("/api/books/{book_id}/notes/{note_id}", delete_note_endpoint, methods=["DELETE"]),
+    Route("/api/books/{book_id}/highlights", list_highlights_endpoint, methods=["GET"]),
+    Route("/api/books/{book_id}/highlights", add_highlight_endpoint, methods=["POST"]),
+    Route("/api/books/{book_id}/highlights/export", export_highlights_pdf, methods=["POST"]),
+    Route("/api/books/{book_id}/highlights/{hl_id}", update_highlight_endpoint, methods=["PATCH"]),
+    Route("/api/books/{book_id}/highlights/{hl_id}", delete_highlight_endpoint, methods=["DELETE"]),
+    Route("/api/books/{book_id}/search", search_book_endpoint, methods=["GET"]),
+    Route("/api/books/{book_id}/explain", explain_selection_endpoint, methods=["POST"]),
+    Route("/api/books/{book_id}/flashcards/from-selection", flashcards_from_selection_endpoint, methods=["POST"]),
     Route("/api/request-book", request_book_endpoint, methods=["POST"]),
     Route("/api/drugs/search", drug_search, methods=["GET"]),
     Route("/api/drugs/resolve", drug_resolve, methods=["POST"]),
