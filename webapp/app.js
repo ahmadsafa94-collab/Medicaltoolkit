@@ -3546,14 +3546,16 @@ function askRowHtml(b, { shared }) {
       `<span class="check-title">${escapeHtml(b.title)}</span><span class="check-meta">${pages}</span>${open}${edit}${del}</label>`
     );
   }
-  // Not answerable yet: say why, and offer the one thing that fixes it.
+  // Not answerable yet: say why (under the title, so a long progress line
+  // can't squeeze the title into a one-letter column), and offer the one
+  // thing that fixes it.
   let meta, action = "";
   if (b.indexing || askIndexingOwn.has(b.book_id)) {
-    meta = `<span class="check-meta">${ic("hourglass")} ${escapeHtml(b.progress || "Preparing…")}</span>`;
+    meta = `<span class="check-sub">${ic("hourglass")} ${escapeHtml(b.progress || "Preparing…")}</span>`;
   } else if (shared) {
     meta = b.index_error
-      ? `<span class="check-meta is-error">${escapeHtml(b.index_error)}</span>`
-      : `<span class="check-meta">Not ready yet</span>`;
+      ? `<span class="check-sub is-error">${escapeHtml(b.index_error)}</span>`
+      : `<span class="check-sub">Not ready yet</span>`;
     if (admin) action = `<button class="mini-btn" data-reindex="${b.book_id}">Retry</button>`;
   } else {
     meta = "";
@@ -3561,7 +3563,7 @@ function askRowHtml(b, { shared }) {
   }
   return (
     `<div class="check-row is-disabled"><input type="checkbox" disabled />${cover}` +
-    `<span class="check-title">${escapeHtml(b.title)}</span>${meta}${action}${open}${edit}${del}</div>`
+    `<span class="check-title">${escapeHtml(b.title)}${meta}</span>${action}${open}${edit}${del}</div>`
   );
 }
 

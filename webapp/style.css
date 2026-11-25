@@ -944,3 +944,9 @@ html[data-theme="midnight"] .web-notice { background: #3a2a10; color: #ffd9a0; b
 .lib-toggle:disabled { opacity: 0.6; }
 .book-row .lib-toggle { width: auto; flex-shrink: 0; margin: 0; font-size: 12px; padding: 7px 10px; }
 .book-row:has(.lib-toggle) { padding-right: 8px; }
+
+/* Ask picker: a book's status sits under its title; the title never collapses to one letter. */
+.check-row .check-title { min-width: 7em; }
+.check-sub { display: block; margin-top: 3px; font-size: 12px; font-weight: 400; color: var(--hint); }
+.check-sub.is-error { color: #c0392b; }
+.check-sub .ic { width: 13px; height: 13px; vertical-align: -0.15em; }
