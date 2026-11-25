@@ -4120,6 +4120,33 @@ function webShow(frame) {
   const url = document.getElementById("web-url");
   if (document.activeElement !== url) url.value = frame.url;
   document.getElementById("web-steps").textContent = frame.steps;
+  renderWebTabs(frame.tabs || []);
+}
+
+// The browser's tabs: shown once a site opens a second one. A new tab never
+// takes over the view by itself; it gets a dot until the admin opens it.
+function renderWebTabs(tabs) {
+  const bar = document.getElementById("web-tabs");
+  bar.hidden = tabs.length < 2;
+  bar.replaceChildren(...tabs.map((t) => {
+    const tab = document.createElement("div");
+    tab.className = "web-tab" + (t.active ? " is-active" : "") + (t.new ? " is-new" : "");
+    const open = document.createElement("button");
+    open.className = "web-tab-open";
+    open.dataset.tab = t.i;
+    open.title = t.title;
+    open.textContent = t.title;
+    const close = document.createElement("button");
+    close.className = "web-tab-close";
+    close.dataset.closeTab = t.i;
+    close.title = "Close this tab";
+    close.setAttribute("aria-label", `Close ${t.title}`);
+    close.textContent = "✕";
+    tab.append(open, close);
+    return tab;
+  }));
+  const active = bar.querySelector(".is-active");
+  if (active) active.scrollIntoView({ block: "nearest", inline: "nearest" });
 }
 
 async function webCall(path, body) {
@@ -4214,6 +4241,12 @@ function wireWebSources() {
     if (e.key === "Enter") { e.preventDefault(); openNew(); }
   });
 
+  document.getElementById("web-tabs").addEventListener("click", (e) => {
+    const close = e.target.closest("[data-close-tab]");
+    const open = e.target.closest("[data-tab]");
+    if (close) webAction({ type: "close_tab", i: Number(close.dataset.closeTab) });
+    else if (open && !open.closest(".is-active")) webAction({ type: "tab", i: Number(open.dataset.tab) });
+  });
   document.getElementById("web-shot").addEventListener("click", (e) => {
     if (!webFrame || webBusy) return;
     const img = e.currentTarget;

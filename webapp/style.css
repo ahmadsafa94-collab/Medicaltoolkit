@@ -741,3 +741,24 @@ body.has-tabbar .fab { bottom: calc(76px + env(safe-area-inset-bottom, 0px)); }
 }
 @keyframes splash-failsafe { to { opacity: 0; visibility: hidden; pointer-events: none; } }
 @media (prefers-reduced-motion: reduce) { #splash { transition: opacity 0.5s ease; } #splash.is-leaving { filter: none; transform: none; } }
+
+/* ---------- Admin browser: tab bar ---------- */
+.web-tabs { display: flex; gap: 6px; overflow-x: auto; padding: 2px 16px 8px; scroll-padding: 0 16px; scrollbar-width: none; }
+.web-tabs::-webkit-scrollbar { display: none; }
+.web-tab {
+  flex: 0 0 auto; max-width: 62%; display: flex; align-items: center;
+  border: 1px solid var(--border); border-radius: 10px;
+  background: var(--secondary-bg); color: inherit; position: relative;
+}
+.web-tab.is-active { border-color: var(--button); box-shadow: inset 0 -2px 0 var(--button); }
+.web-tab-open {
+  border: 0; background: none; color: inherit; font: inherit; font-size: 13px;
+  padding: 7px 4px 7px 10px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer;
+}
+.web-tab.is-active .web-tab-open { font-weight: 600; }
+.web-tab-close { border: 0; background: none; color: inherit; opacity: .55; font-size: 12px; padding: 7px 9px 7px 4px; cursor: pointer; }
+.web-tab.is-new::before {
+  content: ""; position: absolute; top: -3px; right: -3px; width: 9px; height: 9px; border-radius: 50%;
+  background: var(--button); box-shadow: 0 0 0 2px var(--bg); animation: web-tab-pulse 1.2s ease-in-out infinite;
+}
+@keyframes web-tab-pulse { 50% { transform: scale(1.35); } }

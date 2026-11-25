@@ -113,7 +113,7 @@
     render(0);
     var t0 = null;
     var step = function (now) {
-      if (done) return;
+      if (done || !splash.isConnected) return;
       if (t0 === null) t0 = now;
       var t = (now - t0) / 1000;
       render(Math.min(t, END));

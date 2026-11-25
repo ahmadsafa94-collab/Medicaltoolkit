@@ -667,6 +667,10 @@ class _Live:
         self.steps: list[dict] = [{"a": "goto", "url": start_url}]
         self.lock = asyncio.Lock()
         self.had_state = False
+        self.seen: set[int] = {id(page)}  # tabs the admin has looked at (the others show as new)
+
+    def tabs(self) -> list:
+        return [pg for pg in self.ctx.pages if not pg.is_closed()]
 
 
 _live: _Live | None = None
@@ -703,9 +707,9 @@ async def live_start(url: str, site_id: str | None = None) -> dict:
                     live.page = open_pages[-1]
 
         def on_page(new_page):
-            # A link that opens a new tab (common for "Sign in with ...") is
-            # followed there, as a phone browser would.
-            live.page = new_page
+            # A link that opens a new tab ("Sign in with ...") does not take
+            # over the view: it shows up in the tab bar, marked new, and the
+            # admin switches to it with a tap.
             new_page.on("close", on_close)
 
         page.on("close", on_close)
@@ -731,10 +735,24 @@ async def live_frame() -> dict:
         title = await page.title()
     except Exception:
         title = ""
+    _live.seen.add(id(page))
+    tabs = []
+    for i, pg in enumerate(_live.tabs()):
+        try:
+            tab_title = title if pg is page else await asyncio.wait_for(pg.title(), 2)
+        except Exception:
+            tab_title = ""
+        tabs.append({
+            "i": i,
+            "title": (tab_title or urllib.parse.urlsplit(pg.url).hostname or pg.url or "New tab")[:60],
+            "active": pg is page,
+            "new": id(pg) not in _live.seen,
+        })
     return {
         "image": base64.b64encode(shot).decode("ascii"),
         "url": page.url,
         "title": title,
+        "tabs": tabs,
         "width": VIEWPORT["width"],
         "height": VIEWPORT["height"],
         "steps": len(_live.steps),
@@ -749,6 +767,23 @@ async def live_action(action: dict) -> dict:
     kind = action.get("type")
     async with _live.lock:
         page = _live.page
+        if kind in ("tab", "close_tab"):
+            tabs = _live.tabs()
+            i = action.get("i")
+            if not isinstance(i, int) or isinstance(i, bool) or not 0 <= i < len(tabs):
+                raise WebSourceError("That tab is already closed.")
+            if kind == "tab":
+                _live.page = tabs[i]
+                try:
+                    await tabs[i].bring_to_front()
+                except Exception:
+                    pass
+            else:
+                if len(tabs) == 1:
+                    raise WebSourceError("That's the only tab open.")
+                await tabs[i].close()  # on_close moves the view to another tab if this one was showing
+            _live.steps.append({"a": kind, "i": i})
+            return await live_frame()
         if kind == "click":
             try:
                 x = max(0, min(VIEWPORT["width"], float(action["x"])))
@@ -895,6 +930,20 @@ async def _replay(site: dict, ctx) -> None:
     page = await ctx.new_page()
     for step in site.get("login_steps") or []:
         kind = step.get("a")
+        open_tabs = [pg for pg in ctx.pages if not pg.is_closed()]
+        if page.is_closed() and open_tabs:
+            page = open_tabs[-1]  # a sign-in popup that closed itself, as in the live browser
+        if kind in ("tab", "close_tab"):
+            i = step.get("i")
+            if not isinstance(i, int) or not 0 <= i < len(open_tabs):
+                raise WebSourceError("The login opened different tabs this time. Log in again from the admin panel.")
+            if kind == "tab":
+                page = open_tabs[i]
+            elif len(open_tabs) > 1:
+                await open_tabs[i].close()
+                if page.is_closed():
+                    page = [pg for pg in ctx.pages if not pg.is_closed()][-1]
+            continue
         if kind == "goto":
             await _goto(page, step["url"])
             continue
@@ -936,6 +985,10 @@ async def _replay(site: dict, ctx) -> None:
             except Exception:
                 pass
         await _settle(page)
+    if page.is_closed():
+        open_tabs = [pg for pg in ctx.pages if not pg.is_closed()]
+        if open_tabs:
+            page = open_tabs[-1]
     # A login that finishes with a background request needs longer than the
     # usual settle before its session cookie exists.
     try:
