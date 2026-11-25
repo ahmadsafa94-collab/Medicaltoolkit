@@ -649,6 +649,13 @@ _JS_SCROLL = """([x, y, dx, dy]) => {
 }"""
 
 
+async def _tap(page, x: float, y: float) -> None:
+    try:
+        await page.touchscreen.tap(x, y)
+    except Exception:
+        await page.mouse.click(x, y)  # a context without touch support
+
+
 async def _page_text(page) -> str:
     try:
         text = await page.evaluate(
@@ -830,7 +837,10 @@ async def live_action(action: dict) -> dict:
                 selector = await page.evaluate(_JS_AT_POINT, [x, y])
             except Exception:
                 selector = None
-            await page.mouse.click(x, y)
+            # A finger tap, as on a phone (this browser is a phone-sized one):
+            # touch events, then the click a phone makes from them. A mouse
+            # click missed controls that only listen for touches.
+            await _tap(page, x, y)
             _live.steps.append({"a": "click", "sel": selector, "x": x, "y": y})
             await _settle(page)
         elif kind == "type":
@@ -1054,7 +1064,7 @@ async def _replay(site: dict, ctx) -> None:
                 except Exception:
                     pass
             if not done:
-                await page.mouse.click(step["x"], step["y"])
+                await _tap(page, step["x"], step["y"])
         elif kind == "type":
             secret = bool(step.get("secret"))
             text = _decrypt(step["secret"]) if secret else step.get("text", "")

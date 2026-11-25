@@ -19,7 +19,8 @@ and "Welcome to MEDIC TOOLKIT" appears. `welcome.gif` is the same animation as a
 
 `medic-toolkit-loading-icon.svg` is the icon for Telegram's own loading screen
 (BotFather: /mybots > the bot > Bot Settings > Configure Mini App > loading
-screen). It is a single-colour silhouette made of plain paths only (the cross
+screen). BotFather requires a 512x512 canvas (viewBox 0 0 512 512) with a single
+<path>; it is a single-colour silhouette (the cross
 and "AI" are cut out), since Telegram draws it as a placeholder shape.
 Colours that match the app: background #F2F8FE (light) / #0C1524 (dark),
 header #BFE0FB (light) / #12223B (dark).
