@@ -48,6 +48,12 @@ const MAX_FLASHCARD_CARDS = 50;
 
 let sessionExpiredShown = false;
 
+// Icons: Lucide line icons (ISC licence) in the sprite at the top of index.html,
+// drawn in the text colour so they follow the theme.
+function ic(name, extra = "") {
+  return `<svg class="ic${extra}" aria-hidden="true"><use href="#i-${name}"/></svg>`;
+}
+
 async function api(path, opts = {}) {
   const headers = Object.assign({ "X-Telegram-Init-Data": INIT_DATA }, opts.headers || {});
   const res = await fetch(path, Object.assign({}, opts, { headers }));
@@ -272,7 +278,7 @@ function bookTile(book, { shared = false } = {}) {
   // The real cover (page 1) replaces the 📘 placeholder once it loads --
   // see loadCoverThumbs. A chosen cover colour still shows until then.
   btn.innerHTML = `
-    <div class="book-cover"${coverStyle} data-cover="${book.book_id}" data-shared="${shared ? 1 : 0}">📘${dot}</div>
+    <div class="book-cover"${coverStyle} data-cover="${book.book_id}" data-shared="${shared ? 1 : 0}">${ic("book", " cover-ic")}${dot}</div>
     <div class="book-title-label">${escapeHtml(book.title)}</div>
   `;
   btn.addEventListener("click", () => openBook(book.book_id));
@@ -375,8 +381,8 @@ document.getElementById("action-sheet-backdrop").addEventListener("click", (e) =
 function openBookMenu(book) {
   showActionSheet(`
     <div class="sheet-title">${escapeHtml(book.title)}</div>
-    <button id="sheet-edit-name">✏️ Edit name</button>
-    <button id="sheet-delete" class="danger">🗑 Delete book</button>
+    <button id="sheet-edit-name">${ic("pencil")} Edit name</button>
+    <button id="sheet-delete" class="danger">${ic("trash-2")} Delete book</button>
   `);
   document.getElementById("sheet-edit-name").addEventListener("click", () => promptRenameFromShelf(book));
   document.getElementById("sheet-delete").addEventListener("click", () => confirmDeleteBook(book));
@@ -505,7 +511,7 @@ async function loadBookmarks() {
     row.className = "bookmark-row";
     const coverStyle = book.cover_color ? ` style="background:${book.cover_color}"` : "";
     row.innerHTML = `
-      <span class="bookmark-cover"${coverStyle}>📘</span>
+      <span class="bookmark-cover"${coverStyle}>${ic("book", " cover-ic")}</span>
       <span class="bookmark-info">
         <span class="bookmark-title">${escapeHtml(book.title)}</span>
         <span class="muted">Page ${book.bookmark_page}</span>
@@ -546,8 +552,8 @@ function showReaderSource() {
     box.hidden = true;
     return;
   }
-  document.getElementById("reader-source-label").textContent =
-    `📌 Source${readerSource.n ? ` [${readerSource.n}]` : ""} · page ${readerSource.page}`;
+  document.getElementById("reader-source-label").innerHTML =
+    `${ic("pin")} Source${readerSource.n ? ` [${Number(readerSource.n)}]` : ""} · page ${Number(readerSource.page)}`;
   document.getElementById("reader-source-text").innerHTML = richText(readerSource.text);
   box.hidden = false;
 }
@@ -594,14 +600,14 @@ document.getElementById("request-book-send").addEventListener("click", async () 
   }
   const btn = document.getElementById("request-book-send");
   btn.disabled = true;
-  result.innerHTML = `<p class="spinner-line">⏳ Sending…</p>`;
+  result.innerHTML = `<p class="spinner-line">${ic("hourglass")} Sending…</p>`;
   try {
     await api("/api/request-book", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ url, note }),
     });
-    result.innerHTML = `<p class="muted">✅ Sent! Check your Telegram chat with this bot for the admin's reply.</p>`;
+    result.innerHTML = `<p class="muted">${ic("circle-check")} Sent! Check your Telegram chat with this bot for the admin's reply.</p>`;
     document.getElementById("request-book-url").value = "";
     document.getElementById("request-book-note").value = "";
   } catch (e) {
@@ -883,7 +889,7 @@ function renderBookHeader() {
 
   const badge = document.getElementById("chapters-badge");
   badge.className = "badge";
-  if (chStatus === "done") { badge.textContent = "✓ done"; badge.classList.add("ok"); }
+  if (chStatus === "done") { badge.innerHTML = `${ic("check")} done`; badge.classList.add("ok"); }
   else if (chStatus === "pending") { badge.textContent = "working…"; }
   else if (chStatus === "error") { badge.textContent = "failed"; badge.classList.add("err"); }
   else { badge.textContent = ""; }
@@ -969,7 +975,7 @@ async function handleChapters() {
     renderChapterList();
     return;
   }
-  panel(`<p class="spinner-line">⏳ <span id="chapters-progress">Starting…</span></p>`);
+  panel(`<p class="spinner-line">${ic("hourglass")} <span id="chapters-progress">Starting…</span></p>`);
   try {
     await api(`/api/books/${currentBook.book_id}/chapters`, { method: "POST" });
   } catch (e) {
@@ -1001,7 +1007,7 @@ function renderChapterList() {
     .join("");
   panel(`
     <ul class="chapter-list">${items}</ul>
-    <button class="btn" id="send-chapters">📤 Send chapter files to chat</button>
+    <button class="btn" id="send-chapters">${ic("share")} Send chapter files to chat</button>
     <p id="send-chapters-progress" class="muted"></p>
     <button class="btn secondary" id="redo-chapters">Re-divide</button>
   `);
@@ -1152,7 +1158,7 @@ async function renderReaderPage() {
   } catch (e) {
     // A failed page fetch used to leave `rendering` stuck at true, so the
     // reader froze on "Loading…" with a blank page for good.
-    document.getElementById("reader-page-label").textContent = "⚠️ Couldn't load -- tap here to retry";
+    document.getElementById("reader-page-label").innerHTML = `${ic("triangle-alert")} Couldn't load -- tap here to retry`;
   } finally {
     readerState.rendering = false;
   }
@@ -1234,7 +1240,7 @@ function updateZoomLabel() {
 function updateBookmarkButton() {
   const btn = document.getElementById("reader-bookmark");
   const isBookmarked = currentBook.bookmark_page === readerState.pageNum;
-  btn.textContent = isBookmarked ? "🔖 Bookmarked (tap to remove)" : "🔖 Bookmark this page";
+  btn.innerHTML = `${ic("bookmark", isBookmarked ? " ic-fill" : "")} ${isBookmarked ? "Bookmarked (tap to remove)" : "Bookmark this page"}`;
 }
 
 // ---------------------------------------------------------------------
@@ -1250,7 +1256,7 @@ function notesForCurrentPage() {
 function updateNotesButton() {
   const btn = document.getElementById("reader-notes");
   const count = notesForCurrentPage().length;
-  btn.textContent = count ? `📝 Notes (${count})` : "📝 Notes";
+  btn.innerHTML = `${ic("notebook-pen")} Notes${count ? ` (${count})` : ""}`;
 }
 
 function renderNotesPanel() {
@@ -1268,7 +1274,8 @@ function renderNotesPanel() {
       text.textContent = n.text;
       const del = document.createElement("button");
       del.className = "link-btn";
-      del.textContent = "🗑";
+      del.innerHTML = ic("trash-2");
+      del.setAttribute("aria-label", "Delete note");
       del.addEventListener("click", () => deleteReaderNote(n.id));
       row.appendChild(text);
       row.appendChild(del);
@@ -1552,7 +1559,7 @@ async function runSummarize(body) {
       : `${currentBook.title} — ${(currentBook.chapters || [])[body.chapter_index]?.title || "Chapter"}`;
 
   const result = document.getElementById("summarize-result");
-  result.innerHTML = `<p class="spinner-line">⏳ <span id="summarize-progress">Starting…</span></p>`;
+  result.innerHTML = `<p class="spinner-line">${ic("hourglass")} <span id="summarize-progress">Starting…</span></p>`;
   try {
     await api(`/api/books/${currentBook.book_id}/summarize`, {
       method: "POST",
@@ -1571,7 +1578,7 @@ async function runSummarize(body) {
     onDone: (text) => {
       result.innerHTML = `
         <div style="margin-top:10px;">${richText(text)}</div>
-        <button class="btn secondary" id="summarize-export" style="margin-top:12px;">📄 Export as PDF</button>
+        <button class="btn secondary" id="summarize-export" style="margin-top:12px;">${ic("file-text")} Export as PDF</button>
       `;
       document.getElementById("summarize-export").addEventListener("click", (e) =>
         exportSummaryAsPdf(e.target, summaryTitle, text)
@@ -1588,7 +1595,7 @@ async function runSummarize(body) {
 // backend sends the PDF as a Telegram document to the user's own chat with
 // the bot instead of streaming it back over HTTP.
 async function exportSummaryAsPdf(btn, title, text) {
-  const originalLabel = btn.textContent;
+  const originalLabel = btn.innerHTML;
   btn.disabled = true;
   btn.textContent = "Sending…";
   try {
@@ -1602,7 +1609,7 @@ async function exportSummaryAsPdf(btn, title, text) {
     alertMsg("Couldn't export: " + e.message);
   } finally {
     btn.disabled = false;
-    btn.textContent = originalLabel;
+    btn.innerHTML = originalLabel;
   }
 }
 
@@ -1677,11 +1684,11 @@ function renderAskUI() {
   panel(`
     <div class="qa-top-row">
       <button class="link-btn" id="qa-new">🆕 New chat</button>
-      <button class="link-btn" id="qa-history">🕘 History</button>
+      <button class="link-btn" id="qa-history">${ic("history")} History</button>
     </div>
     <div class="qa-mode-row">
-      <button class="qa-mode-btn ${qaMode === "single" ? "selected" : ""}" data-mode="single">💬 Single answers</button>
-      <button class="qa-mode-btn ${qaMode === "conversational" ? "selected" : ""}" data-mode="conversational">🔗 Conversational</button>
+      <button class="qa-mode-btn ${qaMode === "single" ? "selected" : ""}" data-mode="single">${ic("message-circle")} Single answers</button>
+      <button class="qa-mode-btn ${qaMode === "conversational" ? "selected" : ""}" data-mode="conversational">${ic("link")} Conversational</button>
     </div>
     <p class="qa-mode-hint">${
       qaMode === "conversational"
@@ -1812,7 +1819,7 @@ function renderQaLog() {
       // it doubles as the signal that there's a finished answer to export.
       const exportBtn =
         m.sources !== undefined
-          ? `<button class="qa-export-btn" data-msg-index="${i}">📄 Export as PDF</button>`
+          ? `<button class="qa-export-btn" data-msg-index="${i}">${ic("file-text")} Export as PDF</button>`
           : "";
       return `<div class="qa-msg a" data-msg-index="${i}">${renderAnswerHtml(m.text, m.sources)}${exportBtn}</div>`;
     })
@@ -1855,7 +1862,7 @@ document.getElementById("view-book").addEventListener("click", (e) => {
 // (every mini-app user already has one, since that's how they got here), so
 // this just posts the exchange and reports whether it was sent.
 async function exportAnswerAsPdf(btn, question, answer, sources) {
-  const originalLabel = btn.textContent;
+  const originalLabel = btn.innerHTML;
   btn.disabled = true;
   btn.textContent = "Sending…";
   try {
@@ -1869,7 +1876,7 @@ async function exportAnswerAsPdf(btn, question, answer, sources) {
     alertMsg("Couldn't export: " + e.message);
   } finally {
     btn.disabled = false;
-    btn.textContent = originalLabel;
+    btn.innerHTML = originalLabel;
   }
 }
 
@@ -1933,10 +1940,10 @@ function handleQuizMenu() {
     )
     .join("");
   panel(`
-    <button class="link-btn" id="quiz-history">🕘 Quiz History</button>
+    <button class="link-btn" id="quiz-history">${ic("history")} Quiz History</button>
     <p><strong>Select chapters:</strong></p>
     <div class="quiz-select-row">
-      <button class="link-btn" id="quiz-select-all">☑️ Select all</button>
+      <button class="link-btn" id="quiz-select-all">${ic("square-check")} Select all</button>
       <button class="link-btn" id="quiz-select-none">⬜ Unselect all</button>
     </div>
     <ul class="chapter-list">${items}</ul>
@@ -1990,7 +1997,7 @@ async function runQuizGeneration() {
   };
 
   const result = document.getElementById("quiz-result");
-  result.innerHTML = `<p class="spinner-line">⏳ Generating ${numQuestions} questions…</p>`;
+  result.innerHTML = `<p class="spinner-line">${ic("hourglass")} Generating ${numQuestions} questions…</p>`;
   try {
     await api(`/api/books/${currentBook.book_id}/quiz`, {
       method: "POST",
@@ -2052,7 +2059,7 @@ function renderQuiz(questions) {
   const endBtn = document.createElement("button");
   endBtn.className = "btn";
   endBtn.id = "quiz-end-test";
-  endBtn.textContent = "🏁 End Test";
+  endBtn.innerHTML = `${ic("flag")} End Test`;
   endBtn.addEventListener("click", endQuizTest);
   result.appendChild(endBtn);
 }
@@ -2078,9 +2085,9 @@ async function endQuizTest() {
   result.innerHTML = `
     <div class="quiz-summary">
       <p class="quiz-summary-pct">${percentage}%</p>
-      <p class="quiz-summary-row">✅ Correct: ${correct}</p>
-      <p class="quiz-summary-row">❌ Incorrect: ${incorrect}</p>
-      <p class="quiz-summary-row">➖ Unanswered: ${unanswered}</p>
+      <p class="quiz-summary-row">${ic("circle-check")} Correct: ${correct}</p>
+      <p class="quiz-summary-row">${ic("circle-x")} Incorrect: ${incorrect}</p>
+      <p class="quiz-summary-row">${ic("circle-minus")} Unanswered: ${unanswered}</p>
       <p class="muted">${correct} / ${total} questions correct</p>
       <p id="quiz-save-status" class="muted">Saving to history…</p>
       <button class="btn secondary" id="quiz-retake">Back to quiz setup</button>
@@ -2243,7 +2250,7 @@ function cardsForFilter() {
 }
 
 async function handleFlashcardsMenu() {
-  panel(`<p class="spinner-line">⏳ Loading…</p>`);
+  panel(`<p class="spinner-line">${ic("hourglass")} Loading…</p>`);
   try {
     flashcardDeck = await api(`/api/books/${currentBook.book_id}/flashcards`);
   } catch (e) {
@@ -2272,7 +2279,7 @@ function renderFlashcardsMenu() {
     ? `
       <p style="margin-top:12px;"><strong>Filter by chapter:</strong></p>
       <select id="flash-chapter-filter" style="width:100%;padding:8px;border-radius:8px;">
-        <option value="all"${flashcardChapterFilter === null ? " selected" : ""}>📚 All chapters (${deck.cards.length})</option>
+        <option value="all"${flashcardChapterFilter === null ? " selected" : ""}>All chapters (${deck.cards.length})</option>
         ${breakdownEntries
           .map(([idx, info]) => `<option value="${idx}"${flashcardChapterFilter === Number(idx) ? " selected" : ""}>${escapeHtml(info.title)} (${info.count})</option>`)
           .join("")}
@@ -2281,16 +2288,16 @@ function renderFlashcardsMenu() {
     : "";
 
   const reviewButtons = [];
-  if (dueCount) reviewButtons.push(`<button class="btn flash-mode-btn" data-mode="due">🔁 Review due (${dueCount})</button>`);
-  if (allCount) reviewButtons.push(`<button class="btn secondary flash-mode-btn" data-mode="all">📚 Review all (${allCount})</button>`);
-  if (hardCount) reviewButtons.push(`<button class="btn secondary flash-mode-btn" data-mode="hard">❗ Review hard (${hardCount})</button>`);
+  if (dueCount) reviewButtons.push(`<button class="btn flash-mode-btn" data-mode="due">${ic("repeat")} Review due (${dueCount})</button>`);
+  if (allCount) reviewButtons.push(`<button class="btn secondary flash-mode-btn" data-mode="all">${ic("library-big")} Review all (${allCount})</button>`);
+  if (hardCount) reviewButtons.push(`<button class="btn secondary flash-mode-btn" data-mode="hard">${ic("circle-alert")} Review hard (${hardCount})</button>`);
 
   const genSection = !chapters.length
     ? `<p class="muted">${noChaptersText("generate flashcards")}</p>`
     : `
       <p style="margin-top:16px;"><strong>Generate cards from chapters:</strong></p>
       <div class="quiz-select-row">
-        <button class="link-btn" id="flash-select-all">☑️ Select all</button>
+        <button class="link-btn" id="flash-select-all">${ic("square-check")} Select all</button>
         <button class="link-btn" id="flash-select-none">⬜ Unselect all</button>
       </div>
       <ul class="chapter-list">
@@ -2314,8 +2321,8 @@ function renderFlashcardsMenu() {
       : `<p class="muted">${deck.cards.length ? "Nothing to review in this chapter right now." : "No cards yet -- generate some below."}</p>`}
     ${deck.cards.length ? `
       <div class="flash-review-row">
-        <button class="btn secondary" id="flash-export">📤 Export to Anki</button>
-        <button class="btn secondary" id="flash-delete">🗑 Delete deck</button>
+        <button class="btn secondary" id="flash-export">${ic("share")} Export to Anki</button>
+        <button class="btn secondary" id="flash-delete">${ic("trash-2")} Delete deck</button>
       </div>` : ""}
     ${genSection}
   `);
@@ -2365,7 +2372,7 @@ async function runFlashcardGeneration() {
   numCards = Math.max(1, Math.min(MAX_FLASHCARD_CARDS, numCards));
 
   const result = document.getElementById("flash-gen-result");
-  result.innerHTML = `<p class="spinner-line">⏳ Generating ${numCards} flashcard(s)…</p>`;
+  result.innerHTML = `<p class="spinner-line">${ic("hourglass")} Generating ${numCards} flashcard(s)…</p>`;
   try {
     await api(`/api/books/${currentBook.book_id}/flashcards/generate`, {
       method: "POST",
@@ -2429,7 +2436,7 @@ function startFlashcardReview(mode) {
 function renderFlashcardReview() {
   if (flashcardIndex >= flashcardQueue.length) {
     panel(`
-      <p class="quiz-summary-pct">🎉</p>
+      <p class="quiz-summary-pct">${ic("party-popper", " big-ic")}</p>
       <p class="quiz-summary-row">All done for now!</p>
       <button class="btn secondary" id="flash-review-back">Back to Flashcards</button>
     `);
@@ -2444,7 +2451,7 @@ function renderFlashcardReview() {
     panel(`
       <p class="muted">${progress}</p>
       <div class="flash-card">${escapeHtml(card.front)}</div>
-      <button class="btn" id="flash-reveal">🔎 Show answer</button>
+      <button class="btn" id="flash-reveal">${ic("search")} Show answer</button>
     `);
     document.getElementById("flash-reveal").addEventListener("click", () => {
       flashcardRevealed = true;
@@ -2456,10 +2463,10 @@ function renderFlashcardReview() {
       <div class="flash-card">${escapeHtml(card.front)}</div>
       <div class="flash-card flash-card-back">${escapeHtml(card.back)}</div>
       <div class="flash-rate-row">
-        <button class="flash-rate-btn again" data-q="0">❌ Again</button>
-        <button class="flash-rate-btn hard" data-q="3">😕 Hard</button>
-        <button class="flash-rate-btn good" data-q="4">🙂 Good</button>
-        <button class="flash-rate-btn easy" data-q="5">😎 Easy</button>
+        <button class="flash-rate-btn again" data-q="0">${ic("circle-x")} Again</button>
+        <button class="flash-rate-btn hard" data-q="3">${ic("frown")} Hard</button>
+        <button class="flash-rate-btn good" data-q="4">${ic("smile")} Good</button>
+        <button class="flash-rate-btn easy" data-q="5">${ic("laugh")} Easy</button>
       </div>
     `);
     document.querySelectorAll(".flash-rate-btn").forEach((btn) => {
@@ -2661,7 +2668,7 @@ async function checkInteractions() {
   drugsBusy = true;
   renderInteractionChips();
   result.hidden = false;
-  result.innerHTML = `<p class="muted">Checking ${interactionDrugs.length} drugs against each other's FDA labels…</p>`;
+  result.innerHTML = `<p class="muted">Checking interactions…</p>`;
   const myCheck = genId();
   try {
     const { answer, drugs } = await api("/api/drugs/interactions", {
@@ -2706,7 +2713,7 @@ function renderInteractionResult(drugs, answer) {
     `<p class="muted">${escapeHtml(drugs.join(" · "))}</p>` +
     `<div class="qa-msg a">${richText(answer)}` +
     (interactionTopicId
-      ? `<div class="ask-turn-tools"><button class="mini-btn" data-export-interaction="1">📄 Save as PDF</button></div>`
+      ? `<div class="ask-turn-tools"><button class="mini-btn" data-export-interaction="1">${ic("file-text")} Save as PDF</button></div>`
       : "") +
     `</div>`;
 }
@@ -2734,7 +2741,7 @@ async function showDrugTopics(panelId, kind, emptyText) {
             `<div class="topic-row"><button class="topic-main" data-topic="${t.topic_id}">` +
             `<span class="topic-title" dir="auto">${escapeHtml(t.title)}</span>` +
             `<span class="topic-meta">${meta}</span>` +
-            `</button><button class="mini-btn" data-del-topic="${t.topic_id}" title="Delete">🗑</button></div>`
+            `</button><button class="mini-btn" data-del-topic="${t.topic_id}" title="Delete">${ic("trash-2")}</button></div>`
           );
         })
         .join("")
@@ -2795,7 +2802,7 @@ function renderLookupWebsites() {
     .map(
       (w) =>
         `<label class="check-row"><input type="checkbox" data-web-id="${escapeHtml(w.id)}" ${lookupWebOff.has(w.id) ? "" : "checked"} />` +
-        `<span class="web-row-icon">🌐</span><span class="check-title">${escapeHtml(w.title)}</span></label>`
+        `<span class="web-row-icon">${ic("globe")}</span><span class="check-title">${escapeHtml(w.title)}</span></label>`
     )
     .join("");
 }
@@ -2826,7 +2833,7 @@ function renderLookupThread() {
         `<div class="qa-msg q" dir="auto">${escapeHtml(t.q)}</div>` +
         `<div class="qa-msg a" data-turn="${i}">${t.sources && t.sources.length ? askAnswerHtml(t.a, t.sources) : richText(t.a)}` +
         (t.done && lookupTopicId
-          ? `<div class="ask-turn-tools"><button class="mini-btn" data-export-turn="${i}">📄 Save as PDF</button></div>`
+          ? `<div class="ask-turn-tools"><button class="mini-btn" data-export-turn="${i}">${ic("file-text")} Save as PDF</button></div>`
           : "") +
         `</div>`
     )
@@ -3256,9 +3263,9 @@ async function loadAskLibrary({ quiet = false } = {}) {
 function askRowHtml(b, { shared }) {
   const pages = b.page_count ? `${b.page_count} p.` : "";
   const admin = shared && askLib.is_admin;
-  const del = admin ? `<button class="mini-btn" data-del="${b.book_id}" title="Remove from library">🗑</button>` : "";
-  const edit = admin ? `<button class="mini-btn" data-rename="${b.book_id}" title="Edit title">✏️</button>` : "";
-  const open = `<button class="mini-btn" data-open="${b.book_id}" title="Open the book">📖</button>`;
+  const del = admin ? `<button class="mini-btn" data-del="${b.book_id}" title="Remove from library">${ic("trash-2")}</button>` : "";
+  const edit = admin ? `<button class="mini-btn" data-rename="${b.book_id}" title="Edit title">${ic("pencil")}</button>` : "";
+  const open = `<button class="mini-btn" data-open="${b.book_id}" title="Open the book">${ic("book-open")}</button>`;
   const cover = coverButtonHtml(b.book_id, shared);
   if (admin && askEditingId === b.book_id) {
     // Inline title editor (window.prompt is unreliable inside Telegram).
@@ -3266,7 +3273,7 @@ function askRowHtml(b, { shared }) {
       `<div class="check-row">${cover}` +
       `<input class="rename-input" type="text" maxlength="200" value="${escapeHtml(b.title)}" data-rename-input="${b.book_id}" />` +
       `<button class="mini-btn" data-rename-save="${b.book_id}">Save</button>` +
-      `<button class="mini-btn" data-rename-cancel="1">✕</button></div>`
+      `<button class="mini-btn" data-rename-cancel="1">${ic("x")}</button></div>`
     );
   }
   if (b.qa_indexed) {
@@ -3279,7 +3286,7 @@ function askRowHtml(b, { shared }) {
   // Not answerable yet: say why, and offer the one thing that fixes it.
   let meta, action = "";
   if (b.indexing || askIndexingOwn.has(b.book_id)) {
-    meta = `<span class="check-meta">⏳ ${escapeHtml(b.progress || "Preparing…")}</span>`;
+    meta = `<span class="check-meta">${ic("hourglass")} ${escapeHtml(b.progress || "Preparing…")}</span>`;
   } else if (shared) {
     meta = b.index_error
       ? `<span class="check-meta is-error">${escapeHtml(b.index_error)}</span>`
@@ -3327,7 +3334,7 @@ function renderAskLibrary() {
 
   mineBox.innerHTML = askLib.my_books.length
     ? askLib.my_books.map((b) => askRowHtml(b, { shared: false })).join("")
-    : `<p class="muted">No books on your shelf yet. Add one from the 📚 Shelf tab.</p>`;
+    : `<p class="muted">No books on your shelf yet. Add one from the ${ic("library-big")} Shelf tab.</p>`;
   loadCoverThumbs(document.getElementById("view-ask"));
 
   const admin = document.getElementById("ask-admin");
@@ -3348,7 +3355,7 @@ function renderAskSpecActions() {
   const ready = spec ? spec.books.filter((b) => b.qa_indexed) : [];
   const btn = document.getElementById("ask-tick-all");
   btn.hidden = ready.length === 0;
-  btn.textContent = ready.length && ready.every((b) => askSelected.has(b.book_id)) ? "☐ Untick all" : "☑️ Tick all";
+  btn.innerHTML = ready.length && ready.every((b) => askSelected.has(b.book_id)) ? `${ic("square")} Untick all` : `${ic("square-check")} Tick all`;
   document.getElementById("ask-suggest").hidden = !askLib;
 }
 
@@ -3361,12 +3368,12 @@ function renderAskSelection() {
     : "No resources chosen yet.";
   const hint = document.getElementById("ask-selected");
   hint.hidden = n > 0;
-  hint.textContent = "Tap 📚 Choose resources above to pick the books to answer from.";
+  hint.textContent = "Tap “Choose resources” above to pick the books to answer from.";
   document.getElementById("ask-choose").classList.toggle("secondary", n > 0);
   document.getElementById("ask-send").disabled = n === 0 || askBusy;
   document.getElementById("ask-clear").hidden = n === 0;
   const done = document.getElementById("ask-pick-done");
-  done.textContent = n ? `✅ Done — ${n} selected` : "✅ Done";
+  done.innerHTML = `${ic("circle-check")} Done${n ? ` — ${n} selected` : ""}`;
 }
 
 // The Ask tab is two pages: choosing resources, and the questions and
@@ -3386,7 +3393,7 @@ function askAnswerHtml(text, sources) {
       (s) =>
         `<span class="src-line" data-n="${s.n}"><span class="n">[${s.n}]</span>` +
         (s.url
-          ? `<span>🌐 <strong>${escapeHtml(s.title)}</strong> <span class="muted">(${escapeHtml(hostOf(s.url))})</span> — ${escapeHtml(sourcePreview(s.text))}</span></span>`
+          ? `<span>${ic("globe")} <strong>${escapeHtml(s.title)}</strong> <span class="muted">(${escapeHtml(hostOf(s.url))})</span> — ${escapeHtml(sourcePreview(s.text))}</span></span>`
           : `<span><strong>${escapeHtml(s.title)}</strong>, p.${s.page} — ${escapeHtml(sourcePreview(s.text))}</span></span>`)
     )
     .join("");
@@ -3400,7 +3407,7 @@ function renderAskThread() {
       (t, i) =>
         `<div class="qa-msg q" dir="auto">${escapeHtml(t.q)}</div>` +
         `<div class="qa-msg a" data-turn="${i}">${t.sources ? askAnswerHtml(t.a, t.sources) : escapeHtml(t.a)}` +
-        (t.sources ? `<div class="ask-turn-tools"><button class="mini-btn" data-export-turn="${i}">📄 Save as PDF</button></div>` : "") +
+        (t.sources ? `<div class="ask-turn-tools"><button class="mini-btn" data-export-turn="${i}">${ic("file-text")} Save as PDF</button></div>` : "") +
         `</div>`
     )
     .join("");
@@ -3424,7 +3431,7 @@ function askExport(btn, turn) {
 
 async function exportTopic(btn, topicId, turn) {
   if (!topicId) return;
-  const label = btn.textContent;
+  const label = btn.innerHTML;
   btn.disabled = true;
   btn.textContent = "Sending…";
   try {
@@ -3433,10 +3440,10 @@ async function exportTopic(btn, topicId, turn) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(turn === undefined ? { topic_id: topicId } : { topic_id: topicId, turn }),
     });
-    btn.textContent = "✅ Sent to your chat";
-    setTimeout(() => { btn.textContent = label; btn.disabled = false; }, 2500);
+    btn.innerHTML = `${ic("circle-check")} Sent to your chat`;
+    setTimeout(() => { btn.innerHTML = label; btn.disabled = false; }, 2500);
   } catch (e) {
-    btn.textContent = label;
+    btn.innerHTML = label;
     btn.disabled = false;
     alertMsg(e.message);
   }
@@ -3462,7 +3469,7 @@ async function askShowTopics() {
             `<div class="topic-row"><button class="topic-main" data-topic="${t.topic_id}">` +
             `<span class="topic-title">${escapeHtml(t.title)}</span>` +
             `<span class="topic-meta">${t.turns} answer${t.turns === 1 ? "" : "s"} · ${when} · ${escapeHtml(t.books.join(", "))}</span>` +
-            `</button><button class="mini-btn" data-del-topic="${t.topic_id}" title="Delete">🗑</button></div>`
+            `</button><button class="mini-btn" data-del-topic="${t.topic_id}" title="Delete">${ic("trash-2")}</button></div>`
           );
         })
         .join("")
@@ -3646,7 +3653,7 @@ function coverButtonHtml(id, shared) {
   const book = askAllBooks().find((b) => b.book_id === id);
   const title = book ? escapeHtml(book.title) : "";
   const url = coverUrls.get(coverKey(id, shared));
-  const inner = url ? `<img src="${url}" alt="" />` : `<span class="cover-ph">📘</span>`;
+  const inner = url ? `<img src="${url}" alt="" />` : `<span class="cover-ph">${ic("book", " cover-ic")}</span>`;
   return `<button type="button" class="cover-btn" data-cover="${id}" data-shared="${shared ? 1 : 0}" data-title="${title}" title="Show cover">${inner}</button>`;
 }
 
@@ -4020,13 +4027,13 @@ async function loadWebSites() {
 
 function webStatusLine(s) {
   const parts = [];
-  parts.push(s.has_session ? "✅ Login saved" : "No login saved");
+  parts.push(s.has_session ? `${ic("circle-check")} Login saved` : "No login saved");
   if (s.login_steps) parts.push(`${s.login_steps} login steps${s.secret_steps ? " (password encrypted)" : ""}`);
   if (s.last_login) {
     const when = new Date(s.last_login * 1000).toLocaleString();
-    parts.push(s.last_login_ok === false ? `<span class="bad">⚠️ Last login failed ${when}: ${escapeHtml(s.last_error || "")}</span>` : `last login ${when}`);
+    parts.push(s.last_login_ok === false ? `<span class="bad">${ic("triangle-alert")} Last login failed ${when}: ${escapeHtml(s.last_error || "")}</span>` : `last login ${when}`);
   }
-  parts.push(s.enabled ? "🟢 Searched in Drug LookUp" : "⚪ Not searched in Drug LookUp");
+  parts.push(s.enabled ? `${ic("circle", " ic-on")} Searched in Drug LookUp` : `${ic("circle")} Not searched in Drug LookUp`);
   return parts.join(" · ");
 }
 
@@ -4062,10 +4069,10 @@ function renderWebSites() {
         `<span class="muted">${escapeHtml(new URL(s.start_url).hostname)}</span></div>` +
         `<div class="web-site-status">${webStatusLine(s)}</div>` +
         `<div class="web-site-actions">` +
-        `<button class="mini-btn" data-web-open="${s.site_id}">🌐 Open</button>` +
-        `<button class="mini-btn" data-web-settings="${s.site_id}">⚙️ Where to search</button>` +
-        (s.login_steps ? `<button class="mini-btn" data-web-relogin="${s.site_id}">🔑 Log in again now</button>` : "") +
-        `<button class="mini-btn" data-web-del="${s.site_id}">🗑</button></div>${form}</div>`
+        `<button class="mini-btn" data-web-open="${s.site_id}">${ic("globe")} Open</button>` +
+        `<button class="mini-btn" data-web-settings="${s.site_id}">${ic("settings")} Where to search</button>` +
+        (s.login_steps ? `<button class="mini-btn" data-web-relogin="${s.site_id}">${ic("key-round")} Log in again now</button>` : "") +
+        `<button class="mini-btn" data-web-del="${s.site_id}">${ic("trash-2")}</button></div>${form}</div>`
       );
     })
     .join("");
@@ -4093,7 +4100,7 @@ async function webSiteClick(e) {
   }
   const id = b.dataset.webSave || b.dataset.webTest || b.dataset.webRelogin || b.dataset.webDel;
   if (!id) return;
-  const label = b.textContent;
+  const label = b.innerHTML;
   b.disabled = true;
   try {
     if (b.dataset.webSave) {
@@ -4141,7 +4148,7 @@ async function webSiteClick(e) {
     if (b.dataset.webRelogin) loadWebSites();
   } finally {
     b.disabled = false;
-    if (document.body.contains(b)) b.textContent = label;
+    if (document.body.contains(b)) b.innerHTML = label;
   }
 }
 
@@ -4182,7 +4189,7 @@ function renderWebTabs(tabs) {
     close.dataset.closeTab = t.i;
     close.title = "Close this tab";
     close.setAttribute("aria-label", `Close ${t.title}`);
-    close.textContent = "✕";
+    close.innerHTML = ic("x");
     tab.append(open, close);
     return tab;
   }));
@@ -4278,7 +4285,7 @@ function webSetFocus(focus) {
   input.placeholder = !focus.editable
     ? "Tap a field on the page, then type here"
     : focus.password
-      ? "🔒 Password: goes straight into the page"
+      ? "Password: goes straight into the page (hidden)"
       : `Typing into ${focus.label ? `“${focus.label}”` : "the selected field"}`;
   if (webFocusAfterTap) {
     webFocusAfterTap = false;

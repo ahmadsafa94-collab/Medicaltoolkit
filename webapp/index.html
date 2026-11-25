@@ -17,32 +17,34 @@
   -->
   <link rel="icon" type="image/png" href="favicon.png" />
   <link rel="apple-touch-icon" href="icon-192.png" />
-  <link rel="stylesheet" href="style.css?v=29" />
-  <link rel="stylesheet" href="fonts.css?v=29" />
-  <link rel="stylesheet" href="themes.css?v=29" />
+  <link rel="stylesheet" href="style.css?v=30" />
+  <link rel="stylesheet" href="fonts.css?v=30" />
+  <link rel="stylesheet" href="themes.css?v=30" />
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
-  <script src="theme.js?v=29"></script>
+  <script src="theme.js?v=30"></script>
   <!-- pdf.js 3.11.174 (Apache-2.0), self-hosted: same bytes as cdnjs (SRI-checked). -->
   <script src="vendor/pdf.min.js"></script>
 </head>
 <body>
+  <!-- Icons: Lucide (https://lucide.dev), ISC licence, see webapp/vendor/LUCIDE-LICENSE. -->
+  <svg id="icon-sprite" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false" style="position:absolute;width:0;height:0;overflow:hidden" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><symbol id="i-arrow-left-right" viewBox="0 0 24 24"><path d="M8 3 4 7l4 4" /><path d="M4 7h16" /><path d="m16 21 4-4-4-4" /><path d="M20 17H4" /></symbol><symbol id="i-arrow-right-to-line" viewBox="0 0 24 24"><path d="M17 12H3" /><path d="m11 18 6-6-6-6" /><path d="M21 5v14" /></symbol><symbol id="i-book" viewBox="0 0 24 24"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H19a1 1 0 0 1 1 1v18a1 1 0 0 1-1 1H6.5a1 1 0 0 1 0-5H20" /></symbol><symbol id="i-book-open" viewBox="0 0 24 24"><path d="M12 7v14" /><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z" /></symbol><symbol id="i-bookmark" viewBox="0 0 24 24"><path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z" /></symbol><symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5" /></symbol><symbol id="i-chevron-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6" /></symbol><symbol id="i-chevron-left" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6" /></symbol><symbol id="i-chevron-up" viewBox="0 0 24 24"><path d="m18 15-6-6-6 6" /></symbol><symbol id="i-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /></symbol><symbol id="i-circle-alert" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /><line x1="12" x2="12" y1="8" y2="12" /><line x1="12" x2="12.01" y1="16" y2="16" /></symbol><symbol id="i-circle-check" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /><path d="m9 12 2 2 4-4" /></symbol><symbol id="i-circle-dot" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /><circle cx="12" cy="12" r="1" /></symbol><symbol id="i-circle-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" /><path d="M12 17h.01" /></symbol><symbol id="i-circle-minus" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /><path d="M8 12h8" /></symbol><symbol id="i-circle-x" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /><path d="m15 9-6 6" /><path d="m9 9 6 6" /></symbol><symbol id="i-corner-down-left" viewBox="0 0 24 24"><polyline points="9 10 4 15 9 20" /><path d="M20 4v7a4 4 0 0 1-4 4H4" /></symbol><symbol id="i-eraser" viewBox="0 0 24 24"><path d="m7 21-4.3-4.3c-1-1-1-2.5 0-3.4l9.6-9.6c1-1 2.5-1 3.4 0l5.6 5.6c1 1 1 2.5 0 3.4L13 21" /><path d="M22 21H7" /><path d="m5 11 9 9" /></symbol><symbol id="i-file-text" viewBox="0 0 24 24"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" /><path d="M14 2v4a2 2 0 0 0 2 2h4" /><path d="M10 9H8" /><path d="M16 13H8" /><path d="M16 17H8" /></symbol><symbol id="i-flag" viewBox="0 0 24 24"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z" /><line x1="4" x2="4" y1="22" y2="15" /></symbol><symbol id="i-frown" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /><path d="M16 16s-1.5-2-4-2-4 2-4 2" /><line x1="9" x2="9.01" y1="9" y2="9" /><line x1="15" x2="15.01" y1="9" y2="9" /></symbol><symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20" /><path d="M2 12h20" /></symbol><symbol id="i-hash" viewBox="0 0 24 24"><line x1="4" x2="20" y1="9" y2="9" /><line x1="4" x2="20" y1="15" y2="15" /><line x1="10" x2="8" y1="3" y2="21" /><line x1="16" x2="14" y1="3" y2="21" /></symbol><symbol id="i-history" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" /><path d="M3 3v5h5" /><path d="M12 7v5l4 2" /></symbol><symbol id="i-hospital" viewBox="0 0 24 24"><path d="M12 6v4" /><path d="M14 14h-4" /><path d="M14 18h-4" /><path d="M14 8h-4" /><path d="M18 12h2a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2h2" /><path d="M18 22V4a2 2 0 0 0-2-2H8a2 2 0 0 0-2 2v18" /></symbol><symbol id="i-hourglass" viewBox="0 0 24 24"><path d="M5 22h14" /><path d="M5 2h14" /><path d="M17 22v-4.172a2 2 0 0 0-.586-1.414L12 12l-4.414 4.414A2 2 0 0 0 7 17.828V22" /><path d="M7 2v4.172a2 2 0 0 0 .586 1.414L12 12l4.414-4.414A2 2 0 0 0 17 6.172V2" /></symbol><symbol id="i-image" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2" ry="2" /><circle cx="9" cy="9" r="2" /><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21" /></symbol><symbol id="i-key-round" viewBox="0 0 24 24"><path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z" /><circle cx="16.5" cy="7.5" r=".5" fill="currentColor" /></symbol><symbol id="i-laugh" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /><path d="M18 13a6 6 0 0 1-6 5 6 6 0 0 1-6-5h12Z" /><line x1="9" x2="9.01" y1="9" y2="9" /><line x1="15" x2="15.01" y1="9" y2="9" /></symbol><symbol id="i-layers" viewBox="0 0 24 24"><path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z" /><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65" /><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65" /></symbol><symbol id="i-library-big" viewBox="0 0 24 24"><rect width="8" height="18" x="3" y="3" rx="1" /><path d="M7 3v18" /><path d="M20.4 18.9c.2.5-.1 1.1-.6 1.3l-1.9.7c-.5.2-1.1-.1-1.3-.6L11.1 5.1c-.2-.5.1-1.1.6-1.3l1.9-.7c.5-.2 1.1.1 1.3.6Z" /></symbol><symbol id="i-lightbulb" viewBox="0 0 24 24"><path d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5" /><path d="M9 18h6" /><path d="M10 22h4" /></symbol><symbol id="i-link" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" /><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" /></symbol><symbol id="i-lock" viewBox="0 0 24 24"><rect width="18" height="11" x="3" y="11" rx="2" ry="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" /></symbol><symbol id="i-message-circle" viewBox="0 0 24 24"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z" /></symbol><symbol id="i-notebook-pen" viewBox="0 0 24 24"><path d="M13.4 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7.4" /><path d="M2 6h4" /><path d="M2 10h4" /><path d="M2 14h4" /><path d="M2 18h4" /><path d="M21.378 5.626a1 1 0 1 0-3.004-3.004l-5.01 5.012a2 2 0 0 0-.506.854l-.837 2.87a.5.5 0 0 0 .62.62l2.87-.837a2 2 0 0 0 .854-.506z" /></symbol><symbol id="i-party-popper" viewBox="0 0 24 24"><path d="M5.8 11.3 2 22l10.7-3.79" /><path d="M4 3h.01" /><path d="M22 8h.01" /><path d="M15 2h.01" /><path d="M22 20h.01" /><path d="m22 2-2.24.75a2.9 2.9 0 0 0-1.96 3.12c.1.86-.57 1.63-1.45 1.63h-.38c-.86 0-1.6.6-1.76 1.44L14 10" /><path d="m22 13-.82-.33c-.86-.34-1.82.2-1.98 1.11c-.11.7-.72 1.22-1.43 1.22H17" /><path d="m11 2 .33.82c.34.86-.2 1.82-1.11 1.98C9.52 4.9 9 5.52 9 6.23V7" /><path d="M11 13c1.93 1.93 2.83 4.17 2 5-.83.83-3.07-.07-5-2-1.93-1.93-2.83-4.17-2-5 .83-.83 3.07.07 5 2Z" /></symbol><symbol id="i-pencil" viewBox="0 0 24 24"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z" /><path d="m15 5 4 4" /></symbol><symbol id="i-pill" viewBox="0 0 24 24"><path d="m10.5 20.5 10-10a4.95 4.95 0 1 0-7-7l-10 10a4.95 4.95 0 1 0 7 7Z" /><path d="m8.5 8.5 7 7" /></symbol><symbol id="i-pin" viewBox="0 0 24 24"><path d="M12 17v5" /><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" /></symbol><symbol id="i-plus" viewBox="0 0 24 24"><path d="M5 12h14" /><path d="M12 5v14" /></symbol><symbol id="i-repeat" viewBox="0 0 24 24"><path d="m17 2 4 4-4 4" /><path d="M3 11v-1a4 4 0 0 1 4-4h14" /><path d="m7 22-4-4 4-4" /><path d="M21 13v1a4 4 0 0 1-4 4H3" /></symbol><symbol id="i-rotate-cw" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" /><path d="M21 3v5h-5" /></symbol><symbol id="i-save" viewBox="0 0 24 24"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z" /><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7" /><path d="M7 3v4a1 1 0 0 0 1 1h7" /></symbol><symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8" /><path d="m21 21-4.3-4.3" /></symbol><symbol id="i-settings" viewBox="0 0 24 24"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" /><circle cx="12" cy="12" r="3" /></symbol><symbol id="i-share" viewBox="0 0 24 24"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8" /><polyline points="16 6 12 2 8 6" /><line x1="12" x2="12" y1="2" y2="15" /></symbol><symbol id="i-smile" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /><path d="M8 14s1.5 2 4 2 4-2 4-2" /><line x1="9" x2="9.01" y1="9" y2="9" /><line x1="15" x2="15.01" y1="9" y2="9" /></symbol><symbol id="i-square" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2" /></symbol><symbol id="i-square-check" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2" /><path d="m9 12 2 2 4-4" /></symbol><symbol id="i-square-plus" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2" /><path d="M8 12h8" /><path d="M12 8v8" /></symbol><symbol id="i-trash-2" viewBox="0 0 24 24"><path d="M3 6h18" /><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" /><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" /><line x1="10" x2="10" y1="11" y2="17" /><line x1="14" x2="14" y1="11" y2="17" /></symbol><symbol id="i-triangle-alert" viewBox="0 0 24 24"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3" /><path d="M12 9v4" /><path d="M12 17h.01" /></symbol><symbol id="i-upload" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" x2="12" y1="3" y2="15" /></symbol><symbol id="i-wrench" viewBox="0 0 24 24"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" /></symbol><symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18" /><path d="m6 6 12 12" /></symbol></svg>
 
   <!-- Welcome splash (splash.js): plays over the app while it loads, then dissolves. -->
   <div id="splash"></div>
-  <script src="splash.js?v=29"></script>
+  <script src="splash.js?v=30"></script>
 
   <!-- ============ SHELF (root) ============ -->
   <section id="view-shelf" class="view">
     <header class="topbar shelf-topbar">
-      <h1>📚 Book Shelf</h1>
-      <button id="btn-bookmarks" class="link-btn">🔖 Bookmarks</button>
+      <h1><svg class="ic" aria-hidden="true"><use href="#i-library-big"/></svg> Book Shelf</h1>
+      <button id="btn-bookmarks" class="link-btn"><svg class="ic" aria-hidden="true"><use href="#i-bookmark"/></svg> Bookmarks</button>
     </header>
     <div class="subtabs shelf-tabs">
-      <button class="subtab is-active" data-shelftab="mine">📚 My books</button>
-      <button class="subtab" data-shelftab="spec">🏥 Specialty books</button>
+      <button class="subtab is-active" data-shelftab="mine"><svg class="ic" aria-hidden="true"><use href="#i-library-big"/></svg> My books</button>
+      <button class="subtab" data-shelftab="spec"><svg class="ic" aria-hidden="true"><use href="#i-hospital"/></svg> Specialty books</button>
     </div>
     <div id="shelf-pane-mine">
-      <button id="btn-request-book" class="link-btn shelf-request-btn">📚 Request a Book</button>
+      <button id="btn-request-book" class="link-btn shelf-request-btn"><svg class="ic" aria-hidden="true"><use href="#i-library-big"/></svg> Request a Book</button>
       <div id="shelf-empty" class="empty-state" hidden>
         <p>No books yet.</p>
         <p class="muted">Tap + to upload your first PDF.</p>
@@ -56,19 +58,19 @@
       <p id="shelf-spec-empty" class="empty-state" hidden>No books in this specialty yet.</p>
       <div id="shelf-spec-grid" class="shelf-grid"></div>
     </div>
-    <button id="btn-add-book" class="fab" title="Add a book">+</button>
+    <button id="btn-add-book" class="fab" title="Add a book" aria-label="Add a book"><svg class="ic" aria-hidden="true"><use href="#i-plus"/></svg></button>
     <input id="file-input" type="file" accept="application/pdf" hidden />
   </section>
 
   <!-- ============ DRUGS (root, second tab) ============ -->
   <section id="view-drugs" class="view" hidden>
-    <header class="topbar"><h1>💊 Drugs Info</h1></header>
+    <header class="topbar"><h1><svg class="ic" aria-hidden="true"><use href="#i-pill"/></svg> Drugs Info</h1></header>
 
     <div class="subtabs">
-      <button class="subtab is-active" data-drugtab="interactions">🔀 Interactions</button>
-      <button class="subtab" data-drugtab="lookup">💊 Drug LookUp</button>
-      <button class="subtab" data-drugtab="lexi" hidden>📘 Lexicomp</button>
-      <button class="subtab" data-drugtab="web" hidden>🌐 Websites</button>
+      <button class="subtab is-active" data-drugtab="interactions"><svg class="ic" aria-hidden="true"><use href="#i-arrow-left-right"/></svg> Interactions</button>
+      <button class="subtab" data-drugtab="lookup"><svg class="ic" aria-hidden="true"><use href="#i-pill"/></svg> Drug LookUp</button>
+      <button class="subtab" data-drugtab="lexi" hidden><svg class="ic" aria-hidden="true"><use href="#i-book"/></svg> Lexicomp</button>
+      <button class="subtab" data-drugtab="web" hidden><svg class="ic" aria-hidden="true"><use href="#i-globe"/></svg> Websites</button>
     </div>
 
     <!-- ---- Interactions ---- -->
@@ -87,12 +89,12 @@
         <div id="interaction-chips" class="chips"></div>
         <button id="interaction-check" class="btn ask-send-btn" disabled>Check interactions</button>
         <div class="ask-compose-tools">
-          <button id="interaction-clear" class="mini-btn" hidden>🧹 Clear drugs</button>
-          <button id="interaction-history" class="mini-btn">🕘 Saved checks</button>
+          <button id="interaction-clear" class="mini-btn" hidden><svg class="ic" aria-hidden="true"><use href="#i-eraser"/></svg> Clear drugs</button>
+          <button id="interaction-history" class="mini-btn"><svg class="ic" aria-hidden="true"><use href="#i-history"/></svg> Saved checks</button>
         </div>
       </div>
       <div id="interaction-topics" class="panel" hidden>
-        <div class="reader-source-head"><strong>🕘 Saved interaction checks</strong><button class="mini-btn topics-close">✕</button></div>
+        <div class="reader-source-head"><strong><svg class="ic" aria-hidden="true"><use href="#i-history"/></svg> Saved interaction checks</strong><button class="mini-btn topics-close"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button></div>
         <div class="topics-list"></div>
       </div>
       <div id="interaction-result" class="panel" hidden></div>
@@ -113,26 +115,26 @@
         <div id="lookup-suggestions" class="suggestions" hidden></div>
         <p id="lookup-current" class="muted" hidden></p>
         <div id="lookup-web" class="lookup-web" hidden>
-          <p class="ask-heading">🌐 Also search</p>
+          <p class="ask-heading"><svg class="ic" aria-hidden="true"><use href="#i-globe"/></svg> Also search</p>
           <div id="lookup-web-list" class="check-list"></div>
         </div>
         <div class="ask-compose-tools">
-          <button id="lookup-history" class="mini-btn">🕘 Saved questions</button>
+          <button id="lookup-history" class="mini-btn"><svg class="ic" aria-hidden="true"><use href="#i-history"/></svg> Saved questions</button>
         </div>
       </div>
       <div id="lookup-topics" class="panel" hidden>
-        <div class="reader-source-head"><strong>🕘 Saved drug questions</strong><button class="mini-btn topics-close">✕</button></div>
+        <div class="reader-source-head"><strong><svg class="ic" aria-hidden="true"><use href="#i-history"/></svg> Saved drug questions</strong><button class="mini-btn topics-close"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button></div>
         <div class="topics-list"></div>
       </div>
       <div id="lookup-thread" class="qa-thread"></div>
       <div class="panel ask-compose" id="lookup-ask-panel" hidden>
-        <p id="lookup-topic-note" class="muted ask-topic-note" hidden>Follow-up questions keep the context. Tap 🆕 New drug to start fresh.</p>
+        <p id="lookup-topic-note" class="muted ask-topic-note" hidden>Follow-up questions keep the context. Tap <svg class="ic" aria-hidden="true"><use href="#i-square-plus"/></svg> New drug to start fresh.</p>
         <textarea id="lookup-question" class="compose-box" rows="4" dir="auto"
                   placeholder="Type your question… e.g. Can it be used in renal impairment?"></textarea>
         <button id="lookup-ask" class="btn ask-send-btn">Ask</button>
         <div class="ask-compose-tools">
-          <button id="lookup-reset" class="mini-btn">🆕 New drug</button>
-          <button id="lookup-topic-pdf" class="mini-btn" hidden>📄 Conversation as PDF</button>
+          <button id="lookup-reset" class="mini-btn"><svg class="ic" aria-hidden="true"><use href="#i-square-plus"/></svg> New drug</button>
+          <button id="lookup-topic-pdf" class="mini-btn" hidden><svg class="ic" aria-hidden="true"><use href="#i-file-text"/></svg> Conversation as PDF</button>
         </div>
       </div>
     </div>
@@ -141,7 +143,7 @@
     <div id="drugs-pane-web" class="drugs-pane" hidden>
       <!-- Admin only: websites the bot logs in to and searches (web_sources.py). -->
       <div id="web-admin" class="panel">
-        <p><strong>🌐 Web sources</strong> <span class="muted">(admin only)</span></p>
+        <p><strong><svg class="ic" aria-hidden="true"><use href="#i-globe"/></svg> Web sources</strong> <span class="muted">(admin only)</span></p>
         <p class="muted">Open a website in the bot's browser and log in once. The bot keeps the login (and logs
           in again by itself when it expires), then searches the site when someone asks about a drug in Drug LookUp.</p>
         <div class="drug-input-row">
@@ -183,25 +185,25 @@
 
   <!-- ============ ASK (root, third tab): several books at once ============ -->
   <section id="view-ask" class="view" hidden>
-    <header class="topbar"><h1>💬 Ask your books</h1></header>
+    <header class="topbar"><h1><svg class="ic" aria-hidden="true"><use href="#i-message-circle"/></svg> Ask your books</h1></header>
 
     <!-- Page 1: choose resources (opened from the chat page's button) -->
     <div id="ask-pick" hidden>
     <div class="panel">
       <div class="ask-pick-head">
-        <strong>📚 Choose resources</strong>
-        <button id="ask-clear" class="mini-btn" hidden>🧹 Clear all</button>
+        <strong><svg class="ic" aria-hidden="true"><use href="#i-library-big"/></svg> Choose resources</strong>
+        <button id="ask-clear" class="mini-btn" hidden><svg class="ic" aria-hidden="true"><use href="#i-eraser"/></svg> Clear all</button>
       </div>
       <p class="muted">
         Tick the books you want answers from — your own, a specialty library, or both.
         Every answer cites the book and page it came from.
       </p>
 
-      <p class="ask-heading">🏥 Specialty library</p>
+      <p class="ask-heading"><svg class="ic" aria-hidden="true"><use href="#i-hospital"/></svg> Specialty library</p>
       <select id="ask-specialty" class="ask-select"></select>
       <div class="ask-spec-actions">
-        <button id="ask-tick-all" class="mini-btn">☑️ Tick all</button>
-        <button id="ask-suggest" class="mini-btn">💡 Suggest a book</button>
+        <button id="ask-tick-all" class="mini-btn"><svg class="ic" aria-hidden="true"><use href="#i-square-check"/></svg> Tick all</button>
+        <button id="ask-suggest" class="mini-btn"><svg class="ic" aria-hidden="true"><use href="#i-lightbulb"/></svg> Suggest a book</button>
       </div>
       <div id="ask-suggest-form" class="suggest-form" hidden>
         <input id="ask-suggest-title" type="text" maxlength="200" placeholder="Book title and author" />
@@ -213,14 +215,14 @@
       </div>
       <div id="ask-shared-books" class="check-list"></div>
 
-      <p class="ask-heading">📚 My books</p>
+      <p class="ask-heading"><svg class="ic" aria-hidden="true"><use href="#i-library-big"/></svg> My books</p>
       <div id="ask-my-books" class="check-list"></div>
 
     </div>
 
     <!-- Admin only: add specialties and their books. Hidden for everyone else. -->
     <div id="ask-admin" class="panel" hidden>
-      <p><strong>🛠 Manage specialty libraries</strong> <span class="muted">(admin only)</span></p>
+      <p><strong><svg class="ic" aria-hidden="true"><use href="#i-wrench"/></svg> Manage specialty libraries</strong> <span class="muted">(admin only)</span></p>
       <div class="name-editor">
         <input id="ask-admin-new-spec" type="text" maxlength="40" placeholder="New specialty, e.g. Psychiatry"
                autocomplete="off" enterkeyhint="done" />
@@ -228,8 +230,8 @@
       </div>
       <p id="ask-admin-target" class="muted"></p>
       <div class="flash-review-row" style="margin-top:8px;">
-        <button id="ask-admin-upload" class="btn">⬆️ Upload a PDF</button>
-        <button id="ask-admin-publish" class="btn secondary">📚 Add from my shelf</button>
+        <button id="ask-admin-upload" class="btn"><svg class="ic" aria-hidden="true"><use href="#i-upload"/></svg> Upload a PDF</button>
+        <button id="ask-admin-publish" class="btn secondary"><svg class="ic" aria-hidden="true"><use href="#i-library-big"/></svg> Add from my shelf</button>
         <button id="ask-admin-del-spec" class="btn secondary">Remove specialty</button>
       </div>
       <input id="ask-admin-file" type="file" accept="application/pdf" hidden />
@@ -241,19 +243,19 @@
     </div>
 
     <div class="ask-pick-bar">
-      <button id="ask-pick-done" class="btn ask-send-btn">✅ Done</button>
+      <button id="ask-pick-done" class="btn ask-send-btn"><svg class="ic" aria-hidden="true"><use href="#i-circle-check"/></svg> Done</button>
     </div>
     </div>
 
     <!-- Page 2: questions and answers only -->
     <div id="ask-chat">
     <div class="ask-res-bar">
-      <button id="ask-choose" class="btn secondary ask-choose-btn">📚 Choose resources</button>
+      <button id="ask-choose" class="btn secondary ask-choose-btn"><svg class="ic" aria-hidden="true"><use href="#i-library-big"/></svg> Choose resources</button>
       <p id="ask-res-list" class="ask-res-list"></p>
     </div>
 
     <div id="ask-topics" class="panel" hidden>
-      <div class="reader-source-head"><strong>🕘 Saved topics</strong><button id="ask-topics-close" class="mini-btn">✕</button></div>
+      <div class="reader-source-head"><strong><svg class="ic" aria-hidden="true"><use href="#i-history"/></svg> Saved topics</strong><button id="ask-topics-close" class="mini-btn"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button></div>
       <div id="ask-topics-list"></div>
     </div>
 
@@ -261,13 +263,13 @@
 
     <div class="panel ask-compose">
       <p id="ask-selected" class="muted ask-topic-note" hidden></p>
-      <p id="ask-topic-note" class="muted ask-topic-note" hidden>Follow-up questions continue this topic. Tap 🆕 New topic to start fresh.</p>
+      <p id="ask-topic-note" class="muted ask-topic-note" hidden>Follow-up questions continue this topic. Tap <svg class="ic" aria-hidden="true"><use href="#i-square-plus"/></svg> New topic to start fresh.</p>
       <textarea id="ask-question" class="compose-box" rows="4" dir="auto" placeholder="Type your question… e.g. First-line treatment for bipolar depression?"></textarea>
       <button id="ask-send" class="btn ask-send-btn" disabled>Ask</button>
       <div class="ask-compose-tools">
-        <button id="ask-new" class="mini-btn">🆕 New topic</button>
-        <button id="ask-history" class="mini-btn">🕘 Saved topics</button>
-        <button id="ask-topic-pdf" class="mini-btn" hidden>📄 Topic as PDF</button>
+        <button id="ask-new" class="mini-btn"><svg class="ic" aria-hidden="true"><use href="#i-square-plus"/></svg> New topic</button>
+        <button id="ask-history" class="mini-btn"><svg class="ic" aria-hidden="true"><use href="#i-history"/></svg> Saved topics</button>
+        <button id="ask-topic-pdf" class="mini-btn" hidden><svg class="ic" aria-hidden="true"><use href="#i-file-text"/></svg> Topic as PDF</button>
       </div>
     </div>
     </div>
@@ -275,17 +277,17 @@
 
   <!-- ============ BOOKMARKS ============ -->
   <section id="view-bookmarks" class="view" hidden>
-    <header class="topbar"><h1>🔖 Bookmarks</h1></header>
+    <header class="topbar"><h1><svg class="ic" aria-hidden="true"><use href="#i-bookmark"/></svg> Bookmarks</h1></header>
     <div id="bookmarks-empty" class="empty-state" hidden>
       <p>No bookmarks yet.</p>
-      <p class="muted">Open a book's reader and tap 🔖 Bookmark this page.</p>
+      <p class="muted">Open a book's reader and tap <svg class="ic" aria-hidden="true"><use href="#i-bookmark"/></svg> Bookmark this page.</p>
     </div>
     <div id="bookmarks-list" class="bookmarks-list"></div>
   </section>
 
   <!-- ============ REQUEST A BOOK ============ -->
   <section id="view-request-book" class="view" hidden>
-    <header class="topbar"><h1>📚 Request a Book</h1></header>
+    <header class="topbar"><h1><svg class="ic" aria-hidden="true"><use href="#i-library-big"/></svg> Request a Book</h1></header>
     <div class="panel">
       <p class="muted">
         Don't have a book yet? Send its URL and the admin will check it, quote a price, and once you
@@ -319,23 +321,23 @@
     </header>
     <div class="action-grid">
       <button class="action-btn" data-action="chapters">
-        <span class="icon">📖</span><span>Divide into chapters</span>
+        <span class="icon"><svg class="ic" aria-hidden="true"><use href="#i-book-open"/></svg></span><span>Divide into chapters</span>
         <span id="chapters-badge" class="badge"></span>
       </button>
       <button class="action-btn" data-action="read">
-        <span class="icon">🔎</span><span>Read the book</span>
+        <span class="icon"><svg class="ic" aria-hidden="true"><use href="#i-search"/></svg></span><span>Read the book</span>
       </button>
       <button class="action-btn" data-action="summarize">
-        <span class="icon">📝</span><span>Summarize</span>
+        <span class="icon"><svg class="ic" aria-hidden="true"><use href="#i-notebook-pen"/></svg></span><span>Summarize</span>
       </button>
       <button class="action-btn" data-action="ask">
-        <span class="icon">💬</span><span>Ask questions using AI</span>
+        <span class="icon"><svg class="ic" aria-hidden="true"><use href="#i-message-circle"/></svg></span><span>Ask questions using AI</span>
       </button>
       <button class="action-btn" data-action="quiz">
-        <span class="icon">❓</span><span>Create a quiz</span>
+        <span class="icon"><svg class="ic" aria-hidden="true"><use href="#i-circle-help"/></svg></span><span>Create a quiz</span>
       </button>
       <button class="action-btn" data-action="flashcards">
-        <span class="icon">🗂</span><span>Flashcards</span>
+        <span class="icon"><svg class="ic" aria-hidden="true"><use href="#i-layers"/></svg></span><span>Flashcards</span>
       </button>
     </div>
     <div id="book-panel" class="panel" hidden></div>
@@ -343,41 +345,41 @@
 
   <!-- ============ WEB BROWSER (admin) ============ -->
   <section id="view-web" class="view" hidden>
-    <header class="topbar"><h1>🌐 Browser</h1></header>
+    <header class="topbar"><h1><svg class="ic" aria-hidden="true"><use href="#i-globe"/></svg> Browser</h1></header>
     <div class="web-urlbar">
       <input id="web-url" class="drug-input" type="url" autocomplete="off" enterkeyhint="go" />
       <button id="web-go" class="btn">Go</button>
     </div>
     <div class="web-tools">
-      <button class="mini-btn" data-web="back">◀ Back</button>
-      <button class="mini-btn" data-web="reload">⟳ Reload</button>
-      <button class="mini-btn" data-web="up">▲</button>
-      <button class="mini-btn" data-web="down">▼</button>
-      <button class="mini-btn" data-web="refresh" title="Refresh the picture">🖼</button>
+      <button class="mini-btn" data-web="back"><svg class="ic" aria-hidden="true"><use href="#i-chevron-left"/></svg> Back</button>
+      <button class="mini-btn" data-web="reload"><svg class="ic" aria-hidden="true"><use href="#i-rotate-cw"/></svg> Reload</button>
+      <button class="mini-btn" data-web="up"><svg class="ic" aria-hidden="true"><use href="#i-chevron-up"/></svg></button>
+      <button class="mini-btn" data-web="down"><svg class="ic" aria-hidden="true"><use href="#i-chevron-down"/></svg></button>
+      <button class="mini-btn" data-web="refresh" title="Refresh the picture"><svg class="ic" aria-hidden="true"><use href="#i-image"/></svg></button>
     </div>
     <div id="web-tabs" class="web-tabs" hidden></div>
     <div class="web-screen">
       <img id="web-shot" alt="Website" draggable="false" />
-      <div id="web-busy" class="web-busy" hidden>⏳</div>
+      <div id="web-busy" class="web-busy" hidden><svg class="ic" aria-hidden="true"><use href="#i-hourglass"/></svg></div>
     </div>
     <div class="web-kbd">
       <input id="web-live" class="drug-input" type="text" autocomplete="off" autocapitalize="off"
              autocorrect="off" spellcheck="false" enterkeyhint="go"
              placeholder="Tap a field on the page, then type here" />
-      <button class="mini-btn" data-key="Enter" title="Enter">↵</button>
-      <button class="mini-btn" data-key="Tab" title="Next field">⇥</button>
+      <button class="mini-btn" data-key="Enter" title="Enter"><svg class="ic" aria-hidden="true"><use href="#i-corner-down-left"/></svg></button>
+      <button class="mini-btn" data-key="Tab" title="Next field"><svg class="ic" aria-hidden="true"><use href="#i-arrow-right-to-line"/></svg></button>
     </div>
     <p class="muted web-hint">Tap to click, swipe to scroll. Tap a field on the page and type: every letter goes
       straight into it. Password fields are hidden as you type and stored encrypted.</p>
     <div class="panel">
       <p class="muted">Recorded so far: <strong id="web-steps">0</strong> steps. They are replayed to log in
-        again when the saved login expires. Passwords typed with 🔒 are stored encrypted. If you browsed
+        again when the saved login expires. Passwords typed with <svg class="ic" aria-hidden="true"><use href="#i-lock"/></svg> are stored encrypted. If you browsed
         around first, open the login page and tap “Start recording here”.</p>
       <div class="ask-compose-tools">
-        <button id="web-rec-restart" class="mini-btn">⏺ Start recording here</button>
+        <button id="web-rec-restart" class="mini-btn"><svg class="ic" aria-hidden="true"><use href="#i-circle-dot"/></svg> Start recording here</button>
       </div>
       <input id="web-save-name" class="drug-input web-save-name" type="text" maxlength="80" placeholder="Name, e.g. PubMed" />
-      <button id="web-save" class="btn ask-send-btn">💾 Save login & close</button>
+      <button id="web-save" class="btn ask-send-btn"><svg class="ic" aria-hidden="true"><use href="#i-save"/></svg> Save login & close</button>
     </div>
   </section>
 
@@ -392,12 +394,12 @@
       <button id="reader-zoom-out" class="tool-btn" title="Zoom out">−</button>
       <span id="reader-zoom-label" class="muted">100%</span>
       <button id="reader-zoom-in" class="tool-btn" title="Zoom in">+</button>
-      <button id="reader-goto" class="tool-btn" title="Jump to page">🔢 Go to page</button>
-      <button id="reader-bookmark" class="tool-btn" title="Bookmark this page">🔖 Bookmark</button>
-      <button id="reader-notes" class="tool-btn" title="Notes on this page">📝 Notes</button>
+      <button id="reader-goto" class="tool-btn" title="Jump to page"><svg class="ic" aria-hidden="true"><use href="#i-hash"/></svg> Go to page</button>
+      <button id="reader-bookmark" class="tool-btn" title="Bookmark this page"><svg class="ic" aria-hidden="true"><use href="#i-bookmark"/></svg> Bookmark</button>
+      <button id="reader-notes" class="tool-btn" title="Notes on this page"><svg class="ic" aria-hidden="true"><use href="#i-notebook-pen"/></svg> Notes</button>
     </div>
     <div id="reader-source" class="reader-source" hidden>
-      <div class="reader-source-head"><strong id="reader-source-label">📌 Source</strong><button id="reader-source-close" class="mini-btn">✕</button></div>
+      <div class="reader-source-head"><strong id="reader-source-label"><svg class="ic" aria-hidden="true"><use href="#i-pin"/></svg> Source</strong><button id="reader-source-close" class="mini-btn"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button></div>
       <div id="reader-source-text" class="rich"></div>
     </div>
     <div id="reader-goto-row" class="name-editor" hidden>
@@ -445,11 +447,11 @@
     a page being read.
   -->
   <nav id="tabbar" class="tabbar">
-    <button class="tab is-active" data-tab="view-shelf"><span>📚</span><small>Shelf</small></button>
-    <button class="tab" data-tab="view-ask"><span>💬</span><small>Ask your books</small></button>
-    <button class="tab" data-tab="view-drugs"><span>💊</span><small>Drugs</small></button>
+    <button class="tab is-active" data-tab="view-shelf"><span><svg class="ic" aria-hidden="true"><use href="#i-library-big"/></svg></span><small>Shelf</small></button>
+    <button class="tab" data-tab="view-ask"><span><svg class="ic" aria-hidden="true"><use href="#i-message-circle"/></svg></span><small>Ask your books</small></button>
+    <button class="tab" data-tab="view-drugs"><span><svg class="ic" aria-hidden="true"><use href="#i-pill"/></svg></span><small>Drugs</small></button>
   </nav>
 
-  <script src="app.js?v=29"></script>
+  <script src="app.js?v=30"></script>
 </body>
 </html>

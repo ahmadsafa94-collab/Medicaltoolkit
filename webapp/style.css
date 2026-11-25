@@ -760,3 +760,29 @@ body.has-tabbar .fab { bottom: calc(76px + env(safe-area-inset-bottom, 0px)); }
 }
 @keyframes web-tab-pulse { 50% { transform: scale(1.35); } }
 .lookup-web { margin-top: 12px; }
+
+/* ---------- Icons (Lucide line icons from the sprite in index.html) ----------
+   Drawn in the surrounding text colour, so they follow the Sky / Midnight theme. */
+.ic { width: 1.15em; height: 1.15em; vertical-align: -0.22em; flex-shrink: 0; overflow: visible;
+  fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.ic-fill { fill: currentColor; }
+.ic-on { color: var(--ok, #2fb36d); fill: currentColor; }
+.topbar h1 .ic { color: var(--button); width: 1em; height: 1em; vertical-align: -0.12em; margin-right: 2px; }
+.tabbar .tab span .ic { width: 23px; height: 23px; vertical-align: 0; }
+.action-btn .icon { display: inline-flex; color: var(--button); }
+.action-btn .icon .ic { width: 22px; height: 22px; vertical-align: 0; }
+.fab { display: flex; align-items: center; justify-content: center; }
+.fab .ic { width: 28px; height: 28px; stroke-width: 2.5; vertical-align: 0; }
+.cover-ic { width: 42%; height: auto; aspect-ratio: 1; opacity: 0.92; stroke-width: 1.6; }
+.bookmark-cover .cover-ic, .cover-ph .cover-ic { width: 18px; height: 18px; }
+.big-ic { width: 54px; height: 54px; color: var(--button); stroke-width: 1.6; }
+.web-row-icon { color: var(--button); }
+.web-busy .ic { width: 34px; height: 34px; color: #fff; }
+.spinner-line .ic { color: var(--button); animation: ic-turn 1.6s ease-in-out infinite; }
+@keyframes ic-turn { 0%, 35% { transform: rotate(0); } 50%, 85% { transform: rotate(180deg); } 100% { transform: rotate(360deg); } }
+.spinner-line .ic { transform-box: fill-box; transform-origin: center; }
+.subtab .ic, .mini-btn .ic, .link-btn .ic, .tool-btn .ic, .btn .ic { margin-right: 1px; }
+.mini-btn .ic:only-child { margin-right: 0; }
+.flash-rate-btn .ic { width: 1.25em; height: 1.25em; }
+.quiz-summary-row .ic { color: var(--button); }
+@media (prefers-reduced-motion: reduce) { .spinner-line .ic { animation: none; } }
