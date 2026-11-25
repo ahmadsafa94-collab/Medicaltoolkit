@@ -9,7 +9,7 @@ Colours: sky blue gradient #5DB6F7 -> #1C74D2, navy #0D3B66, white.
 
 ## Welcome animation
 
-`welcome.mp4` (640x640, 6 s, loops) is what the bot sends on /start, as a Telegram
+`welcome.mp4` (640x640, 4 s at 1.5x speed, loops) is what the bot sends on /start, as a Telegram
 animation with the welcome text as its caption. The E3 case opens, and a stack of
 books, a capsule and a stethoscope jump out and land in front of it; the lid closes
 and "Welcome to MEDIC TOOLKIT" appears. `welcome.gif` is the same animation as a
