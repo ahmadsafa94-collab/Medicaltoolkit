@@ -24,3 +24,5 @@ screen). BotFather requires a 512x512 canvas (viewBox 0 0 512 512) with a single
 and "AI" are cut out), since Telegram draws it as a placeholder shape.
 Colours that match the app: background #F2F8FE (light) / #0C1524 (dark),
 header #BFE0FB (light) / #12223B (dark).
+`medic-toolkit-loading-icon-dark.svg` is the same icon in the dark theme's
+lighter blue (#6DB3FF), for BotFather's Dark Mode tab.
