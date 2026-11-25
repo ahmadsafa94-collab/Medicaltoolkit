@@ -869,3 +869,12 @@ html[data-theme="midnight"] .web-notice { background: #3a2a10; color: #ffd9a0; b
    it may break anywhere, and the shelf never scrolls sideways. */
 .book-title-label { overflow-wrap: anywhere; word-break: break-word; }
 #view-shelf { overflow-x: hidden; }
+
+/* ---------- Recommended books (admin) ---------- */
+.rec-books { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--border); }
+.rec-books .ask-select { margin: 6px 0 4px; width: 100%; }
+.rec-row { align-items: center; }
+.rec-num { width: 20px; flex-shrink: 0; color: var(--hint); font-size: 12px; font-weight: 600; }
+.rec-row .check-title strong { font-weight: 600; }
+.rec-row .check-title .muted { font-size: 12px; }
+.rec-have { flex-shrink: 0; font-size: 12px; font-weight: 600; color: var(--ok, #2fb36d); }

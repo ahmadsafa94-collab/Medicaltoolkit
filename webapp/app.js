@@ -3482,6 +3482,7 @@ function renderAskLibrary() {
 
   const admin = document.getElementById("ask-admin");
   admin.hidden = !askLib.is_admin;
+  if (askLib.is_admin) renderRecommended();
   if (askLib.is_admin) {
     document.getElementById("ask-admin-target").textContent = askSpecialty
       ? `Books you add go into: ${askSpecialty}`
@@ -3731,8 +3732,8 @@ async function askAdminCall(path, opts, { confirmText } = {}) {
   loadAskLibrary({ quiet: true });
 }
 
-function askAdminUpload(file) {
-  if (!askSpecialty) return;
+function askAdminUpload(file, { specialty = askSpecialty, title } = {}) {
+  if (!specialty) return;
   if (file.size > maxUploadMb * 1024 * 1024) {
     alertMsg(`That file is over the ${maxUploadMb}MB limit (${(file.size / 1024 / 1024).toFixed(1)}MB).`);
     return;
@@ -3744,7 +3745,8 @@ function askAdminUpload(file) {
   wrap.hidden = false;
   uploadBtn.disabled = true;
   bar.style.width = "0%";
-  status.textContent = `Uploading "${file.name}" to ${askSpecialty}…`;
+  status.textContent = `Uploading "${title || file.name}" to ${specialty}…`;
+  wrap.scrollIntoView({ block: "nearest", behavior: "smooth" });
 
   const done = (msg) => {
     wrap.hidden = true;
@@ -3754,8 +3756,8 @@ function askAdminUpload(file) {
   };
   chunkedUpload(file, {
     target: "shared",
-    specialty: askSpecialty,
-    title: file.name.replace(/\.pdf$/i, "").replace(/_/g, " "),
+    specialty,
+    title: title || file.name.replace(/\.pdf$/i, "").replace(/_/g, " "),
     onProgress: (f, text) => {
       bar.style.width = Math.round(f * 100) + "%";
       status.textContent = text;
@@ -3763,6 +3765,73 @@ function askAdminUpload(file) {
   })
     .then(() => done())
     .catch((e) => done(e.message === "Network error" ? "Upload failed -- check your connection and try again." : e.message));
+}
+
+// --- recommended books (admin): the standard references per specialty ---
+
+let recSpecialty = null;
+let recPending = null;  // {specialty, title} waiting for its PDF
+
+function recBookInLibrary(specialty, rec) {
+  const spec = (askLib.specialties || []).find((s) => s.name.toLowerCase() === specialty.toLowerCase());
+  if (!spec) return false;
+  const words = rec.match.map((w) => w.toLowerCase());
+  return spec.books.some((b) => {
+    const t = (b.title || "").toLowerCase().replace(/[_-]+/g, " ");
+    return words.every((w) => t.includes(w));
+  });
+}
+
+function renderRecommended() {
+  const rec = askLib && askLib.recommended;
+  const box = document.getElementById("rec-list");
+  const select = document.getElementById("rec-specialty");
+  if (!rec) return;
+  const names = Object.keys(rec);
+  if (!names.includes(recSpecialty)) {
+    const current = names.find((n) => askSpecialty && n.toLowerCase() === askSpecialty.toLowerCase());
+    recSpecialty = current || names[0];
+  }
+  select.innerHTML = names
+    .map((n) => {
+      const have = rec[n].filter((r) => recBookInLibrary(n, r)).length;
+      return `<option value="${escapeHtml(n)}" ${n === recSpecialty ? "selected" : ""}>${escapeHtml(n)} (${have}/${rec[n].length} added)</option>`;
+    })
+    .join("");
+  box.innerHTML = rec[recSpecialty]
+    .map((r, i) => {
+      const have = recBookInLibrary(recSpecialty, r);
+      return `<div class="check-row rec-row"><span class="rec-num">${i + 1}</span>` +
+        `<span class="check-title"><strong>${escapeHtml(r.title)}</strong><br><span class="muted">${escapeHtml(r.by)}</span></span>` +
+        (have
+          ? `<span class="rec-have">${ic("circle-check")} In library</span>`
+          : `<button class="mini-btn" data-rec="${i}">${ic("upload")} Add PDF</button>`) +
+        `</div>`;
+    })
+    .join("");
+}
+
+async function recUpload(file) {
+  const pending = recPending;
+  recPending = null;
+  if (!pending) return;
+  // The specialty is created first if the library doesn't have it yet.
+  const existing = (askLib.specialties || []).find((s) => s.name.toLowerCase() === pending.specialty.toLowerCase());
+  let specialty = existing && existing.name;
+  if (!specialty) {
+    try {
+      const data = await api("/api/shared/specialties", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: pending.specialty }),
+      });
+      specialty = (data && data.name) || pending.specialty;
+    } catch (e) {
+      return alertMsg(e.message);
+    }
+  }
+  askSpecialty = specialty;
+  askAdminUpload(file, { specialty, title: pending.title });
 }
 
 function renderAskAdminShelf() {
@@ -4090,6 +4159,23 @@ function wireAskTab() {
     const file = e.target.files[0];
     e.target.value = "";
     if (file) askAdminUpload(file);
+  });
+  document.getElementById("rec-specialty").addEventListener("change", (e) => {
+    recSpecialty = e.target.value;
+    renderRecommended();
+  });
+  document.getElementById("rec-list").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-rec]");
+    if (!b) return;
+    const r = askLib.recommended[recSpecialty][parseInt(b.dataset.rec, 10)];
+    recPending = { specialty: recSpecialty, title: r.title };
+    document.getElementById("rec-file").click();
+  });
+  document.getElementById("rec-file").addEventListener("change", (e) => {
+    const file = e.target.files[0];
+    e.target.value = "";
+    if (file) recUpload(file);
+    else recPending = null;
   });
   document.getElementById("ask-admin-publish").addEventListener("click", () => {
     const box = document.getElementById("ask-admin-shelf");

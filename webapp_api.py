@@ -59,6 +59,7 @@ import library
 import notes
 import pdf_export
 import reader_tools
+import recommended_books
 import pdf_qa
 import quiz_ai
 import shared_library
@@ -2197,6 +2198,8 @@ async def ask_library(request: Request):
             "my_books": my_books,
             "specialties": _shared_catalog(),
             "is_admin": subscriptions.is_admin(user["id"]),
+            # Admin only: the standard books per specialty, to upload into the library.
+            "recommended": recommended_books.RECOMMENDED if subscriptions.is_admin(user["id"]) else None,
             "max_books": pdf_qa.MAX_BOOKS_PER_QUESTION,
             "max_upload_mb": MAX_SHELF_UPLOAD_BYTES // 1024 // 1024,
         }
