@@ -1,0 +1,291 @@
+"""
+Book PDFs in a Railway Storage Bucket (S3-compatible), with the volume as a
+cache.
+
+Every book file is uploaded to the bucket under its path relative to
+STORAGE_DIR ("123/library/x.pdf", "_shared/books/sb1.pdf"), so the bucket is
+the lasting copy. The volume keeps the books in use: when the cached books
+pass CACHE_LIMIT_BYTES, the least recently used ones (already safely in the
+bucket, not opened for a while) are removed from the volume. Opening one of
+those again downloads it back first -- ensure_local() is called wherever a
+book's PDF is read, always from a worker thread, never the event loop.
+
+Off (everything stays on the volume, as before) unless BOOKS_BUCKET is set.
+Variables, referenced from the bucket service in Railway:
+  BOOKS_BUCKET, BOOKS_BUCKET_ENDPOINT, BOOKS_BUCKET_REGION,
+  BOOKS_BUCKET_ACCESS_KEY_ID, BOOKS_BUCKET_SECRET_ACCESS_KEY
+"""
+
+import json
+import logging
+import os
+import threading
+import time
+
+from config import STORAGE_DIR
+
+logger = logging.getLogger(__name__)
+
+BUCKET = os.environ.get("BOOKS_BUCKET", "").strip()
+CACHE_LIMIT_BYTES = int(float(os.environ.get("BOOKS_CACHE_GB", "3")) * 1024**3)
+_KEEP_RECENT_SECONDS = 30 * 60   # a book opened in the last half hour is never evicted
+_STATE_PATH = os.path.join(STORAGE_DIR, "_admin", "book_store.json")
+
+_client = None
+_client_lock = threading.Lock()
+_state_lock = threading.RLock()
+_path_locks: dict[str, threading.Lock] = {}
+_state: dict | None = None   # {"uploaded": {key: size}, "used": {key: ts}}
+
+
+def enabled() -> bool:
+    return bool(BUCKET)
+
+
+def _s3():
+    global _client
+    with _client_lock:
+        if _client is None:
+            import boto3
+            from botocore.config import Config
+
+            _client = boto3.client(
+                "s3",
+                endpoint_url=os.environ.get("BOOKS_BUCKET_ENDPOINT") or None,
+                region_name=os.environ.get("BOOKS_BUCKET_REGION") or "auto",
+                aws_access_key_id=os.environ.get("BOOKS_BUCKET_ACCESS_KEY_ID"),
+                aws_secret_access_key=os.environ.get("BOOKS_BUCKET_SECRET_ACCESS_KEY"),
+                config=Config(
+                    retries={"max_attempts": 5, "mode": "standard"},
+                    s3={"addressing_style": os.environ.get("BOOKS_BUCKET_URL_STYLE") or "virtual"},
+                ),
+            )
+        return _client
+
+
+def key_for(path: str) -> str | None:
+    """The bucket key of a book file, or None for a file outside STORAGE_DIR (e.g. a chat upload's temp copy)."""
+    root = os.path.realpath(STORAGE_DIR)
+    full = os.path.realpath(path)
+    if not full.startswith(root + os.sep):
+        return None
+    return os.path.relpath(full, root).replace(os.sep, "/")
+
+
+# --- state: what's in the bucket, and when each book was last used -------
+
+def _load_state() -> dict:
+    global _state
+    with _state_lock:
+        if _state is None:
+            try:
+                with open(_STATE_PATH) as f:
+                    _state = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                _state = {}
+            _state.setdefault("uploaded", {})
+            _state.setdefault("used", {})
+        return _state
+
+
+def _save_state() -> None:
+    with _state_lock:
+        os.makedirs(os.path.dirname(_STATE_PATH), exist_ok=True)
+        tmp = f"{_STATE_PATH}.{os.getpid()}.{threading.get_ident()}.tmp"
+        with open(tmp, "w") as f:
+            json.dump(_load_state(), f)
+        os.replace(tmp, _STATE_PATH)
+
+
+def _mark_used(key: str) -> None:
+    with _state_lock:
+        st = _load_state()
+        now = time.time()
+        # Written at most every few minutes per book: this runs on every read.
+        if now - st["used"].get(key, 0) > 300:
+            st["used"][key] = now
+            _save_state()
+
+
+# --- the three operations ---------------------------------------------------
+
+def _lock_for(key: str) -> threading.Lock:
+    with _state_lock:
+        return _path_locks.setdefault(key, threading.Lock())
+
+
+def ensure_local(path: str) -> str:
+    """
+    Make sure a book's PDF is on the volume, downloading it from the bucket if
+    it was evicted. Returns the path. Blocking: call from a worker thread.
+    """
+    if not path:
+        return path
+    key = key_for(path)
+    if key is None:
+        return path
+    if os.path.exists(path):
+        if enabled():
+            _mark_used(key)
+        return path
+    if not enabled():
+        return path  # the caller reports the missing file as before
+    with _lock_for(key):
+        if not os.path.exists(path):  # another thread may have fetched it meanwhile
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = f"{path}.{threading.get_ident()}.download"
+            started = time.time()
+            try:
+                _s3().download_file(BUCKET, key, tmp)
+                os.replace(tmp, path)
+            except Exception as e:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+                logger.warning("Couldn't fetch %s from the bucket: %r", key, e)
+                return path  # caller sees the file missing and says so
+            logger.info("Fetched %s from the bucket (%.1f MB in %.1f s)", key,
+                        os.path.getsize(path) / 2**20, time.time() - started)
+            threading.Thread(target=evict, daemon=True, name="book-evict").start()
+    _mark_used(key)
+    return path
+
+
+def upload(path: str) -> bool:
+    """Copy a book's PDF into the bucket (after it is added). Blocking. True when it is safely there."""
+    if not enabled():
+        return False
+    key = key_for(path)
+    if key is None or not os.path.exists(path):
+        return False
+    size = os.path.getsize(path)
+    try:
+        _s3().upload_file(path, BUCKET, key, ExtraArgs={"ContentType": "application/pdf"})
+    except Exception as e:
+        logger.warning("Couldn't upload %s to the bucket: %r", key, e)
+        return False
+    with _state_lock:
+        st = _load_state()
+        st["uploaded"][key] = size
+        st["used"][key] = time.time()
+        _save_state()
+    return True
+
+
+def delete(path: str) -> None:
+    """A book was removed: its bucket copy goes too. Blocking."""
+    key = key_for(path or "")
+    if not enabled() or key is None:
+        return
+    try:
+        _s3().delete_object(Bucket=BUCKET, Key=key)
+    except Exception as e:
+        logger.warning("Couldn't delete %s from the bucket: %r", key, e)
+    with _state_lock:
+        st = _load_state()
+        st["uploaded"].pop(key, None)
+        st["used"].pop(key, None)
+        _save_state()
+
+
+def delete_async(path: str) -> None:
+    if enabled():
+        threading.Thread(target=delete, args=(path,), daemon=True, name="book-delete").start()
+
+
+def upload_async(path: str) -> None:
+    """Upload in the background (a new book is usable at once from the volume meanwhile)."""
+    if enabled():
+        threading.Thread(target=lambda: (upload(path), evict()), daemon=True, name="book-upload").start()
+
+
+# --- keeping the volume within its share ------------------------------------
+
+def evict() -> int:
+    """Remove least-recently-used books (already in the bucket) from the volume past CACHE_LIMIT_BYTES. Returns bytes freed."""
+    if not enabled():
+        return 0
+    root = os.path.realpath(STORAGE_DIR)
+    with _state_lock:
+        st = _load_state()
+        cached = []
+        for key, size in st["uploaded"].items():
+            path = os.path.join(root, key)
+            if os.path.exists(path):
+                cached.append((st["used"].get(key, 0), key, path, os.path.getsize(path)))
+    total = sum(c[3] for c in cached)
+    freed = 0
+    now = time.time()
+    for used, key, path, size in sorted(cached):
+        if total - freed <= CACHE_LIMIT_BYTES:
+            break
+        if now - used < _KEEP_RECENT_SECONDS:
+            continue
+        with _lock_for(key):
+            try:
+                os.remove(path)
+                freed += size
+            except OSError:
+                pass
+    if freed:
+        logger.info("Book cache: freed %.0f MB on the volume (books stay in the bucket)", freed / 2**20)
+    return freed
+
+
+def sync_existing(book_paths: list[str]) -> None:
+    """Upload every book not yet in the bucket (the first run moves the existing library), then evict. Blocking."""
+    if not enabled():
+        return
+    st = _load_state()
+    done = 0
+    for path in book_paths:
+        key = key_for(path)
+        if key is None or key in st["uploaded"] or not os.path.exists(path):
+            continue
+        if upload(path):
+            done += 1
+    if done:
+        logger.info("Book store: %d existing book(s) copied to the bucket", done)
+    evict()
+
+
+def all_book_paths() -> list[str]:
+    """Every book PDF on the volume: each user's library and the specialty library."""
+    import glob
+
+    return sorted(set(
+        glob.glob(os.path.join(STORAGE_DIR, "*", "library", "*.pdf"))
+        + glob.glob(os.path.join(STORAGE_DIR, "_shared", "books", "*.pdf"))
+    ))
+
+
+def start_background_sync() -> None:
+    """At startup: copy any book not yet in the bucket (the first run moves the whole library), then trim the cache."""
+    if not enabled():
+        logger.info("Book store: no bucket configured (BOOKS_BUCKET); books stay on the volume only")
+        return
+
+    def run():
+        try:
+            sync_existing(all_book_paths())
+            logger.info("Book store: %s", status())
+        except Exception:
+            logger.exception("Book store background sync failed")
+
+    threading.Thread(target=run, daemon=True, name="book-sync").start()
+
+
+def status() -> dict:
+    """For the admin: what's in the bucket and what's on the volume."""
+    st = _load_state()
+    root = os.path.realpath(STORAGE_DIR)
+    in_bucket = sum(st["uploaded"].values())
+    local = sum(os.path.getsize(os.path.join(root, k)) for k in st["uploaded"] if os.path.exists(os.path.join(root, k)))
+    return {
+        "enabled": enabled(),
+        "books_in_bucket": len(st["uploaded"]),
+        "bucket_bytes": in_bucket,
+        "cached_bytes": local,
+        "cache_limit_bytes": CACHE_LIMIT_BYTES,
+    }

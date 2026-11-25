@@ -19,6 +19,7 @@ Stored as one small JSON file under STORAGE_DIR/_shared/. Book ids carry an
 both kinds share pdf_qa's index directory and the mini app's job table.
 """
 
+import book_store
 import json
 import os
 import tempfile
@@ -201,7 +202,8 @@ def remove_book(book_id: str) -> dict | None:
     try:
         os.remove(book["pdf_path"])
     except OSError:
-        pass
+        pass  # evicted to the bucket, or already gone
+    book_store.delete_async(book["pdf_path"])
     return book
 
 

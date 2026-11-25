@@ -27,6 +27,7 @@ app's fetch calls that kick these off return immediately rather than
 holding one HTTP request open for however long a multi-minute job takes.
 """
 
+import book_store
 import asyncio
 import contextvars
 import logging
@@ -472,6 +473,7 @@ async def _receive_upload(request: Request, user_id: int):
     )
     book_title = (form.get("title") or "").strip() or os.path.splitext(filename)[0] or "Untitled book"
     book_id = library.add_book(user_id, book_title, dest_path, page_count, source="shelf")
+    book_store.upload_async(dest_path)  # the lasting copy, in the bucket
     return JSONResponse(_public_book(book_id, library.get_book(user_id, book_id)))
 
 
@@ -571,6 +573,7 @@ async def get_book_file(request: Request):
     book_id = request.path_params["book_id"]
     book = _book_or_404(user["id"], book_id)
     path = book["pdf_path"]
+    await asyncio.to_thread(book_store.ensure_local, path)  # back from the bucket if it was evicted
     if not os.path.exists(path):
         raise ApiError(status_code=404, detail="The book file is missing on the server.")
 
@@ -2373,6 +2376,7 @@ async def shared_upload(request: Request):
         specialty = shared_library.clean_specialty_name(form.get("specialty"))
         title = " ".join(str(form.get("title") or "").split())[:200] or os.path.splitext(filename)[0] or "Untitled book"
         book_id = shared_library.add_book(specialty, title, dest_path, page_count, added_by=user["id"])
+        book_store.upload_async(dest_path)  # the lasting copy, in the bucket
     except shared_library.SharedLibraryError as e:
         _safe_remove(dest_path)
         raise _shared_error(e)
@@ -2389,6 +2393,7 @@ async def shared_publish(request: Request):
         specialty = shared_library.clean_specialty_name(body.get("specialty"))
     except shared_library.SharedLibraryError as e:
         raise _shared_error(e)
+    await asyncio.to_thread(book_store.ensure_local, book["pdf_path"])
     if not os.path.exists(book["pdf_path"]):
         raise ApiError(status_code=404, detail="That book's file is missing on the server.")
 
@@ -2400,6 +2405,7 @@ async def shared_publish(request: Request):
     await asyncio.to_thread(shutil.copyfile, book["pdf_path"], dest_path)
     try:
         shared_library.add_book(specialty, book["title"], dest_path, book.get("page_count") or 0, user["id"], book_id=new_id)
+        book_store.upload_async(dest_path)  # the lasting copy, in the bucket
     except shared_library.SharedLibraryError as e:
         _safe_remove(dest_path)
         raise _shared_error(e)
@@ -2713,6 +2719,7 @@ async def upload_finish(request: Request):
     if up["target"] == "shared":
         try:
             book_id = shared_library.add_book(up["specialty"], up["title"], up["path"], page_count, added_by=user["id"])
+            book_store.upload_async(up["path"])  # the lasting copy, in the bucket
         except shared_library.SharedLibraryError as e:
             _safe_remove(up["path"])
             raise _shared_error(e)
@@ -2727,6 +2734,7 @@ async def upload_finish(request: Request):
         _safe_remove(up["path"])
         raise ApiError(status_code=402, detail=str(e))
     book_id = library.add_book(user["id"], up["title"], up["path"], page_count, source="shelf")
+    book_store.upload_async(up["path"])  # the lasting copy, in the bucket
     return JSONResponse(_public_book(book_id, library.get_book(user["id"], book_id)))
 
 

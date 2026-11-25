@@ -9,6 +9,7 @@ Requires a .env file (see .env.example) with:
     ANTHROPIC_API_KEY=...
 """
 
+import book_store
 import asyncio
 import logging
 import os
@@ -1114,6 +1115,7 @@ async def handle_shared_pdf_document(message: Message, state: FSMContext):
         return
 
     shared_library.add_book(existing, title, dest, page_count, added_by=uid, book_id=book_id)
+    book_store.upload_async(dest)  # the lasting copy, in the bucket
     webapp_api._start_shared_index(book_id)
     await status.edit_text(f"📚 {title} ({page_count} pages) added to {existing}. Making it searchable...")
     asyncio.create_task(_report_shared_index(status, book_id, title, existing, page_count))
@@ -1222,6 +1224,7 @@ async def handle_book_delivery_document(message: Message, state: FSMContext):
 
     book_title = os.path.splitext(file_name)[0].strip() or "Requested book"
     library.add_book(customer_id, book_title, dest_path, page_count, source="request")
+    book_store.upload_async(dest_path)  # the lasting copy, in the bucket
     book_requests.set_delivered(request_id)
 
     try:
@@ -1578,6 +1581,7 @@ async def _process_chat_upload(message: Message, doc, file_name: str) -> None:
                 page_count = len(chapters)
 
             book_id = library.add_book(uid, book_title, library_pdf_path, page_count, source="chat")
+            book_store.upload_async(library_pdf_path)  # the lasting copy, in the bucket
             library.set_chapters(uid, book_id, compute_chapter_ranges(chapters, page_count))
 
             pending_id = session_cache.put({"book_id": book_id})
@@ -1671,6 +1675,7 @@ async def main():
     back up, not a retry loop in here.
     """
     os.makedirs(STORAGE_DIR, exist_ok=True)
+    book_store.start_background_sync()  # books into the Railway bucket; the volume becomes a cache
     if not WEBAPP_URL:
         logger.warning(
             "WEBAPP_URL is not set -- the 📚 Book Shelf button will be hidden from the main menu, "

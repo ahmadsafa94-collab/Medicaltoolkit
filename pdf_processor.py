@@ -12,6 +12,7 @@ Flow:
    into one file per chapter based on the boundaries Claude found.
 """
 
+import book_store
 import json
 import logging
 import os
@@ -55,7 +56,7 @@ class ChapterDetectionError(Exception):
 
 def count_pages(pdf_path: str) -> int:
     """Cheap page count via pypdf (no text extraction) for an early cap check."""
-    return len(PdfReader(pdf_path).pages)
+    return len(PdfReader(book_store.ensure_local(pdf_path)).pages)
 
 
 # A page's drawing instructions, decompressed. Real pages are kilobytes to a
@@ -139,7 +140,7 @@ def open_check(pdf_path: str) -> int:
         "This PDF is password-protected. Remove the password (e.g. print it to a new PDF) and send it again."
     )
     try:
-        reader = PdfReader(pdf_path)
+        reader = PdfReader(book_store.ensure_local(pdf_path))
         if reader.is_encrypted:
             # Many PDFs are "encrypted" with an empty password only to block
             # editing; those open fine. A real password cannot be guessed.
@@ -176,7 +177,7 @@ def extract_page_previews(pdf_path: str, chars_per_page: int = 350, progress_cb=
     zero feedback for minutes at a time.
     """
     previews = []
-    with pdfplumber.open(pdf_path) as pdf:
+    with pdfplumber.open(book_store.ensure_local(pdf_path)) as pdf:
         total = len(pdf.pages)
         for i, page in enumerate(pdf.pages):
             text = page.extract_text() or ""
@@ -354,7 +355,7 @@ def split_pdf_by_chapters(pdf_path: str, chapters: list[dict], output_dir: str) 
     Returns list of output file paths, in chapter order.
     """
     os.makedirs(output_dir, exist_ok=True)
-    reader = PdfReader(pdf_path)
+    reader = PdfReader(book_store.ensure_local(pdf_path))
     total_pages = len(reader.pages)
     ranges = compute_chapter_ranges(chapters, total_pages)
 

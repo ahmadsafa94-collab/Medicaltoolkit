@@ -10,6 +10,7 @@ Only the first page ever leaves the server this way -- for a shared
 specialty book that is the one page users can see, as on a shop shelf.
 """
 
+import book_store
 import logging
 import os
 import tempfile
@@ -55,7 +56,7 @@ def get_cover(book_id: str, pdf_path: str, size: str = "thumb") -> str:
         if os.path.exists(out):  # rendered by another request while this one waited
             return out
         try:
-            pdf = pdfium.PdfDocument(pdf_path)
+            pdf = pdfium.PdfDocument(book_store.ensure_local(pdf_path))
             try:
                 page = pdf[0]
                 width, height = page.get_size()

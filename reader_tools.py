@@ -13,6 +13,7 @@ STORAGE_DIR/pagetext/{book_id}.json (page texts are the same for everyone
 reading that file, so the cache is shared).
 """
 
+import book_store
 import json
 import logging
 import os
@@ -165,6 +166,7 @@ def _pagetext_path(book_id: str) -> str:
 def page_texts(book_id: str, pdf_path: str) -> list[str]:
     """Every page's text, extracted once and cached. Synchronous: run in a thread."""
     path = _pagetext_path(book_id)
+    book_store.ensure_local(pdf_path)  # an evicted book comes back from the bucket first
     try:
         mtime = os.path.getmtime(pdf_path)
     except OSError:

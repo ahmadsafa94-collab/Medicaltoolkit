@@ -18,3 +18,4 @@ python-multipart>=0.0.9
 genanki>=0.13.1
 playwright>=1.50.0
 cryptography>=42.0.0
+boto3>=1.34.0  # Railway Storage Bucket for book PDFs (book_store.py)

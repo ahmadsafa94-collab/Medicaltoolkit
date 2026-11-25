@@ -13,6 +13,7 @@ but it's still AI-generated free text, so every output here is clearly
 labeled as such and never presented as authoritative on its own.
 """
 
+import book_store
 import json
 import logging
 import re
@@ -62,7 +63,7 @@ def extract_chapter_text(pdf_path: str, max_chars: int = MAX_CHARS_PER_CHAPTER) 
     """
     parts = []
     try:
-        with pdfplumber.open(pdf_path) as pdf:
+        with pdfplumber.open(book_store.ensure_local(pdf_path)) as pdf:
             for page in pdf.pages:
                 text = page.extract_text() or ""
                 parts.append(text)
@@ -95,7 +96,7 @@ def extract_text_for_page_range(
     """
     parts = []
     try:
-        with pdfplumber.open(pdf_path) as pdf:
+        with pdfplumber.open(book_store.ensure_local(pdf_path)) as pdf:
             total = len(pdf.pages)
             start_idx = max(0, start_page - 1)
             end_idx = min(total, end_page)

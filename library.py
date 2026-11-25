@@ -26,6 +26,7 @@ bytes or embeddings themselves; those live at pdf_path and in pdf_qa's
 QA_INDEX_DIR respectively.
 """
 
+import book_store
 import json
 import os
 import time
@@ -422,5 +423,6 @@ def remove_book(user_id: int, book_id: str, delete_file: bool = False) -> bool:
         try:
             os.remove(entry["pdf_path"])
         except OSError:
-            pass
+            pass  # evicted to the bucket, or already gone
+        book_store.delete_async(entry["pdf_path"])
     return True

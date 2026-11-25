@@ -24,6 +24,7 @@ explicit per-request timeout AND a few retries (its own default is NO
 timeout and NO retries at all, confirmed against Voyage's docs).
 """
 
+import book_store
 import asyncio
 import shutil
 import json
@@ -75,7 +76,7 @@ def extract_full_page_text(pdf_path: str, progress=None) -> list[str]:
     longest silent stretch of indexing.
     """
     pages = []
-    with pdfplumber.open(pdf_path) as pdf:
+    with pdfplumber.open(book_store.ensure_local(pdf_path)) as pdf:
         total = len(pdf.pages)
         for i, page in enumerate(pdf.pages):
             text = page.extract_text() or ""
