@@ -865,3 +865,7 @@ html[data-theme="midnight"] .web-notice { background: #3a2a10; color: #ffd9a0; b
   overflow-wrap: anywhere; color: var(--shelf-ink, var(--text)); padding: 0; }
 .book-row-meta { font-size: 12px; font-weight: 400; color: var(--shelf-hint, var(--hint)); }
 .book-row .book-menu-btn { top: 50%; right: 8px; transform: translateY(-50%); background: var(--primary-soft); color: var(--link); width: 28px; height: 28px; }
+/* A file-name title ("Judith_S_Beck_Cognitive_...") has no spaces to wrap at:
+   it may break anywhere, and the shelf never scrolls sideways. */
+.book-title-label { overflow-wrap: anywhere; word-break: break-word; }
+#view-shelf { overflow-x: hidden; }
