@@ -227,15 +227,18 @@ function shelfView() {
 
 function renderShelf(grid, books, { shared = false } = {}) {
   grid.classList.toggle("is-list", shelfView() === "list");
+  // A specialty book added to My books is still the library's (its cover
+  // and file come from there).
+  const isShared = (book) => shared || book.source === "shared";
   if (shelfView() === "list") {
-    books.forEach((book) => grid.appendChild(bookTile(book, { shared, list: true })));
+    books.forEach((book) => grid.appendChild(bookTile(book, { shared: isShared(book), list: true })));
     loadCoverThumbs(grid);
     return;
   }
   for (let i = 0; i < books.length; i += SHELF_COLS) {
     const row = document.createElement("div");
     row.className = "shelf-row";
-    books.slice(i, i + SHELF_COLS).forEach((book) => row.appendChild(bookTile(book, { shared })));
+    books.slice(i, i + SHELF_COLS).forEach((book) => row.appendChild(bookTile(book, { shared: isShared(book) })));
     grid.appendChild(row);
     const ledge = document.createElement("div");
     ledge.className = "shelf-ledge";
@@ -263,9 +266,42 @@ function setShelfTab(tab) {
   else loadShelf();
 }
 
+let shelfInLibrary = new Set();  // specialty books this user added to My books
+
+async function toggleInLibrary(book, on, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    await api(`/api/shared/books/${encodeURIComponent(book.book_id)}/library`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ on }),
+    });
+  } catch (e) {
+    if (btn) btn.disabled = false;
+    return alertMsg(e.message);
+  }
+  if (on) shelfInLibrary.add(book.book_id);
+  else shelfInLibrary.delete(book.book_id);
+  shelfToast(on ? `“${book.title}” added to My books` : `Removed from My books (still in its specialty)`);
+  if (shelfTab === "spec") renderSpecialtyShelf();
+  else loadShelf();
+}
+
+let shelfToastTimer = null;
+function shelfToast(text) {
+  const t = document.getElementById("reader-toast");
+  if (t.parentElement !== document.body) document.body.appendChild(t);  // shown outside the reader too
+  t.textContent = text;
+  t.hidden = false;
+  clearTimeout(shelfToastTimer);
+  shelfToastTimer = setTimeout(() => { t.hidden = true; }, 2400);
+}
+
 async function loadSpecialtyShelf() {
   try {
-    shelfCatalog = (await api("/api/ask/library")).specialties;
+    const lib = await api("/api/ask/library");
+    shelfCatalog = lib.specialties;
+    shelfInLibrary = new Set(lib.in_library || []);
   } catch (e) {
     return alertMsg("Couldn't load the specialty books: " + e.message);
   }
@@ -363,7 +399,18 @@ function bookTile(book, { shared = false, list = false } = {}) {
   wrap.appendChild(btn);
   wrap.appendChild(title);
   if (shared) {
-    // Specialty books are the library's: no rename/colour/delete menu.
+    // Specialty books are the library's: no rename/colour/delete menu, but a
+    // toggle that shows the book in My books as well (or takes it off).
+    const on = book.source === "shared" ? !!book.in_library : shelfInLibrary.has(book.book_id);
+    const toggle = document.createElement("button");
+    toggle.className = "lib-toggle" + (on ? " is-on" : "");
+    toggle.setAttribute("aria-pressed", on ? "true" : "false");
+    toggle.innerHTML = on ? `${ic("check")}<span>In my library</span>` : `${ic("plus")}<span>Add to my library</span>`;
+    toggle.addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleInLibrary(book, !on, toggle);
+    });
+    wrap.appendChild(toggle);
     return wrap;
   }
 

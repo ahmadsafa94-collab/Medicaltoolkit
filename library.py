@@ -130,8 +130,31 @@ def is_shared_ref(entry: dict | None) -> bool:
 
 
 def own_books(user_id: int) -> dict:
-    """The user's own uploads/deliveries -- what the 📚 My books shelf shows (no specialty references)."""
+    """The user's own uploads/deliveries (no specialty references) -- what counts toward the shelf limit."""
     return {bid: b for bid, b in _load(user_id).items() if not is_shared_ref(b)}
+
+
+def shelf_books(user_id: int) -> dict:
+    """What 📚 My books shows: their own books, plus specialty books they added to their library."""
+    return {bid: b for bid, b in _load(user_id).items() if not is_shared_ref(b) or b.get("in_library")}
+
+
+def library_shared_ids(user_id: int) -> list[str]:
+    """The specialty books this user added to their library."""
+    return [bid for bid, b in _load(user_id).items() if is_shared_ref(b) and b.get("in_library")]
+
+
+def set_in_library(user_id: int, book_id: str, shared: dict, on: bool) -> dict:
+    """Show a specialty book in My books (or stop). Its bookmark, notes and chapters are kept either way."""
+    entry = upsert_shared_ref(user_id, book_id, shared)
+    if bool(entry.get("in_library")) != bool(on):
+        registry = _load(user_id)
+        registry[book_id]["in_library"] = bool(on)
+        if on:
+            registry[book_id]["added_to_library_at"] = time.time()
+        _save(user_id, registry)
+        entry = registry[book_id]
+    return entry
 
 
 def upsert_shared_ref(user_id: int, book_id: str, shared: dict) -> dict:

@@ -331,7 +331,7 @@ async def list_books(request: Request):
     # Specialty books have their own shelf tab; ?all=1 (the Bookmarks list)
     # includes them, since a bookmark in one should be findable too.
     all_books = request.query_params.get("all") == "1"
-    books = library.list_books(user["id"]) if all_books else library.own_books(user["id"])
+    books = library.list_books(user["id"]) if all_books else library.shelf_books(user["id"])
     # shelf_limit/shelf_used let the mini app show the upgrade prompt on the
     # "+" button instead of letting a free user pick a file, upload it, and
     # only then be refused. null limit = unlimited (Premium). shelf_used is
@@ -2057,6 +2057,18 @@ async def drug_ask(request: Request):
     return JSONResponse({"answer": answer, "drug": resolved, "sources": sources, "skipped": skipped})
 
 
+async def shared_book_library_toggle(request: Request):
+    """Add a specialty book to My books, or take it off (it stays in its specialty)."""
+    user = require_user(request)
+    book_id = request.path_params["book_id"]
+    shared = shared_library.get_book(book_id) if shared_library.is_shared_id(book_id) else None
+    if shared is None:
+        raise ApiError(status_code=404, detail="This book isn't in the library anymore.")
+    body = await _json_body(request)
+    entry = library.set_in_library(user["id"], book_id, shared, bool(body.get("on")))
+    return JSONResponse({"book_id": book_id, "in_library": bool(entry.get("in_library"))})
+
+
 async def drug_websites(request: Request):
     """The websites Drug LookUp can also search, and whether this user manages them (the admin)."""
     user = require_user(request)
@@ -2220,6 +2232,7 @@ async def ask_library(request: Request):
             "my_books": my_books,
             "specialties": _shared_catalog(),
             "is_admin": subscriptions.is_admin(user["id"]),
+            "in_library": library.library_shared_ids(user["id"]),  # specialty books added to My books
             # Admin only: the standard books per specialty, to upload into the library.
             "recommended": recommended_books.RECOMMENDED if subscriptions.is_admin(user["id"]) else None,
             "max_books": pdf_qa.MAX_BOOKS_PER_QUESTION,
@@ -3228,6 +3241,7 @@ routes = [
     Route("/api/drugs/ask", drug_ask, methods=["POST"]),
     Route("/api/drugs/websites", drug_websites, methods=["GET"]),
     Route("/api/me", me_endpoint, methods=["GET"]),
+    Route("/api/shared/books/{book_id}/library", shared_book_library_toggle, methods=["POST"]),
     Route("/api/account/login", login_endpoint, methods=["POST"]),
     Route("/api/account/logout", logout_endpoint, methods=["POST"]),
     Route("/api/account/register", register_endpoint, methods=["POST"]),

@@ -934,3 +934,13 @@ html[data-theme="midnight"] .web-notice { background: #3a2a10; color: #ffd9a0; b
 #register-pane { display: flex; flex-direction: column; gap: 8px; }
 #register-pane[hidden] { display: none; }
 .acc-tag.paid { color: #b7791f; display: block; margin-top: 2px; }
+
+/* ---------- Specialty books: "Add to my library" toggle ---------- */
+.lib-toggle { margin-top: 5px; width: 100%; display: flex; align-items: center; justify-content: center; gap: 3px;
+  border: 1px solid var(--border); background: var(--secondary-bg); color: var(--link); border-radius: 9px;
+  font: inherit; font-size: 10px; font-weight: 600; line-height: 1.15; padding: 4px 3px; cursor: pointer; }
+.lib-toggle .ic { width: 12px; height: 12px; flex-shrink: 0; vertical-align: 0; }
+.lib-toggle.is-on { background: var(--button); border-color: transparent; color: var(--button-text); }
+.lib-toggle:disabled { opacity: 0.6; }
+.book-row .lib-toggle { width: auto; flex-shrink: 0; margin: 0; font-size: 12px; padding: 7px 10px; }
+.book-row:has(.lib-toggle) { padding-right: 8px; }
