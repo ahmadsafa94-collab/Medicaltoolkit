@@ -730,7 +730,7 @@ document.getElementById("file-input").addEventListener("change", (e) => {
 // ---------------------------------------------------------------------
 // Chunked upload (shelf books, and specialty books for the admin)
 // ---------------------------------------------------------------------
-// The file goes up in small parts (the server sets the size, 2 MB),
+// The file goes up in small parts (the server sets the size, 1 MB),
 // UPLOAD_PARALLEL at a time, each written straight into place on the
 // server. Several streams use a slow or far-away connection much better
 // than one, and a part that fails is retried on its own instead of the
@@ -738,7 +738,7 @@ document.getElementById("file-input").addEventListener("change", (e) => {
 // so a restart (every deploy is one) only pauses it: parts are retried for
 // about two minutes, which outlasts a restart, and carry on where they were.
 
-const UPLOAD_PARALLEL = 6;
+const UPLOAD_PARALLEL = 4;
 const UPLOAD_RETRIES = 16;
 const uploadRetryDelay = (attempt) => Math.min(2000 * attempt, 10000);
 

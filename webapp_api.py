@@ -2448,10 +2448,13 @@ async def shared_delete_book(request: Request):
 # to check the PDF and register it. The old /api/upload stays for clients
 # still running a cached older app.js.
 
-# 2 MB parts, sent 6 at a time by the client: on a slow mobile link a dropped
+# 1 MB parts, sent 4 at a time by the client. Telegram's WebView sends them all
+# over ONE HTTP/2 connection, so more in flight adds no speed -- and when that
+# connection drops, every part in flight is lost. Small parts, few at a time,
+# lose little. (Older note: on a slow mobile link a dropped
 # connection loses at most one small part, and more parallel streams use a
 # high-latency route (far from the Amsterdam server) better than fewer.
-UPLOAD_CHUNK_BYTES = 2 * 1024 * 1024
+UPLOAD_CHUNK_BYTES = 1 * 1024 * 1024
 _WRITE_BUFFER_BYTES = 1024 * 1024
 _UPLOAD_TTL_SECONDS = 2 * 3600
 _UPLOAD_MAX_LIFETIME_SECONDS = 6 * 3600  # however busy, an upload can't hold its space forever
