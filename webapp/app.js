@@ -221,7 +221,17 @@ async function loadShelf() {
 // Builds the shelf as explicit rows of SHELF_COLS books, with a wood
 // "shelf-ledge" div after each row -- see style.css's .shelf-row/.shelf-ledge
 // comment for why this is done in JS rather than a CSS background trick.
+function shelfView() {
+  try { return localStorage.getItem("shelfView") === "list" ? "list" : "grid"; } catch (_) { return "grid"; }
+}
+
 function renderShelf(grid, books, { shared = false } = {}) {
+  grid.classList.toggle("is-list", shelfView() === "list");
+  if (shelfView() === "list") {
+    books.forEach((book) => grid.appendChild(bookTile(book, { shared, list: true })));
+    loadCoverThumbs(grid);
+    return;
+  }
   for (let i = 0; i < books.length; i += SHELF_COLS) {
     const row = document.createElement("div");
     row.className = "shelf-row";
@@ -320,24 +330,40 @@ function renderSpecialtyShelf() {
   });
 }
 
-function bookTile(book, { shared = false } = {}) {
+function bookTile(book, { shared = false, list = false } = {}) {
   const wrap = document.createElement("div");
-  wrap.className = "book-tile-wrap";
+  wrap.className = list ? "book-row" : "book-tile-wrap";
 
   const btn = document.createElement("button");
   btn.className = "book-tile";
+  btn.setAttribute("aria-label", `Open ${book.title}`);
   const dot = book.qa_indexed ? '<span class="status-dot" title="Indexed for AI Q&A"></span>' : "";
   const coverStyle = book.cover_color ? ` style="background:${book.cover_color}"` : "";
   // The real cover (page 1) replaces the 📘 placeholder once it loads --
   // see loadCoverThumbs. A chosen cover colour still shows until then.
-  btn.innerHTML = `
-    <div class="book-cover"${coverStyle} data-cover="${book.book_id}" data-shared="${shared ? 1 : 0}">${ic("book", " cover-ic")}${dot}</div>
-    <div class="book-title-label">${escapeHtml(book.title)}</div>
-  `;
+  btn.innerHTML = `<div class="book-cover"${coverStyle} data-cover="${book.book_id}" data-shared="${shared ? 1 : 0}">${ic("book", " cover-ic")}${dot}</div>`;
   btn.addEventListener("click", () => openBook(book.book_id));
+
+  // The title is its own control: in the grid a long one is cut to two
+  // lines, and a tap shows it whole (a tap on the cover opens the book).
+  const title = document.createElement(list ? "button" : "div");
+  title.className = "book-title-label";
+  title.textContent = book.title;
+  title.title = book.title;
+  if (list) {
+    title.classList.add("book-row-title");
+    const pages = book.page_count ? `<span class="book-row-meta">${Number(book.page_count)} pages</span>` : "";
+    title.innerHTML = `<span>${escapeHtml(book.title)}</span>${pages}`;
+    title.addEventListener("click", () => openBook(book.book_id));
+  } else {
+    title.setAttribute("role", "button");
+    title.tabIndex = 0;
+    title.addEventListener("click", () => title.classList.toggle("is-expanded"));
+  }
+  wrap.appendChild(btn);
+  wrap.appendChild(title);
   if (shared) {
     // Specialty books are the library's: no rename/colour/delete menu.
-    wrap.appendChild(btn);
     return wrap;
   }
 
@@ -350,10 +376,23 @@ function bookTile(book, { shared = false } = {}) {
     openBookMenu(book);
   });
 
-  wrap.appendChild(btn);
   wrap.appendChild(menuBtn);
   return wrap;
 }
+
+function renderShelfViewToggle() {
+  const view = shelfView();
+  document.querySelectorAll("#view-shelf .view-btn").forEach((b) => b.classList.toggle("is-active", b.dataset.view === view));
+}
+document.querySelectorAll("#view-shelf .view-btn").forEach((b) =>
+  b.addEventListener("click", () => {
+    try { localStorage.setItem("shelfView", b.dataset.view); } catch (_) {}
+    renderShelfViewToggle();
+    if (shelfTab === "spec") renderSpecialtyShelf();
+    else renderMyShelf();
+  })
+);
+renderShelfViewToggle();
 
 // Safe for text AND for double- or single-quoted attribute values: titles
 // come from uploaded file names, and a '"' there used to end the attribute.
