@@ -13,6 +13,12 @@ Each account keeps an activity log: every mini app API call it makes (the
 endpoint, status, time taken), its errors with their message, and logins.
 The admin sees it, with statistics, in Accounts.
 
+Two kinds of account ("access"):
+  full   created by the admin: full access for as long as it exists
+  paid   registered by a Telegram user who paid for Premium with Stars
+         (the "Create your account" page after paying): full access while
+         that payer's Premium is active -- one account per payer
+
 Storage: STORAGE_DIR/_admin/accounts.json and
 STORAGE_DIR/_admin/account_logs/{username}.jsonl. Passwords are kept only as
 scrypt hashes.
@@ -40,7 +46,7 @@ USERNAME_RE = re.compile(r"[a-z0-9][a-z0-9._-]{2,31}")
 MIN_PASSWORD = 6
 
 _lock = threading.RLock()
-_by_telegram: dict[int, str] | None = None   # telegram id -> username (cache of the file)
+_by_telegram: dict[int, dict] | None = None   # telegram id -> {username, access, paid_by} (cache of the file)
 
 # Wrong passwords: a Telegram account or a username that keeps failing is
 # paused, so a password can't be guessed by trying many.
@@ -110,17 +116,57 @@ def generate_password() -> str:
 # Who is logged in
 # ---------------------------------------------------------------------
 
-def username_for(telegram_id: int) -> str | None:
-    """The account linked to this Telegram account (and not disabled), or None."""
+def linked_account(telegram_id: int) -> dict | None:
+    """{username, access, paid_by} of the account linked to this Telegram account (not disabled), or None."""
     global _by_telegram
     with _lock:
         if _by_telegram is None:
             _by_telegram = {
-                int(a["telegram_id"]): name
+                int(a["telegram_id"]): {"username": name, "access": a.get("access") or "full", "paid_by": a.get("paid_by")}
                 for name, a in _load().items()
                 if a.get("telegram_id") and not a.get("disabled")
             }
         return _by_telegram.get(int(telegram_id))
+
+
+def username_for(telegram_id: int) -> str | None:
+    acct = linked_account(telegram_id)
+    return acct["username"] if acct else None
+
+
+def paid_account_of(telegram_id: int) -> str | None:
+    """The account this Telegram user registered after paying, if any."""
+    for name, a in _load().items():
+        if a.get("access") == "paid" and a.get("paid_by") and int(a["paid_by"]) == int(telegram_id):
+            return name
+    return None
+
+
+def register(telegram_id: int, username, password) -> str:
+    """
+    A Premium payer creates their own account (the caller checks they paid).
+    It is linked to their Telegram account at once. One per payer.
+    """
+    existing = paid_account_of(telegram_id)
+    if existing:
+        raise AccountError(f"You already have an account: {existing}. Log in with it.")
+    if username_for(telegram_id):
+        raise AccountError("This Telegram account is already logged in to an account.")
+    name = clean_username(username)
+    password = str(password or "")
+    if len(password) < 8:
+        raise AccountError("Choose a password of at least 8 characters.")
+    now = time.time()
+    with _lock:
+        data = _load()
+        if name in data:
+            raise AccountError("That username is taken. Choose another.")
+        data[name] = {"password": _hash(password), "created": now, "telegram_id": int(telegram_id), "linked_at": now,
+                      "last_login": now, "disabled": False, "access": "paid", "paid_by": int(telegram_id),
+                      "note": "Registered after a Premium payment"}
+        _save(data)
+    log_event(name, {"kind": "registered", "telegram_id": telegram_id})
+    return name
 
 
 def _recent(stamps: list[float], now: float) -> list[float]:
@@ -198,6 +244,8 @@ def list_accounts() -> list[dict]:
             "last_login": a.get("last_login"),
             "last_active": a.get("last_active"),
             "note": a.get("note") or "",
+            "access": a.get("access") or "full",
+            "paid_by": a.get("paid_by"),
         })
     return out
 

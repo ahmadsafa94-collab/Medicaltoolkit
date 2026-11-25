@@ -234,10 +234,22 @@ def is_premium(user_id: int) -> bool:
     if is_admin(user_id):
         return True
     # A username/password account linked to this Telegram account (logged in
-    # in the mini app) has full access, like Premium.
+    # in the mini app): one the admin made has full access; one registered
+    # after a Stars payment has it while the payer's Premium lasts (which may
+    # be a different Telegram account than the one logged in now).
     import accounts  # lazy: accounts imports nothing from here, but keep the import graph flat
-    if accounts.username_for(user_id):
-        return True
+    acct = accounts.linked_account(user_id)
+    if acct:
+        if acct["access"] == "full":
+            return True
+        payer = acct.get("paid_by")
+        if payer and int(payer) != int(user_id) and _own_premium(int(payer)):
+            return True
+    return _own_premium(user_id)
+
+
+def _own_premium(user_id: int) -> bool:
+    """This Telegram account's own Premium plan (auto-downgrading an expired one)."""
     sub = _load(user_id)
     if sub["plan"] == "premium" and sub["premium_until"] and sub["premium_until"] > time.time():
         return True
@@ -651,6 +663,14 @@ def record_refund(user_id: int, charge_id: str) -> dict | None:
                 _save(referrer_id, referrer)
         _save(user_id, sub)
         return dict(original) if original is not None else None
+
+
+def has_paid_premium(user_id: int) -> bool:
+    """A Premium plan bought with Stars and not refunded: what lets a user register their own account."""
+    return any(
+        p.get("source") == "stars" and (p.get("days") or 0) > 0 and not p.get("refunded_at")
+        for p in _load(user_id).get("payments") or []
+    )
 
 
 def has_ever_paid(user_id: int) -> bool:

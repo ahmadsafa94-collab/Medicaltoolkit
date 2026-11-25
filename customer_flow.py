@@ -20,7 +20,7 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, LabeledPrice, Message, PreCheckoutQuery
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, Message, PreCheckoutQuery, WebAppInfo
 
 import admin_log
 import book_requests
@@ -269,8 +269,23 @@ async def handle_successful_payment(message: Message):
         except TelegramAPIError:
             logger.warning("Failed to notify referrer %s of their bonus", credited_referrer)
 
+    # First Premium payment: offer the registration page, where they choose
+    # their own username and password for the app (accounts.register).
+    register_kb = None
+    try:
+        import accounts
+        if WEBAPP_URL and not accounts.paid_account_of(user_id) and not accounts.username_for(user_id):
+            sep = "&" if "?" in WEBAPP_URL else "?"
+            register_kb = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="👤 Create your account", web_app=WebAppInfo(url=f"{WEBAPP_URL}{sep}register=1"))
+            ]])
+    except Exception:
+        logger.exception("Couldn't offer account registration after a payment")
     await message.answer(
-        f"✅ Thanks! You're now Premium for {days} days.{referral_note}",
+        f"✅ Thanks! You're now Premium for {days} days.{referral_note}"
+        + ("\n\nCreate your Medic Toolkit account now: choose a username and password to log in to the app."
+           if register_kb else ""),
+        reply_markup=register_kb,
     )
 
 

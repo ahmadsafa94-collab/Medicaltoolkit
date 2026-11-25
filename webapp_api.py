@@ -3046,8 +3046,17 @@ async def me_endpoint(request: Request):
     username = accounts.username_for(uid)
     admin = subscriptions.is_admin(uid)
     full = has_full_access(uid)
-    tier = "admin" if admin else "account" if username else "premium" if full else "guest"
-    out = {"tier": tier, "username": username, "is_admin": admin, "full_access": full}
+    if admin:
+        tier = "admin"
+    elif username:
+        tier = "account" if full else "expired"  # a paid account whose Premium has ended
+    else:
+        tier = "premium" if full else "guest"
+    # A Stars Premium payer who hasn't made their account yet can register one.
+    can_register = (
+        not admin and not username and subscriptions.has_paid_premium(uid) and not accounts.paid_account_of(uid)
+    )
+    out = {"tier": tier, "username": username, "is_admin": admin, "full_access": full, "can_register": can_register}
     if not full:
         summary = subscriptions.usage_summary(uid)
         out["guest"] = {
@@ -3062,6 +3071,19 @@ async def login_endpoint(request: Request):
     body = await _json_body(request)
     try:
         name = await asyncio.to_thread(accounts.login, user["id"], body.get("username"), body.get("password"))
+    except accounts.AccountError as e:
+        raise ApiError(status_code=400, detail=str(e))
+    return JSONResponse({"username": name})
+
+
+async def register_endpoint(request: Request):
+    """A Premium (Stars) payer chooses their own username and password; the account is linked at once."""
+    user = require_user(request)
+    if not subscriptions.has_paid_premium(user["id"]):
+        raise ApiError(status_code=403, detail="Creating your own account comes with a Premium plan (⭐ My Plan in the bot).")
+    body = await _json_body(request)
+    try:
+        name = await asyncio.to_thread(accounts.register, user["id"], body.get("username"), body.get("password"))
     except accounts.AccountError as e:
         raise ApiError(status_code=400, detail=str(e))
     return JSONResponse({"username": name})
@@ -3179,6 +3201,7 @@ routes = [
     Route("/api/me", me_endpoint, methods=["GET"]),
     Route("/api/account/login", login_endpoint, methods=["POST"]),
     Route("/api/account/logout", logout_endpoint, methods=["POST"]),
+    Route("/api/account/register", register_endpoint, methods=["POST"]),
     Route("/api/admin/accounts", admin_accounts_list, methods=["GET"]),
     Route("/api/admin/accounts", admin_account_create, methods=["POST"]),
     Route("/api/admin/accounts/{username}/password", admin_account_password, methods=["POST"]),

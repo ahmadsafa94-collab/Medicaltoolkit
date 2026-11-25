@@ -931,3 +931,6 @@ html[data-theme="midnight"] .web-notice { background: #3a2a10; color: #ffd9a0; b
 .ev-what code { font-size: 11.5px; overflow-wrap: anywhere; }
 .ev-err { color: var(--danger, #c0392b); }
 #view-accounts .drug-input { width: 100%; box-sizing: border-box; margin: 4px 0; }
+#register-pane { display: flex; flex-direction: column; gap: 8px; }
+#register-pane[hidden] { display: none; }
+.acc-tag.paid { color: #b7791f; display: block; margin-top: 2px; }

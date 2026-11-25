@@ -17,11 +17,11 @@
   -->
   <link rel="icon" type="image/png" href="favicon.png" />
   <link rel="apple-touch-icon" href="icon-192.png" />
-  <link rel="stylesheet" href="style.css?v=40" />
-  <link rel="stylesheet" href="fonts.css?v=40" />
-  <link rel="stylesheet" href="themes.css?v=40" />
+  <link rel="stylesheet" href="style.css?v=41" />
+  <link rel="stylesheet" href="fonts.css?v=41" />
+  <link rel="stylesheet" href="themes.css?v=41" />
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
-  <script src="theme.js?v=40"></script>
+  <script src="theme.js?v=41"></script>
   <!-- pdf.js 3.11.174 (Apache-2.0), self-hosted: same bytes as cdnjs (SRI-checked). -->
   <script src="vendor/pdf.min.js"></script>
 </head>
@@ -31,7 +31,7 @@
 
   <!-- Welcome splash (splash.js): plays over the app while it loads, then dissolves. -->
   <div id="splash"></div>
-  <script src="splash.js?v=40"></script>
+  <script src="splash.js?v=41"></script>
 
   <!-- ============ SHELF (root) ============ -->
   <section id="view-shelf" class="view">
@@ -537,6 +537,18 @@
           <p class="muted">Logging in links the account to this Telegram account and unlocks everything.</p>
         </div>
       </div>
+      <div id="register-pane" hidden>
+        <h2>Create your account</h2>
+        <p class="muted">Thanks for going Premium! Choose a username and password for Medic Toolkit. The account is
+          linked to this Telegram account, and you can log in with it again if you ever need to.</p>
+        <input id="reg-user" class="drug-input" type="text" autocomplete="username" autocapitalize="off" spellcheck="false"
+               placeholder="Username (3-32 letters, digits, . _ -)" />
+        <input id="reg-pass" class="drug-input" type="password" autocomplete="new-password" placeholder="Password (at least 8 characters)" />
+        <input id="reg-pass2" class="drug-input" type="password" autocomplete="new-password" placeholder="Password again" />
+        <p id="reg-error" class="error-text" hidden></p>
+        <button id="reg-go" class="btn ask-send-btn"><svg class="ic" aria-hidden="true"><use href="#i-user-check"/></svg> Create account</button>
+        <button id="reg-later" class="btn secondary">Later</button>
+      </div>
       <div id="account-pane" hidden>
         <h2 id="account-title"></h2>
         <p id="account-sub" class="muted"></p>
@@ -582,6 +594,6 @@
     <button class="tab" data-tab="view-drugs"><span><svg class="ic" aria-hidden="true"><use href="#i-pill"/></svg></span><small>Drugs</small></button>
   </nav>
 
-  <script src="app.js?v=40"></script>
+  <script src="app.js?v=41"></script>
 </body>
 </html>

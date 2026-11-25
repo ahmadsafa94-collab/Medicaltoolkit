@@ -5217,19 +5217,26 @@ async function loadMe({ prompt = false } = {}) {
     return;
   }
   renderAccountUI();
-  if (prompt && me.tier === "guest" && !guestChosen()) openLoginSheet();
+  const wantsRegister = new URLSearchParams(window.location.search).get("register") === "1";
+  if (me.can_register && (wantsRegister || prompt)) openLoginSheet();
+  else if (prompt && me.tier === "guest" && !guestChosen()) openLoginSheet();
 }
 
 function renderAccountUI() {
   if (!me) return;
   const btn = document.getElementById("btn-account");
-  if (me.tier === "guest") btn.innerHTML = `${ic("log-in")} <span>Log in</span>`;
+  if (me.can_register) btn.innerHTML = `${ic("user-check")} <span>Create account</span>`;
+  else if (me.tier === "guest") btn.innerHTML = `${ic("log-in")} <span>Log in</span>`;
   else if (me.is_admin) btn.innerHTML = `${ic("shield-check")} <span>Admin</span>`;
   else if (me.username) btn.innerHTML = `${ic("user-check")} <span>${escapeHtml(me.username)}</span>`;
   else btn.innerHTML = `${ic("user-check")} <span>Premium</span>`;
-  btn.classList.toggle("is-guest", me.tier === "guest");
+  btn.classList.toggle("is-guest", me.tier === "guest" || me.tier === "expired" || !!me.can_register);
   const banner = document.getElementById("guest-banner");
-  banner.hidden = me.tier !== "guest";
+  banner.hidden = me.tier !== "guest" && me.tier !== "expired";
+  if (me.tier === "expired") {
+    document.getElementById("guest-banner-text").textContent =
+      "your Premium has ended, so guest limits apply. Renew it in the bot (⭐ My Plan)";
+  }
   if (me.guest) {
     const q = me.guest;
     document.getElementById("guest-banner-text").textContent =
@@ -5241,9 +5248,16 @@ function renderAccountUI() {
 
 function openLoginSheet(note) {
   const sheet = document.getElementById("login-sheet");
-  const loggedIn = me && me.tier !== "guest";
-  document.getElementById("login-pane").hidden = loggedIn;
+  const registering = !!(me && me.can_register);
+  const loggedIn = !registering && me && me.tier !== "guest";
+  document.getElementById("register-pane").hidden = !registering;
+  document.getElementById("login-pane").hidden = registering || loggedIn;
   document.getElementById("account-pane").hidden = !loggedIn;
+  if (registering) {
+    sheet.hidden = false;
+    setTimeout(() => document.getElementById("reg-user").focus(), 50);
+    return;
+  }
   const err = document.getElementById("login-error");
   err.hidden = !note;
   err.textContent = note || "";
@@ -5252,9 +5266,11 @@ function openLoginSheet(note) {
       me.is_admin ? "Admin" : me.username ? `Logged in as ${me.username}` : "Premium";
     document.getElementById("account-sub").textContent = me.is_admin
       ? "You have full access and manage the accounts."
-      : me.username
-        ? "Full access. This account is linked to your Telegram account."
-        : "Full access through your Premium plan.";
+      : me.tier === "expired"
+        ? "Your Premium has ended, so guest limits apply for now. Renew it in the bot (⭐ My Plan) for full access."
+        : me.username
+          ? "Full access. This account is linked to your Telegram account."
+          : "Full access through your Premium plan.";
     document.getElementById("account-manage").hidden = !me.is_admin;
     document.getElementById("account-logout").hidden = !me.username;
   }
@@ -5369,6 +5385,7 @@ async function loadAccounts() {
   document.getElementById("acc-list").innerHTML = accList.length
     ? accList
         .map((a) => {
+          const kind = a.access === "paid" ? `<span class="acc-tag paid">Premium (self-registered)</span>` : "";
           const status = a.disabled
             ? `<span class="acc-tag off">${ic("ban")} Disabled</span>`
             : a.telegram_id
@@ -5376,7 +5393,7 @@ async function loadAccounts() {
               : `<span class="acc-tag">Not logged in yet</span>`;
           const u = escapeHtml(a.username);
           return `<div class="acc-row">
-            <div class="acc-head"><strong>${u}</strong>${status}</div>
+            <div class="acc-head"><strong>${u}</strong>${status}</div>${kind}
             <div class="muted acc-meta">${a.note ? escapeHtml(a.note) + " · " : ""}active ${fmtWhen(a.last_active)} · logged in ${fmtWhen(a.last_login)}</div>
             <div class="acc-actions">
               <button class="mini-btn" data-acc-log="${u}">${ic("activity")} Log &amp; stats</button>
@@ -5490,7 +5507,7 @@ async function openAccountLog(username) {
         (e.err ? `<span class="ev-err">${escapeHtml(e.err)}</span>` : "") + `</div>`;
     }
     const labels = { login: "Logged in", logout: "Logged out", login_failed: "Wrong password", login_refused: "Login refused (linked elsewhere)",
-      created: "Account created", password_reset: "Password reset", unlinked: "Unlinked by admin", disabled: "Disabled", enabled: "Enabled" };
+      created: "Account created", registered: "Registered after paying", password_reset: "Password reset", unlinked: "Unlinked by admin", disabled: "Disabled", enabled: "Enabled" };
     return `<div class="acc-event${/failed|refused/.test(e.kind) ? " bad" : ""}"><span class="ev-when">${when}</span>` +
       `<span class="ev-what">${escapeHtml(labels[e.kind] || e.kind)}${e.telegram_id ? ` · Telegram ${Number(e.telegram_id)}` : ""}</span></div>`;
   };
@@ -5506,3 +5523,37 @@ document.getElementById("acc-log-back").addEventListener("click", () => {
 });
 
 loadMe({ prompt: true });
+
+// --- registration after a Premium (Stars) payment ---------------------
+
+async function doRegister() {
+  const user = document.getElementById("reg-user").value.trim();
+  const pass = document.getElementById("reg-pass").value;
+  const pass2 = document.getElementById("reg-pass2").value;
+  const err = document.getElementById("reg-error");
+  const fail = (m) => { err.hidden = false; err.textContent = m; };
+  if (!user) return fail("Choose a username.");
+  if (pass.length < 8) return fail("Choose a password of at least 8 characters.");
+  if (pass !== pass2) return fail("The two passwords don't match.");
+  const btn = document.getElementById("reg-go");
+  btn.disabled = true;
+  err.hidden = true;
+  try {
+    const { username } = await api("/api/account/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: user, password: pass }),
+    });
+    ["reg-pass", "reg-pass2"].forEach((id) => (document.getElementById(id).value = ""));
+    await loadMe();
+    closeLoginSheet();
+    alertMsg(`Your account "${username}" is ready and linked to this Telegram account. Keep your password somewhere safe.`);
+  } catch (e) {
+    fail(e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+document.getElementById("reg-go").addEventListener("click", doRegister);
+document.getElementById("reg-pass2").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); doRegister(); } });
+document.getElementById("reg-later").addEventListener("click", closeLoginSheet);
