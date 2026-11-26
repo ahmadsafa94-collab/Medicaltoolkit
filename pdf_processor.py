@@ -65,7 +65,14 @@ def count_pages(pdf_path: str) -> int:
 # memory in text extraction and could take the whole bot down. Every page's
 # content (and the drawings it reuses) is inflated here with a hard cap
 # first, so such a file is refused before anything parses it.
-_MAX_PAGE_CONTENT_BYTES = 24 * 1024 * 1024
+#
+# Two levels. A real textbook page full of vector diagrams can pass 24 MB, so
+# such a "heavy" page is accepted -- the book stays usable -- and only its
+# text extraction is skipped (it isn't searchable; the reader still draws it
+# with pdfium). Past 512 MB a page is treated as a bomb and the file refused.
+_MAX_PAGE_CONTENT_BYTES = 24 * 1024 * 1024    # heavy: text extraction skips the page
+_BOMB_PAGE_BYTES = 512 * 1024 * 1024          # bomb: the whole file is refused
+_INFLATE_CHUNK = 8 * 1024 * 1024
 _BOMB = ChapterDetectionError(
     "This PDF has a page with an abnormally large amount of drawing data and can't be processed safely. "
     "Try printing it to a new PDF and sending that."
@@ -86,18 +93,28 @@ def _inflated_size(stream, budget: int) -> int:
         elif f in ("/ASCIIHexDecode", "/AHx"):
             data = ASCIIHexDecode.decode(data)
         elif f in ("/FlateDecode", "/Fl"):
+            # Counted in 8 MB pieces, so even a bomb never needs more memory than that.
             d = zlib.decompressobj()
-            out = len(d.decompress(data, budget + 1))
-            return budget + 1 if d.unconsumed_tail else out
+            total = 0
+            chunk = d.decompress(data, _INFLATE_CHUNK)
+            while True:
+                total += len(chunk)
+                if total > budget:
+                    return budget + 1
+                if not d.unconsumed_tail:
+                    return total
+                chunk = d.decompress(d.unconsumed_tail, _INFLATE_CHUNK)
         else:
             break  # a filter text extraction rarely meets: counted at its stored size
     return len(data)
 
 
-def _check_content_streams(reader) -> None:
-    for page in reader.pages:
+def _check_content_streams(reader) -> set[int]:
+    """Indices of heavy pages (text extraction skips them); raises _BOMB for a page past _BOMB_PAGE_BYTES."""
+    heavy = set()
+    for index, page in enumerate(reader.pages):
         try:
-            budget = _MAX_PAGE_CONTENT_BYTES
+            budget = _BOMB_PAGE_BYTES
             pending = []
             contents = page.get("/Contents")
             if contents is not None:
@@ -124,10 +141,43 @@ def _check_content_streams(reader) -> None:
                 budget -= _inflated_size(ref.get_object(), budget)
                 if budget < 0:
                     raise _BOMB
+            if _BOMB_PAGE_BYTES - budget > _MAX_PAGE_CONTENT_BYTES:
+                heavy.add(index)
         except ChapterDetectionError:
             raise
         except Exception:
             continue  # an odd structure is not a reason to refuse an otherwise readable book
+    return heavy
+
+
+_heavy_cache: dict[tuple, frozenset] = {}
+
+
+def heavy_pages(pdf_path: str) -> frozenset:
+    """Pages (0-based) whose text extraction is skipped -- see _MAX_PAGE_CONTENT_BYTES. Cached per file version."""
+    path = book_store.ensure_local(pdf_path)
+    try:
+        st = os.stat(path)
+        key = (os.path.realpath(path), st.st_mtime, st.st_size)
+    except OSError:
+        return frozenset()
+    if key not in _heavy_cache:
+        try:
+            _heavy_cache[key] = frozenset(_check_content_streams(PdfReader(path)))
+        except ChapterDetectionError:
+            raise
+        except Exception:
+            _heavy_cache[key] = frozenset()
+        if len(_heavy_cache) > 200:
+            _heavy_cache.pop(next(iter(_heavy_cache)))
+    return _heavy_cache[key]
+
+
+def page_text(page, index: int, heavy) -> str:
+    """A page's text, or "" for a heavy page (too much drawing data to parse safely)."""
+    if index in heavy:
+        return ""
+    return page.extract_text() or ""
 
 
 def open_check(pdf_path: str) -> int:
@@ -150,7 +200,9 @@ def open_check(pdf_path: str) -> int:
                 raise locked
             if not ok:
                 raise locked
-        _check_content_streams(reader)
+        heavy = _check_content_streams(reader)
+        if heavy:
+            logger.info("%s: %d page(s) with very heavy drawings; their text is skipped", os.path.basename(pdf_path), len(heavy))
         return len(reader.pages)
     except ChapterDetectionError:
         raise
@@ -177,10 +229,11 @@ def extract_page_previews(pdf_path: str, chars_per_page: int = 350, progress_cb=
     zero feedback for minutes at a time.
     """
     previews = []
+    heavy = heavy_pages(pdf_path)
     with pdfplumber.open(book_store.ensure_local(pdf_path)) as pdf:
         total = len(pdf.pages)
         for i, page in enumerate(pdf.pages):
-            text = page.extract_text() or ""
+            text = page_text(page, i, heavy)
             text = re.sub(r"\s+", " ", text).strip()
             previews.append(text[:chars_per_page])
             page.close()  # release this page's parsed objects; see pdf_qa.extract_full_page_text

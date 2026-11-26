@@ -53,7 +53,7 @@ from config import (
     VOYAGE_CLIENT_TIMEOUT_SECONDS,
     VOYAGE_CLIENT_MAX_RETRIES,
 )
-from pdf_processor import client as claude_client  # reuse the one Anthropic client instance, not a second one
+from pdf_processor import client as claude_client, heavy_pages, page_text  # heavy pages: see pdf_processor
 
 logger = logging.getLogger(__name__)
 
@@ -76,10 +76,11 @@ def extract_full_page_text(pdf_path: str, progress=None) -> list[str]:
     longest silent stretch of indexing.
     """
     pages = []
+    heavy = heavy_pages(pdf_path)
     with pdfplumber.open(book_store.ensure_local(pdf_path)) as pdf:
         total = len(pdf.pages)
         for i, page in enumerate(pdf.pages):
-            text = page.extract_text() or ""
+            text = page_text(page, i, heavy)
             pages.append(re.sub(r"\s+", " ", text).strip())
             # pdfplumber keeps every parsed page's objects alive until the
             # file closes; over thousands of pages that is gigabytes.

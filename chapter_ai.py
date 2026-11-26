@@ -23,7 +23,7 @@ import pdfplumber
 
 import cost_ledger
 from config import CLAUDE_MODEL
-from pdf_processor import client  # reuse the same Anthropic client instance, not a second one
+from pdf_processor import client, heavy_pages, page_text  # the one Anthropic client; heavy-page skipping
 
 logger = logging.getLogger(__name__)
 
@@ -63,9 +63,10 @@ def extract_chapter_text(pdf_path: str, max_chars: int = MAX_CHARS_PER_CHAPTER) 
     """
     parts = []
     try:
+        heavy = heavy_pages(pdf_path)
         with pdfplumber.open(book_store.ensure_local(pdf_path)) as pdf:
-            for page in pdf.pages:
-                text = page.extract_text() or ""
+            for i, page in enumerate(pdf.pages):
+                text = page_text(page, i, heavy)
                 parts.append(text)
     except Exception as e:
         logger.warning("PDF text extraction failed: %s", e)
@@ -96,6 +97,7 @@ def extract_text_for_page_range(
     """
     parts = []
     try:
+        heavy = heavy_pages(pdf_path)
         with pdfplumber.open(book_store.ensure_local(pdf_path)) as pdf:
             total = len(pdf.pages)
             start_idx = max(0, start_page - 1)
@@ -103,7 +105,7 @@ def extract_text_for_page_range(
             collected = 0
             for idx in range(start_idx, end_idx):
                 page = pdf.pages[idx]
-                text = page.extract_text() or ""
+                text = page_text(page, idx, heavy)
                 parts.append(text)
                 collected += len(text)
                 page.close()  # pdfplumber keeps every parsed page in memory otherwise
