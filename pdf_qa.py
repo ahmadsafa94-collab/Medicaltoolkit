@@ -53,7 +53,7 @@ from config import (
     VOYAGE_CLIENT_TIMEOUT_SECONDS,
     VOYAGE_CLIENT_MAX_RETRIES,
 )
-from pdf_processor import client as claude_client, heavy_pages, page_text  # heavy pages: see pdf_processor
+from pdf_processor import client as claude_client, fast_page_texts, heavy_pages, page_text  # heavy pages: see pdf_processor
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +75,9 @@ def extract_full_page_text(pdf_path: str, progress=None) -> list[str]:
     runs in a worker thread, and on a several-thousand-page book it is the
     longest silent stretch of indexing.
     """
+    fast = fast_page_texts(pdf_path, progress_cb=progress, every=25)
+    if fast is not None:
+        return [re.sub(r"\s+", " ", t).strip() for t in fast]
     pages = []
     heavy = heavy_pages(pdf_path)
     with pdfplumber.open(book_store.ensure_local(pdf_path)) as pdf:

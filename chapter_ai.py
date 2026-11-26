@@ -23,7 +23,7 @@ import pdfplumber
 
 import cost_ledger
 from config import CLAUDE_MODEL
-from pdf_processor import client, heavy_pages, page_text  # the one Anthropic client; heavy-page skipping
+from pdf_processor import client, fast_page_texts, heavy_pages, page_text  # the one Anthropic client; heavy-page skipping
 
 logger = logging.getLogger(__name__)
 
@@ -63,11 +63,14 @@ def extract_chapter_text(pdf_path: str, max_chars: int = MAX_CHARS_PER_CHAPTER) 
     """
     parts = []
     try:
-        heavy = heavy_pages(pdf_path)
-        with pdfplumber.open(book_store.ensure_local(pdf_path)) as pdf:
-            for i, page in enumerate(pdf.pages):
-                text = page_text(page, i, heavy)
-                parts.append(text)
+        fast = fast_page_texts(pdf_path)
+        if fast is not None:
+            parts = fast
+        else:
+            heavy = heavy_pages(pdf_path)
+            with pdfplumber.open(book_store.ensure_local(pdf_path)) as pdf:
+                for i, page in enumerate(pdf.pages):
+                    parts.append(page_text(page, i, heavy))
     except Exception as e:
         logger.warning("PDF text extraction failed: %s", e)
         raise ChapterAIError("Couldn't read text from this chapter's PDF. The file may be damaged or scanned.")
@@ -97,22 +100,31 @@ def extract_text_for_page_range(
     """
     parts = []
     try:
-        heavy = heavy_pages(pdf_path)
-        with pdfplumber.open(book_store.ensure_local(pdf_path)) as pdf:
-            total = len(pdf.pages)
-            start_idx = max(0, start_page - 1)
-            end_idx = min(total, end_page)
+        fast = fast_page_texts(pdf_path, first=max(0, start_page - 1), last=end_page)
+        if fast is not None:
             collected = 0
-            for idx in range(start_idx, end_idx):
-                page = pdf.pages[idx]
-                text = page_text(page, idx, heavy)
+            for text in fast:
                 parts.append(text)
                 collected += len(text)
-                page.close()  # pdfplumber keeps every parsed page in memory otherwise
-                # Only max_chars are used: reading the rest of a 1,500-page
-                # range first just made the job time out.
                 if collected > max_chars:
                     break
+        else:
+            heavy = heavy_pages(pdf_path)
+            with pdfplumber.open(book_store.ensure_local(pdf_path)) as pdf:
+                total = len(pdf.pages)
+                start_idx = max(0, start_page - 1)
+                end_idx = min(total, end_page)
+                collected = 0
+                for idx in range(start_idx, end_idx):
+                    page = pdf.pages[idx]
+                    text = page_text(page, idx, heavy)
+                    parts.append(text)
+                    collected += len(text)
+                    page.close()  # pdfplumber keeps every parsed page in memory otherwise
+                    # Only max_chars are used: reading the rest of a 1,500-page
+                    # range first just made the job time out.
+                    if collected > max_chars:
+                        break
     except Exception as e:
         logger.warning("PDF text extraction failed: %s", e)
         raise ChapterAIError("Couldn't read text for this chapter. The file may be damaged or scanned.")

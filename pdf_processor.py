@@ -173,6 +173,50 @@ def heavy_pages(pdf_path: str) -> frozenset:
     return _heavy_cache[key]
 
 
+def fast_page_texts(pdf_path: str, first: int = 0, last: int | None = None, progress_cb=None, every: int = 25) -> list[str] | None:
+    """
+    Pages first..last-1 as text, read with pdfium (Chrome's PDF engine, in C).
+    pdfplumber (pure Python) read big books at a page every few seconds on a
+    single core -- a 4,000-page textbook took hours, with memory climbing;
+    pdfium does the same in minutes and lets go of each page at once. Heavy
+    pages (see _MAX_PAGE_CONTENT_BYTES) come back empty. None if pdfium can't
+    open the file, so the caller can fall back to pdfplumber.
+    """
+    import pypdfium2 as pdfium
+
+    path = book_store.ensure_local(pdf_path)
+    heavy = heavy_pages(path)
+    try:
+        doc = pdfium.PdfDocument(path)
+    except Exception as e:
+        logger.info("pdfium couldn't open %s (%r); using pdfplumber", os.path.basename(path), e)
+        return None
+    out = []
+    try:
+        total = len(doc)
+        end = total if last is None else min(last, total)
+        for i in range(max(0, first), end):
+            text = ""
+            if i not in heavy:
+                try:
+                    page = doc[i]
+                    tp = page.get_textpage()
+                    text = tp.get_text_range() or ""
+                    tp.close()
+                    page.close()
+                except Exception:
+                    text = ""  # one unreadable page doesn't stop the book
+            out.append(text.replace("\r\n", "\n").replace("\r", "\n"))
+            if progress_cb and ((i - first) % every == 0 or i == end - 1):
+                try:
+                    progress_cb(i - first + 1, end - first)
+                except Exception:
+                    pass
+    finally:
+        doc.close()
+    return out
+
+
 def page_text(page, index: int, heavy) -> str:
     """A page's text, or "" for a heavy page (too much drawing data to parse safely)."""
     if index in heavy:
@@ -228,6 +272,9 @@ def extract_page_previews(pdf_path: str, chars_per_page: int = 350, progress_cb=
     on complex/image-heavy pages, and without this a long book gives the user
     zero feedback for minutes at a time.
     """
+    fast = fast_page_texts(pdf_path, progress_cb=progress_cb, every=10)
+    if fast is not None:
+        return [re.sub(r"\s+", " ", t).strip()[:chars_per_page] for t in fast]
     previews = []
     heavy = heavy_pages(pdf_path)
     with pdfplumber.open(book_store.ensure_local(pdf_path)) as pdf:
