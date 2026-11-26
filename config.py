@@ -137,7 +137,7 @@ QA_INDEXING_TIMEOUT_SECONDS = 600
 # apply there. Raised from 200MB/1,500 pages at the owner's request so full
 # reference textbooks fit; override with MAX_SHELF_UPLOAD_MB. Mind the
 # storage volume: every book kept on a shelf counts against it.
-MAX_SHELF_UPLOAD_BYTES = int(os.environ.get("MAX_SHELF_UPLOAD_MB", "500")) * 1024 * 1024
+MAX_SHELF_UPLOAD_BYTES = int(os.environ.get("MAX_SHELF_UPLOAD_MB", "800")) * 1024 * 1024
 MAX_SHELF_UPLOAD_PAGES = MAX_BOOK_PAGES
 
 # Background-job timeouts for the mini app's longer-running actions,
