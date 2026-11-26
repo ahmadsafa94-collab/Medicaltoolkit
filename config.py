@@ -80,7 +80,7 @@ MAX_PAGES_PER_PASS = 1000
 # extraction is local CPU work at roughly a second per few pages -- so the
 # timeouts below scale with the book's length (scaled_timeout) rather than
 # cutting a long book off. Override with the MAX_BOOK_PAGES env var.
-MAX_BOOK_PAGES = int(os.environ.get("MAX_BOOK_PAGES", "10000"))
+MAX_BOOK_PAGES = int(os.environ.get("MAX_BOOK_PAGES", "20000"))
 
 
 def scaled_timeout(base_seconds: int, page_count: int) -> int:
