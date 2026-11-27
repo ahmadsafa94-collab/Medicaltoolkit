@@ -448,9 +448,8 @@ def detect_chapters(previews: list[str]) -> list[dict]:
 
     Raises ChapterDetectionError if the page cap is exceeded, if Claude's
     response can't be parsed, or if it's structurally malformed (missing
-    fields, non-integer/out-of-range start_page, or duplicate start_page
-    values that would make the split logic silently produce a bogus
-    near-empty chapter instead of a clear error).
+    fields, non-integer/out-of-range start_page). A repeated start_page
+    keeps only its first entry.
     """
     if len(previews) > MAX_BOOK_PAGES:
         raise ChapterDetectionError(
@@ -496,16 +495,19 @@ def detect_chapters(previews: list[str]) -> list[dict]:
 
     chapters.sort(key=lambda c: c["start_page"])
 
-    # Duplicate start_page values would make split_pdf_by_chapters silently
-    # collapse the earlier chapter down to a bogus 1-page stub (its "end" is
-    # clamped to its own start+1) instead of raising -- surface this clearly
-    # instead of shipping a corrupted split.
-    start_pages = [c["start_page"] for c in chapters]
-    if len(set(start_pages)) != len(start_pages):
-        raise ChapterDetectionError(
-            f"The AI returned duplicate start_page values: {start_pages}. "
-            "Try again, or report this PDF if it keeps happening."
-        )
+    # Duplicate start_page values would make split_pdf_by_chapters collapse
+    # the earlier chapter to a bogus 1-page stub. In a long book one repeated
+    # heading (e.g. a part title and its first chapter on the same page) is
+    # normal, and throwing away hundreds of good boundaries over it is worse:
+    # keep the first entry for each page.
+    seen, unique = set(), []
+    for ch in chapters:
+        if ch["start_page"] in seen:
+            logger.info("Dropping a second chapter starting on page %d (%r)", ch["start_page"], ch.get("title"))
+            continue
+        seen.add(ch["start_page"])
+        unique.append(ch)
+    chapters = unique
 
     return chapters
 
