@@ -957,8 +957,11 @@ html[data-theme="midnight"] .web-notice { background: #3a2a10; color: #ffd9a0; b
 .vol-group .check-row.vol-head { border-bottom: 0; font-weight: 600; }
 .vol-group .vol-icon { color: var(--button); display: inline-flex; flex-shrink: 0; }
 .vol-group .vol-head .check-sub { font-weight: 400; }
-.vol-children { margin-left: 26px; border-left: 2px solid var(--button); padding-left: 8px; margin-bottom: 6px; }
-.vol-children .check-row { padding-top: 6px; padding-bottom: 6px; }
+.vol-children { margin-left: 8px; border-left: 2px solid var(--button); padding-left: 8px; margin-bottom: 6px; min-width: 0; }
+/* An indented row has less room: tighter, so its buttons stay inside the card. */
+.vol-children .check-row { padding-top: 6px; padding-bottom: 6px; gap: 7px; }
+.vol-children .check-row .check-title { min-width: 4.2em; }
+.vol-children .check-row .check-meta { font-size: 11px; }
 
 /* the upload sheet */
 .vol-label { display: block; font-size: 13px; color: var(--hint); margin-top: 12px; }

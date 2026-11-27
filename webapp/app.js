@@ -3693,7 +3693,8 @@ function askRowHtml(b, { shared, label }) {
     const checked = askSelected.has(b.book_id) ? "checked" : "";
     return (
       `<label class="check-row"><input type="checkbox" data-id="${b.book_id}" ${checked} />${cover}` +
-      `<span class="check-title">${shown}</span><span class="check-meta">${pages}</span>${open}${edit}${del}</label>`
+      // The page count sits under the title: beside it, it pushed the row's buttons out of the card.
+      `<span class="check-title">${shown}${pages ? `<span class="check-sub">${pages}</span>` : ""}</span>${open}${edit}${del}</label>`
     );
   }
   // Not answerable yet: say why (under the title, so a long progress line
