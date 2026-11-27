@@ -202,8 +202,13 @@ def upload_async(path: str) -> None:
 
 # --- keeping the volume within its share ------------------------------------
 
-def evict() -> int:
-    """Remove least-recently-used books (already in the bucket) from the volume past CACHE_LIMIT_BYTES. Returns bytes freed."""
+def evict(limit: int | None = None, keep_recent: int | None = None) -> int:
+    """
+    Remove least-recently-used books (already in the bucket) from the volume
+    past `limit` (CACHE_LIMIT_BYTES by default). Returns bytes freed.
+    """
+    limit = CACHE_LIMIT_BYTES if limit is None else limit
+    keep_recent = _KEEP_RECENT_SECONDS if keep_recent is None else keep_recent
     if not enabled():
         return 0
     root = os.path.realpath(STORAGE_DIR)
@@ -218,9 +223,9 @@ def evict() -> int:
     freed = 0
     now = time.time()
     for used, key, path, size in sorted(cached):
-        if total - freed <= CACHE_LIMIT_BYTES:
+        if total - freed <= limit:
             break
-        if now - used < _KEEP_RECENT_SECONDS:
+        if now - used < keep_recent:
             continue
         with _lock_for(key):
             try:
@@ -231,6 +236,114 @@ def evict() -> int:
     if freed:
         logger.info("Book cache: freed %.0f MB on the volume (books stay in the bucket)", freed / 2**20)
     return freed
+
+
+# ---------------------------------------------------------------------
+# Housekeeping: the volume must never fill up (a full disk stops uploads,
+# indexing and even saving settings).
+# ---------------------------------------------------------------------
+
+MIN_FREE_BYTES = int(float(os.environ.get("VOLUME_MIN_FREE_GB", "1")) * 1024**3)
+_HOUSEKEEPING_EVERY = 10 * 60
+_TEMP_SUFFIXES = (".download", ".repair.tmp", ".tmp")
+_TEMP_MAX_AGE = 6 * 3600
+
+
+def _dir_size(path: str) -> int:
+    total = 0
+    for dirpath, _dirs, files in os.walk(path):
+        for f in files:
+            try:
+                total += os.path.getsize(os.path.join(dirpath, f))
+            except OSError:
+                pass
+    return total
+
+
+def disk_report() -> dict:
+    """What uses the volume: {top-level entry: bytes}, largest first, plus free space."""
+    import shutil
+
+    root = os.path.realpath(STORAGE_DIR)
+    sizes = {}
+    try:
+        for name in os.listdir(root):
+            full = os.path.join(root, name)
+            sizes[name] = _dir_size(full) if os.path.isdir(full) else os.path.getsize(full)
+    except OSError:
+        pass
+    # Users' own folders (numeric ids) are summed into one line.
+    users = sum(v for k, v in sizes.items() if k.isdigit())
+    out = {k: v for k, v in sizes.items() if not k.isdigit()}
+    if users:
+        out["(users' folders)"] = users
+    usage = shutil.disk_usage(root)
+    return {
+        "used": usage.used, "free": usage.free, "total": usage.total,
+        "by_folder": dict(sorted(out.items(), key=lambda kv: -kv[1])),
+    }
+
+
+def _remove_stale_temp_files() -> int:
+    """Half-written downloads and repairs left by a restart or a crash."""
+    root = os.path.realpath(STORAGE_DIR)
+    freed, now = 0, time.time()
+    for dirpath, _dirs, files in os.walk(root):
+        for f in files:
+            if not f.endswith(_TEMP_SUFFIXES):
+                continue
+            path = os.path.join(dirpath, f)
+            try:
+                st = os.stat(path)
+                if now - st.st_mtime > _TEMP_MAX_AGE:
+                    os.remove(path)
+                    freed += st.st_size
+            except OSError:
+                pass
+    return freed
+
+
+def housekeeping() -> None:
+    """Trim the cache, clear stale temp files, and free room when the disk runs low."""
+    import shutil
+
+    freed = _remove_stale_temp_files()
+    if enabled():
+        freed += evict()
+        free = shutil.disk_usage(os.path.realpath(STORAGE_DIR)).free
+        if free < MIN_FREE_BYTES:
+            # Low on space: let the book cache shrink well below its limit,
+            # and give up the "opened in the last half hour" grace (a book
+            # being read just comes back from the bucket).
+            with _state_lock:
+                st = _load_state()
+                cached = sum(sz for k, sz in st["uploaded"].items()
+                             if os.path.exists(os.path.join(os.path.realpath(STORAGE_DIR), k)))
+            target = max(0, cached - (MIN_FREE_BYTES - free) - 512 * 1024**2)
+            got = evict(limit=target, keep_recent=5 * 60)
+            freed += got
+            logger.warning("Volume low on space (%.2f GB free): trimmed the book cache by %.0f MB",
+                           free / 1024**3, got / 2**20)
+    if freed:
+        logger.info("Housekeeping freed %.0f MB on the volume", freed / 2**20)
+
+
+def _housekeeping_loop() -> None:
+    last_report = 0.0
+    while True:
+        try:
+            housekeeping()
+            if time.time() - last_report > 3600:
+                last_report = time.time()
+                rep = disk_report()
+                logger.info(
+                    "Volume: %.2f GB used, %.2f GB free; by folder: %s",
+                    rep["used"] / 1024**3, rep["free"] / 1024**3,
+                    ", ".join(f"{k} {v / 2**20:.0f} MB" for k, v in list(rep["by_folder"].items())[:12]),
+                )
+        except Exception:
+            logger.exception("Volume housekeeping failed")
+        time.sleep(_HOUSEKEEPING_EVERY)
 
 
 def sync_existing(book_paths: list[str]) -> None:
@@ -343,6 +456,7 @@ def all_book_paths() -> list[str]:
 
 def start_background_sync() -> None:
     """At startup: copy any book not yet in the bucket (the first run moves the whole library), then trim the cache."""
+    threading.Thread(target=_housekeeping_loop, daemon=True, name="volume-housekeeping").start()
     if not enabled():
         logger.info("Book store: no bucket configured (BOOKS_BUCKET); books stay on the volume only")
         return
