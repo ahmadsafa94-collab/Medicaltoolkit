@@ -950,3 +950,26 @@ html[data-theme="midnight"] .web-notice { background: #3a2a10; color: #ffd9a0; b
 .check-sub { display: block; margin-top: 3px; font-size: 12px; font-weight: 400; color: var(--hint); }
 .check-sub.is-error { color: #c0392b; }
 .check-sub .ic { width: 13px; height: 13px; vertical-align: -0.15em; }
+
+/* ---- multi-volume books: one title, its volumes under it ---- */
+.vol-group { border-bottom: 1px solid rgba(128, 128, 128, 0.16); }
+.vol-group:last-child { border-bottom: 0; }
+.vol-group .check-row.vol-head { border-bottom: 0; font-weight: 600; }
+.vol-group .vol-icon { color: var(--button); display: inline-flex; flex-shrink: 0; }
+.vol-group .vol-head .check-sub { font-weight: 400; }
+.vol-children { margin-left: 26px; border-left: 2px solid var(--button); padding-left: 8px; margin-bottom: 6px; }
+.vol-children .check-row { padding-top: 6px; padding-bottom: 6px; }
+
+/* the upload sheet */
+.vol-label { display: block; font-size: 13px; color: var(--hint); margin-top: 12px; }
+.vol-toggle { display: flex; align-items: center; gap: 8px; margin: 12px 0 4px; font-size: 15px; }
+.vol-toggle input { width: 18px; height: 18px; accent-color: var(--button); }
+#vol-files { margin: 8px 0 12px; }
+.vol-file { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid rgba(128, 128, 128, 0.16); }
+.vol-file:last-child { border-bottom: 0; }
+.vol-file > .ic { flex-shrink: 0; color: var(--hint); }
+.vol-name { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 13px; }
+.vol-num { flex-shrink: 0; font-size: 13px; color: var(--hint); display: flex; align-items: center; gap: 6px; }
+.vol-num[hidden] { display: none; }
+.vol-num input { width: 56px; padding: 6px; border-radius: 8px; border: 1px solid rgba(128, 128, 128, 0.3); background: var(--bg); color: var(--text); font: inherit; }
+#vol-sheet .btn { width: 100%; margin-top: 8px; }

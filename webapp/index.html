@@ -17,11 +17,11 @@
   -->
   <link rel="icon" type="image/png" href="favicon.png" />
   <link rel="apple-touch-icon" href="icon-192.png" />
-  <link rel="stylesheet" href="style.css?v=45" />
-  <link rel="stylesheet" href="fonts.css?v=45" />
-  <link rel="stylesheet" href="themes.css?v=45" />
+  <link rel="stylesheet" href="style.css?v=46" />
+  <link rel="stylesheet" href="fonts.css?v=46" />
+  <link rel="stylesheet" href="themes.css?v=46" />
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
-  <script src="theme.js?v=45"></script>
+  <script src="theme.js?v=46"></script>
   <!-- pdf.js 3.11.174 (Apache-2.0), self-hosted: same bytes as cdnjs (SRI-checked). -->
   <script src="vendor/pdf.min.js"></script>
 </head>
@@ -31,7 +31,7 @@
 
   <!-- Welcome splash (splash.js): plays over the app while it loads, then dissolves. -->
   <div id="splash"></div>
-  <script src="splash.js?v=45"></script>
+  <script src="splash.js?v=46"></script>
 
   <!-- ============ SHELF (root) ============ -->
   <section id="view-shelf" class="view">
@@ -72,7 +72,7 @@
       <div id="shelf-spec-grid" class="shelf-grid"></div>
     </div>
     <button id="btn-add-book" class="fab" title="Add a book" aria-label="Add a book"><svg class="ic" aria-hidden="true"><use href="#i-plus"/></svg></button>
-    <input id="file-input" type="file" accept="application/pdf" hidden />
+    <input id="file-input" type="file" accept="application/pdf" multiple hidden />
   </section>
 
   <!-- ============ DRUGS (root, second tab) ============ -->
@@ -249,7 +249,7 @@
         <button id="ask-admin-publish" class="btn secondary"><svg class="ic" aria-hidden="true"><use href="#i-library-big"/></svg> Add from my shelf</button>
         <button id="ask-admin-del-spec" class="btn secondary">Remove specialty</button>
       </div>
-      <input id="ask-admin-file" type="file" accept="application/pdf" hidden />
+      <input id="ask-admin-file" type="file" accept="application/pdf" multiple hidden />
       <div id="ask-admin-progress" hidden style="margin-top:10px;">
         <div class="progress-track"><div id="ask-admin-bar" class="progress-fill" style="width:0%"></div></div>
         <p id="ask-admin-status" class="muted"></p>
@@ -261,7 +261,7 @@
           PDF of that book: it is added to that specialty under its proper title (the specialty is created if needed).</p>
         <select id="rec-specialty" class="ask-select"></select>
         <div id="rec-list" class="check-list"></div>
-        <input id="rec-file" type="file" accept="application/pdf" hidden />
+        <input id="rec-file" type="file" accept="application/pdf" multiple hidden />
       </div>
     </div>
 
@@ -514,6 +514,24 @@
     the back button is already responsible for, and would eat the bottom of
     a page being read.
   -->
+  <!-- ============ UPLOAD: one book or several volumes of one book ============ -->
+  <div id="vol-sheet" class="login-sheet" hidden>
+    <div class="login-card">
+      <h2 id="vol-head">Add a book</h2>
+      <label class="vol-label" for="vol-title">Title</label>
+      <input id="vol-title" class="drug-input" type="text" maxlength="200" list="vol-series-list" autocomplete="off" placeholder="e.g. Harrison's Principles of Internal Medicine" />
+      <datalist id="vol-series-list"></datalist>
+      <label class="vol-toggle"><input id="vol-multi" type="checkbox" /> This book comes in several volumes</label>
+      <p id="vol-hint" class="muted" hidden>The volumes are kept together under this title. In Ask, ticking the title picks every
+        volume, or tick just the one you need.</p>
+      <div id="vol-files"></div>
+      <p id="vol-error" class="error-text" hidden></p>
+      <button id="vol-go" class="btn ask-send-btn"><svg class="ic" aria-hidden="true"><use href="#i-upload"/></svg> Upload</button>
+      <button id="vol-cancel" class="btn secondary">Cancel</button>
+      <button id="vol-close" class="login-close" aria-label="Close"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
+    </div>
+  </div>
+
   <!-- ============ LOGIN / ACCOUNT (sheet) ============ -->
   <div id="login-sheet" class="login-sheet" hidden>
     <div class="login-card">
@@ -594,6 +612,6 @@
     <button class="tab" data-tab="view-drugs"><span><svg class="ic" aria-hidden="true"><use href="#i-pill"/></svg></span><small>Drugs</small></button>
   </nav>
 
-  <script src="app.js?v=45"></script>
+  <script src="app.js?v=46"></script>
 </body>
 </html>

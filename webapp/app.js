@@ -769,9 +769,9 @@ document.getElementById("btn-add-book").addEventListener("click", () => {
 });
 
 document.getElementById("file-input").addEventListener("change", (e) => {
-  const file = e.target.files[0];
+  const files = Array.from(e.target.files || []);
   e.target.value = "";
-  if (file) uploadFile(file);
+  if (files.length) uploadFiles(files);
 });
 
 // ---------------------------------------------------------------------
@@ -872,7 +872,7 @@ async function chunkedUpload(file, opts) {
   }
 }
 
-async function _chunkedUploadAwake(file, { target = "shelf", title, specialty, onProgress }) {
+async function _chunkedUploadAwake(file, { target = "shelf", title, specialty, series, volume, onProgress }) {
   // Keep the screen on: Android pauses a backgrounded WebView, and a
   // sleeping screen is the usual reason a long upload "stops". (This used
   // to share its name with _chunkedUpload below, which replaced it, so the
@@ -880,7 +880,7 @@ async function _chunkedUploadAwake(file, { target = "shelf", title, specialty, o
   let wakeLock = null;
   try { if (navigator.wakeLock) wakeLock = await navigator.wakeLock.request("screen"); } catch (_) { /* not supported */ }
   try {
-    return await _chunkedUpload(file, { target, title, specialty, onProgress });
+    return await _chunkedUpload(file, { target, title, specialty, series, volume, onProgress });
   } finally {
     try { if (wakeLock) await wakeLock.release(); } catch (_) { /* already released */ }
   }
@@ -967,9 +967,9 @@ async function _directUpload(file, start, onProgress, startedAt) {
 
 let directUploadBroken = false;  // the bucket couldn't be reached once: use the server for the rest of this visit
 
-async function _chunkedUpload(file, { target, title, specialty, onProgress }) {
+async function _chunkedUpload(file, { target, title, specialty, series, volume, onProgress }) {
   const startedAt = Date.now();
-  const startBody = { filename: file.name, size: file.size, title, target, specialty };
+  const startBody = { filename: file.name, size: file.size, title, target, specialty, series, volume };
   let start = await api("/api/uploads", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1036,34 +1036,168 @@ async function _chunkedUpload(file, { target, title, specialty, onProgress }) {
   }
 }
 
-function uploadFile(file) {
-  if (file.size > maxUploadMb * 1024 * 1024) {
-    alertMsg(`That file is over the ${maxUploadMb}MB limit (${(file.size / 1024 / 1024).toFixed(1)}MB).`);
-    return;
-  }
+// Shelf upload: the sheet asks for the title (and the volume numbers when
+// it is a multi-volume book), then the files go up one after another.
+async function uploadFiles(files) {
+  const items = await askVolumes(files);
+  if (!items) return;
   showView("view-upload");
   const bar = document.getElementById("upload-bar");
   const status = document.getElementById("upload-status");
-  bar.style.width = "0%";
-  status.textContent = "Starting upload…";
-
-  chunkedUpload(file, {
-    target: "shelf",
-    title: file.name.replace(/\.pdf$/i, ""),
-    onProgress: (f, text) => {
-      bar.style.width = Math.round(f * 100) + "%";
-      status.textContent = text;
-    },
-  })
-    .then((data) => {
+  let lastId = null;
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i];
+    const label = items.length > 1 ? `${it.label} (${i + 1} of ${items.length}): ` : "";
+    bar.style.width = "0%";
+    status.textContent = `${label}Starting upload…`;
+    try {
+      const data = await chunkedUpload(it.file, {
+        target: "shelf",
+        title: it.title,
+        series: it.series,
+        volume: it.volume,
+        onProgress: (f, text) => {
+          bar.style.width = Math.round(f * 100) + "%";
+          status.textContent = label + text;
+        },
+      });
+      lastId = data.book_id;
+    } catch (e) {
       showView("view-shelf");
-      loadShelf().then(() => openBook(data.book_id));
-    })
-    .catch((e) => {
-      showView("view-shelf");
-      alertMsg(e.message === "Network error" ? "Upload failed -- check your connection and try again." : e.message);
-    });
+      await loadShelf();
+      const msg = e.message === "Network error" ? "Upload failed -- check your connection and try again." : e.message;
+      return alertMsg(items.length > 1 ? `${it.label}: ${msg}` : msg);
+    }
+  }
+  showView("view-shelf");
+  // One book opens straight away; several volumes stay on the shelf, together.
+  loadShelf().then(() => { if (items.length === 1 && lastId) openBook(lastId); });
 }
+
+// ---------------------------------------------------------------------
+// Several volumes of one book
+// ---------------------------------------------------------------------
+// A multi-volume book is uploaded as one file per volume, all under the
+// book's own title; each is stored as "<title> — Volume N" and the Ask
+// picker shows them together (tick the title for every volume, or one).
+
+const VOLUME_RE = /(?:^|[\s._\-(\[])(?:vol(?:ume)?|v|part|pt|tome|book)[\s._\-]*0*(\d{1,2})(?=$|[\s._\-)\]])/i;
+
+function cleanFileTitle(name) {
+  // "Harrison_s_Principles" -> "Harrison's Principles" (an apostrophe can't be in many shared file names)
+  return name.replace(/\.pdf$/i, "").replace(/([A-Za-z])_s(?=_|$)/g, "$1's").replace(/[_]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+// "Harrison_s_Principles_Vol_2_22e.pdf" -> {base: "Harrison s Principles 22e", volume: 2}
+function detectVolume(name) {
+  const raw = name.replace(/\.pdf$/i, "");
+  const m = raw.match(VOLUME_RE);
+  if (!m) return { base: cleanFileTitle(name), volume: null };
+  const base = cleanFileTitle((raw.slice(0, m.index) + " " + raw.slice(m.index + m[0].length)).replace(/[\s._\-]+$/, ""));
+  return { base: base.replace(/[\s\-–—,(\[]+$/, "").trim(), volume: parseInt(m[1], 10) };
+}
+
+let volSheetResolve = null;
+
+// Resolves with [{file, title, series, volume, label}] in upload order, or null if cancelled.
+function askVolumes(files, { title = "", head = "Add a book" } = {}) {
+  files = Array.from(files || []).filter((f) => f && f.size);
+  if (!files.length) return Promise.resolve(null);
+  for (const f of files) {
+    if (f.size > maxUploadMb * 1024 * 1024) {
+      alertMsg(`"${f.name}" is over the ${maxUploadMb}MB limit (${(f.size / 1024 / 1024).toFixed(1)}MB).`);
+      return Promise.resolve(null);
+    }
+  }
+  const found = files.map((f) => ({ file: f, ...detectVolume(f.name) }));
+  // Volumes found in the names: in that order; otherwise as picked.
+  if (found.every((x) => x.volume)) found.sort((a, b) => a.volume - b.volume);
+  const multi = files.length > 1 || found[0].volume != null;
+  document.getElementById("vol-head").textContent = files.length > 1 ? `Add ${files.length} files` : head;
+  document.getElementById("vol-title").value = title || found[0].base || cleanFileTitle(files[0].name);
+  document.getElementById("vol-multi").checked = multi;
+  document.getElementById("vol-error").hidden = true;
+  const used = new Set();
+  document.getElementById("vol-files").innerHTML = found
+    .map((x, i) => {
+      let n = x.volume && !used.has(x.volume) ? x.volume : null;
+      if (!n) { n = 1; while (used.has(n)) n++; }
+      used.add(n);
+      return `<div class="vol-file" data-i="${i}">${ic("file-text")}<span class="vol-name">${escapeHtml(x.file.name)}</span>` +
+        `<label class="vol-num">Volume <input type="number" min="1" max="99" inputmode="numeric" value="${n}" data-vol="${i}" /></label></div>`;
+    })
+    .join("");
+  volSheetFiles = found.map((x) => x.file);
+  // A volume added later joins its book by the same title: offer the titles
+  // of the multi-volume books already here.
+  const known = new Set();
+  const addSeries = (b) => { if (b && b.series) known.add(b.series); };
+  shelfBooks.forEach(addSeries);
+  if (askLib) {
+    (askLib.my_books || []).forEach(addSeries);
+    (askLib.specialties || []).forEach((sp) => sp.books.forEach(addSeries));
+  }
+  document.getElementById("vol-series-list").innerHTML = [...known].map((t) => `<option value="${escapeHtml(t)}"></option>`).join("");
+  syncVolSheet();
+  document.getElementById("vol-sheet").hidden = false;
+  return new Promise((resolve) => { volSheetResolve = resolve; });
+}
+
+let volSheetFiles = [];
+
+function syncVolSheet() {
+  const multi = document.getElementById("vol-multi").checked;
+  const several = volSheetFiles.length > 1;
+  document.getElementById("vol-hint").hidden = !multi;
+  document.querySelectorAll("#vol-files .vol-num").forEach((el) => { el.hidden = !multi; });
+  // Several files that aren't volumes of one book are separate books, each under its own name.
+  const label = document.querySelector("#vol-sheet .vol-label");
+  label.textContent = multi ? "Title of the book (all volumes)" : "Title";
+  label.hidden = several && !multi;
+  document.getElementById("vol-title").hidden = several && !multi;
+}
+
+function closeVolSheet(result) {
+  document.getElementById("vol-sheet").hidden = true;
+  const resolve = volSheetResolve;
+  volSheetResolve = null;
+  if (resolve) resolve(result);
+}
+
+function submitVolSheet() {
+  const err = document.getElementById("vol-error");
+  const fail = (msg) => { err.textContent = msg; err.hidden = false; };
+  const multi = document.getElementById("vol-multi").checked;
+  const title = document.getElementById("vol-title").value.replace(/\s+/g, " ").trim();
+  if (!multi) {
+    if (volSheetFiles.length > 1) {
+      return closeVolSheet(volSheetFiles.map((f) => ({ file: f, title: cleanFileTitle(f.name), label: cleanFileTitle(f.name) })));
+    }
+    if (!title) return fail("Type the book's title.");
+    return closeVolSheet([{ file: volSheetFiles[0], title, label: title }]);
+  }
+  if (!title) return fail("Type the book's title: every volume is kept under it.");
+  const items = [];
+  const seen = new Set();
+  for (const input of document.querySelectorAll("#vol-files input[data-vol]")) {
+    const n = parseInt(input.value, 10);
+    if (!(n >= 1 && n <= 99)) return fail("Each volume needs a number from 1 to 99.");
+    if (seen.has(n)) return fail(`Volume ${n} is listed twice.`);
+    seen.add(n);
+    const file = volSheetFiles[parseInt(input.dataset.vol, 10)];
+    items.push({ file, title: `${title} — Volume ${n}`, series: title, volume: n, label: `Volume ${n}` });
+  }
+  items.sort((a, b) => a.volume - b.volume);
+  closeVolSheet(items);
+}
+
+document.getElementById("vol-multi").addEventListener("change", syncVolSheet);
+document.getElementById("vol-go").addEventListener("click", submitVolSheet);
+document.getElementById("vol-cancel").addEventListener("click", () => closeVolSheet(null));
+document.getElementById("vol-close").addEventListener("click", () => closeVolSheet(null));
+document.getElementById("vol-sheet").addEventListener("click", (e) => {
+  if (e.target.id === "vol-sheet") closeVolSheet(null);
+});
 
 // ---------------------------------------------------------------------
 // Book detail
@@ -3523,7 +3657,8 @@ async function loadAskLibrary({ quiet = false } = {}) {
   }
 }
 
-function askRowHtml(b, { shared }) {
+function askRowHtml(b, { shared, label }) {
+  const shown = escapeHtml(label || b.title);
   const pages = b.page_count ? `${b.page_count} p.` : "";
   const admin = shared && askLib.is_admin;
   const del = admin ? `<button class="mini-btn" data-del="${b.book_id}" title="Remove from library">${ic("trash-2")}</button>` : "";
@@ -3543,7 +3678,7 @@ function askRowHtml(b, { shared }) {
     const checked = askSelected.has(b.book_id) ? "checked" : "";
     return (
       `<label class="check-row"><input type="checkbox" data-id="${b.book_id}" ${checked} />${cover}` +
-      `<span class="check-title">${escapeHtml(b.title)}</span><span class="check-meta">${pages}</span>${open}${edit}${del}</label>`
+      `<span class="check-title">${shown}</span><span class="check-meta">${pages}</span>${open}${edit}${del}</label>`
     );
   }
   // Not answerable yet: say why (under the title, so a long progress line
@@ -3563,7 +3698,7 @@ function askRowHtml(b, { shared }) {
   }
   return (
     `<div class="check-row is-disabled"><input type="checkbox" disabled />${cover}` +
-    `<span class="check-title">${escapeHtml(b.title)}${meta}</span>${action}${open}${edit}${del}</div>`
+    `<span class="check-title">${shown}${meta}</span>${action}${open}${edit}${del}</div>`
   );
 }
 
@@ -3581,6 +3716,48 @@ function renderAskSpecialtyOptions() {
 
 let askQuery = "";  // the picker's search box
 
+// The rows of one list, with the volumes of a multi-volume book together
+// under one title: its tick picks every ready volume, or tick one alone.
+function askListHtml(books, { shared }) {
+  const groups = new Map();
+  const order = [];
+  books.forEach((b) => {
+    if (b.series && b.volume) {
+      const key = b.series.toLowerCase();
+      if (!groups.has(key)) { groups.set(key, []); order.push({ key }); }
+      groups.get(key).push(b);
+    } else {
+      order.push({ book: b });
+    }
+  });
+  return order
+    .map((o) => {
+      if (o.book) return askRowHtml(o.book, { shared });
+      const vols = groups.get(o.key).slice().sort((a, b) => a.volume - b.volume);
+      const ready = vols.filter((b) => b.qa_indexed).map((b) => b.book_id);
+      const n = vols.length;
+      const sub = `${n} volume${n === 1 ? "" : "s"}` + (ready.length < n ? ` · ${ready.length} ready` : "");
+      const head =
+        `<label class="check-row vol-head${ready.length ? "" : " is-disabled"}">` +
+        `<input type="checkbox" data-group="${ready.join(",")}" ${ready.length ? "" : "disabled"} />` +
+        `<span class="vol-icon">${ic("layers")}</span>` +
+        `<span class="check-title">${escapeHtml(vols[0].series)}<span class="check-sub">${sub}</span></span></label>`;
+      const rows = vols.map((b) => askRowHtml(b, { shared, label: `Volume ${b.volume}` })).join("");
+      return `<div class="vol-group">${head}<div class="vol-children">${rows}</div></div>`;
+    })
+    .join("");
+}
+
+// A title's tick shows all (ticked), some (a dash) or none of its volumes.
+function syncAskGroupTicks(root) {
+  root.querySelectorAll('input[type="checkbox"][data-group]').forEach((box) => {
+    const ids = box.dataset.group ? box.dataset.group.split(",") : [];
+    const on = ids.filter((id) => askSelected.has(id)).length;
+    box.checked = ids.length > 0 && on === ids.length;
+    box.indeterminate = on > 0 && on < ids.length;
+  });
+}
+
 function renderAskLibrary() {
   if (!askLib) return;
   const select = document.getElementById("ask-specialty");
@@ -3596,17 +3773,17 @@ function renderAskLibrary() {
       // A search looks through every specialty, not just the one picked.
       const seen = new Set();
       const hits = askLib.specialties.flatMap((s) => s.books).filter((b) => {
-        if (seen.has(b.book_id) || !titleMatches(b.title, words)) return false;
+        if (seen.has(b.book_id) || !(titleMatches(b.title, words) || (b.series && titleMatches(b.series, words)))) return false;
         seen.add(b.book_id);
         return true;
       });
       sharedBox.innerHTML = hits.length
-        ? hits.map((b) => askRowHtml(b, { shared: true })).join("")
+        ? askListHtml(hits, { shared: true })
         : `<p class="muted">No specialty book matches “${escapeHtml(askQuery)}”.</p>`;
     } else {
       const spec = askLib.specialties.find((s) => s.name === askSpecialty);
       sharedBox.innerHTML = spec && spec.books.length
-        ? spec.books.map((b) => askRowHtml(b, { shared: true })).join("")
+        ? askListHtml(spec.books, { shared: true })
         : `<p class="muted">No books in this specialty yet.</p>`;
     }
   } else {
@@ -3614,13 +3791,14 @@ function renderAskLibrary() {
     sharedBox.innerHTML = `<p class="muted">No specialty libraries yet.</p>`;
   }
 
-  const mine = askLib.my_books.filter((b) => titleMatches(b.title, words));
+  const mine = askLib.my_books.filter((b) => titleMatches(b.title, words) || (b.series && titleMatches(b.series, words)));
   mineBox.innerHTML = mine.length
-    ? mine.map((b) => askRowHtml(b, { shared: false })).join("")
+    ? askListHtml(mine, { shared: false })
     : askLib.my_books.length
       ? `<p class="muted">None of your books matches “${escapeHtml(askQuery)}”.</p>`
       : `<p class="muted">No books on your shelf yet. Add one from the ${ic("library-big")} Shelf tab.</p>`;
   loadCoverThumbs(document.getElementById("view-ask"));
+  syncAskGroupTicks(document.getElementById("view-ask"));
 
   const admin = document.getElementById("ask-admin");
   admin.hidden = !askLib.is_admin;
@@ -3874,39 +4052,47 @@ async function askAdminCall(path, opts, { confirmText } = {}) {
   loadAskLibrary({ quiet: true });
 }
 
-function askAdminUpload(file, { specialty = askSpecialty, title } = {}) {
+// Into the specialty library (admin): the same title/volumes sheet as the
+// shelf, then the files go up one after another.
+async function askAdminUpload(files, { specialty = askSpecialty, title = "" } = {}) {
   if (!specialty) return;
-  if (file.size > maxUploadMb * 1024 * 1024) {
-    alertMsg(`That file is over the ${maxUploadMb}MB limit (${(file.size / 1024 / 1024).toFixed(1)}MB).`);
-    return;
-  }
+  const items = await askVolumes(files, { title, head: `Add a book to ${specialty}` });
+  if (!items) return;
   const wrap = document.getElementById("ask-admin-progress");
   const bar = document.getElementById("ask-admin-bar");
   const status = document.getElementById("ask-admin-status");
   const uploadBtn = document.getElementById("ask-admin-upload");
   wrap.hidden = false;
   uploadBtn.disabled = true;
-  bar.style.width = "0%";
-  status.textContent = `Uploading "${title || file.name}" to ${specialty}…`;
   wrap.scrollIntoView({ block: "nearest", behavior: "smooth" });
-
-  const done = (msg) => {
-    wrap.hidden = true;
-    uploadBtn.disabled = false;
-    if (msg) alertMsg(msg);
-    loadAskLibrary({ quiet: true });
-  };
-  chunkedUpload(file, {
-    target: "shared",
-    specialty,
-    title: title || file.name.replace(/\.pdf$/i, "").replace(/_/g, " "),
-    onProgress: (f, text) => {
-      bar.style.width = Math.round(f * 100) + "%";
-      status.textContent = text;
-    },
-  })
-    .then(() => done())
-    .catch((e) => done(e.message === "Network error" ? "Upload failed -- check your connection and try again." : e.message));
+  let error = null;
+  for (let i = 0; i < items.length && !error; i++) {
+    const it = items[i];
+    const label = items.length > 1 ? `${it.label} (${i + 1} of ${items.length}): ` : "";
+    bar.style.width = "0%";
+    status.textContent = `${label}Uploading "${it.title}" to ${specialty}…`;
+    try {
+      await chunkedUpload(it.file, {
+        target: "shared",
+        specialty,
+        title: it.title,
+        series: it.series,
+        volume: it.volume,
+        onProgress: (f, text) => {
+          bar.style.width = Math.round(f * 100) + "%";
+          status.textContent = label + text;
+        },
+      });
+    } catch (e) {
+      const msg = e.message === "Network error" ? "Upload failed -- check your connection and try again." : e.message;
+      error = items.length > 1 ? `${it.label}: ${msg}` : msg;
+    }
+    loadAskLibrary({ quiet: true });  // each volume shows up (and starts indexing) as soon as it's in
+  }
+  wrap.hidden = true;
+  uploadBtn.disabled = false;
+  if (error) alertMsg(error);
+  loadAskLibrary({ quiet: true });
 }
 
 // --- recommended books (admin): the standard references per specialty ---
@@ -3953,7 +4139,7 @@ function renderRecommended() {
     .join("");
 }
 
-async function recUpload(file) {
+async function recUpload(files) {
   const pending = recPending;
   recPending = null;
   if (!pending) return;
@@ -3973,7 +4159,7 @@ async function recUpload(file) {
     }
   }
   askSpecialty = specialty;
-  askAdminUpload(file, { specialty, title: pending.title });
+  askAdminUpload(files, { specialty, title: pending.title });
 }
 
 function renderAskAdminShelf() {
@@ -4148,6 +4334,28 @@ function wireAskTab() {
 
   // One delegated listener for both checklists and every row button.
   view.addEventListener("change", (e) => {
+    const group = e.target.closest('.check-row input[type="checkbox"][data-group]');
+    if (group) {
+      // The title of a multi-volume book: every ready volume, or none.
+      const ids = group.dataset.group ? group.dataset.group.split(",") : [];
+      if (group.checked) {
+        const adding = ids.filter((id) => !askSelected.has(id));
+        if (askLib && askSelected.size + adding.length > askLib.max_books) {
+          syncAskGroupTicks(view);
+          return alertMsg(`That's more than ${askLib.max_books} books at once. Untick a few, or tick single volumes.`);
+        }
+        adding.forEach((id) => askSelected.add(id));
+      } else {
+        ids.forEach((id) => askSelected.delete(id));
+      }
+      view.querySelectorAll('.check-row input[type="checkbox"][data-id]').forEach((b) => {
+        if (ids.includes(b.dataset.id)) b.checked = askSelected.has(b.dataset.id);
+      });
+      syncAskGroupTicks(view);
+      renderAskSpecialtyOptions();
+      renderAskSelection();
+      return;
+    }
     const box = e.target.closest('.check-row input[type="checkbox"][data-id]');
     if (!box) return;
     if (box.checked) {
@@ -4161,6 +4369,7 @@ function wireAskTab() {
     }
     // Only the counters are refreshed: rebuilding the lists on every tick
     // would replace the checkbox under the user's finger.
+    syncAskGroupTicks(view);
     renderAskSpecialtyOptions();
     renderAskSelection();
   });
@@ -4298,9 +4507,9 @@ function wireAskTab() {
     document.getElementById("ask-admin-file").click();
   });
   document.getElementById("ask-admin-file").addEventListener("change", (e) => {
-    const file = e.target.files[0];
+    const files = Array.from(e.target.files || []);
     e.target.value = "";
-    if (file) askAdminUpload(file);
+    if (files.length) askAdminUpload(files);
   });
   document.getElementById("rec-specialty").addEventListener("change", (e) => {
     recSpecialty = e.target.value;
@@ -4314,9 +4523,9 @@ function wireAskTab() {
     document.getElementById("rec-file").click();
   });
   document.getElementById("rec-file").addEventListener("change", (e) => {
-    const file = e.target.files[0];
+    const files = Array.from(e.target.files || []);
     e.target.value = "";
-    if (file) recUpload(file);
+    if (files.length) recUpload(files);
     else recPending = null;
   });
   document.getElementById("ask-admin-publish").addEventListener("click", () => {

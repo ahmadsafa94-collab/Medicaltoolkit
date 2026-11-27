@@ -2224,10 +2224,13 @@ async def ask_library(request: Request):
             "title": b["title"],
             "page_count": b.get("page_count"),
             "qa_indexed": bool(b.get("qa_indexed")),
+            "series": b.get("series"),
+            "volume": b.get("volume"),
         }
         for bid, b in library.own_books(user["id"]).items()
     ]
-    my_books.sort(key=lambda b: b["title"].lower())
+    # Volumes of one book sort together, in volume order.
+    my_books.sort(key=lambda b: ((b["series"] or b["title"]).lower(), b["volume"] or 0))
     return JSONResponse(
         {
             "my_books": my_books,
@@ -2418,7 +2421,10 @@ async def shared_publish(request: Request):
     # the shared one with it.
     await asyncio.to_thread(shutil.copyfile, book["pdf_path"], dest_path)
     try:
-        shared_library.add_book(specialty, book["title"], dest_path, book.get("page_count") or 0, user["id"], book_id=new_id)
+        shared_library.add_book(
+            specialty, book["title"], dest_path, book.get("page_count") or 0, user["id"], book_id=new_id,
+            series=book.get("series"), volume=book.get("volume"),
+        )
         book_store.upload_async(dest_path)  # the lasting copy, in the bucket
     except shared_library.SharedLibraryError as e:
         _safe_remove(dest_path)
@@ -2570,6 +2576,11 @@ async def upload_start(request: Request):
         raise ApiError(status_code=413, detail=f"That file is over the {limit_mb}MB limit.")
     filename = safe_pdf_filename(body.get("filename"))
     title = " ".join(str(body.get("title") or "").split())[:200] or os.path.splitext(filename)[0] or "Untitled book"
+    # One volume of a multi-volume book: stored under the book's own title
+    # (the series) with its number, and titled "<series> — Volume N".
+    series, volume = library.volume_fields(body.get("series"), body.get("volume"))
+    if series:
+        title = library.volume_title(series, volume)
 
     target = body.get("target") or "shelf"
     if target == "shared":
@@ -2629,7 +2640,7 @@ async def upload_start(request: Request):
 
     _uploads[upload_id] = {
         "user_id": user["id"], "path": path, "size": size, "title": title, "target": target,
-        "specialty": specialty, "received": set(), "touched": time.time(), "started": time.time(),
+        "specialty": specialty, "series": series, "volume": volume, "received": set(), "touched": time.time(), "started": time.time(),
         "chunks": -(-size // UPLOAD_CHUNK_BYTES), "chunk_size": UPLOAD_CHUNK_BYTES, "dest_dir": dest_dir, "filename": filename,
         "writers": 0, "closed": False,
     }
@@ -2793,7 +2804,10 @@ async def _accept_upload(user: dict, up: dict):
 
     if up["target"] == "shared":
         try:
-            book_id = shared_library.add_book(up["specialty"], up["title"], up["path"], page_count, added_by=user["id"])
+            book_id = shared_library.add_book(
+                up["specialty"], up["title"], up["path"], page_count, added_by=user["id"],
+                series=up.get("series"), volume=up.get("volume"),
+            )
             book_store.upload_async(up["path"])  # the lasting copy, in the bucket
         except shared_library.SharedLibraryError as e:
             _safe_remove(up["path"])
@@ -2808,7 +2822,10 @@ async def _accept_upload(user: dict, up: dict):
     except subscriptions.ShelfLimitReached as e:
         _safe_remove(up["path"])
         raise ApiError(status_code=402, detail=str(e))
-    book_id = library.add_book(user["id"], up["title"], up["path"], page_count, source="shelf")
+    book_id = library.add_book(
+        user["id"], up["title"], up["path"], page_count, source="shelf",
+        series=up.get("series"), volume=up.get("volume"),
+    )
     book_store.upload_async(up["path"])  # the lasting copy, in the bucket
     return JSONResponse(_public_book(book_id, library.get_book(user["id"], book_id)))
 

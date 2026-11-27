@@ -75,10 +75,15 @@ def _save(user_id: int, registry: dict):
     os.replace(tmp_path, path)  # atomic on POSIX
 
 
-def add_book(user_id: int, title: str, pdf_path: str, page_count: int, source: str = "shelf") -> str:
+def add_book(
+    user_id: int, title: str, pdf_path: str, page_count: int, source: str = "shelf",
+    series: str | None = None, volume: int | None = None,
+) -> str:
     """
     Register a newly-uploaded book. `source` is "chat" or "shelf" -- purely
     informational, in case the UI ever wants to show where a book came from.
+    `series`/`volume`: one volume of a multi-volume book; the mini app shows
+    the volumes together under the series title (see volume_fields).
     """
     registry = _load(user_id)
     book_id = uuid.uuid4().hex[:10]
@@ -95,9 +100,28 @@ def add_book(user_id: int, title: str, pdf_path: str, page_count: int, source: s
         "num_chunks": 0,
         "bookmark_page": None,  # last page the user bookmarked in the reader, 1-indexed
         "cover_color": None,    # user-chosen hex color ("#rrggbb") for the shelf cover, or None for the default
+        "series": series,       # the multi-volume book this is one volume of, or None
+        "volume": volume,       # its volume number (1, 2, ...), or None
     }
     _save(user_id, registry)
     return book_id
+
+
+MAX_VOLUME = 99
+
+
+def volume_fields(series, volume) -> tuple[str | None, int | None]:
+    """A clean (series, volume) pair from user input, or (None, None)."""
+    series = " ".join(str(series or "").split())[:200]
+    if isinstance(volume, str) and volume.strip().isdigit():
+        volume = int(volume.strip())
+    if not series or not isinstance(volume, int) or isinstance(volume, bool) or not 1 <= volume <= MAX_VOLUME:
+        return None, None
+    return series, volume
+
+
+def volume_title(series: str, volume: int) -> str:
+    return f"{series} — Volume {volume}"
 
 
 def list_books(user_id: int) -> dict:
@@ -122,7 +146,7 @@ SHARED_SOURCE = "shared"
 # Fields owned by the shared book, refreshed from it on every access; all
 # other fields (bookmark, chapters the user divided, cover colour) are the
 # user's own.
-_SHARED_FIELDS = ("title", "pdf_path", "page_count", "qa_indexed", "num_chunks", "index_model")
+_SHARED_FIELDS = ("title", "pdf_path", "page_count", "qa_indexed", "num_chunks", "index_model", "series", "volume")
 
 
 def is_shared_ref(entry: dict | None) -> bool:

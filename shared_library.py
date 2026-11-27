@@ -129,7 +129,10 @@ def new_book_id() -> str:
     return "sh" + uuid.uuid4().hex[:10]
 
 
-def add_book(specialty: str, title: str, pdf_path: str, page_count: int, added_by: int, book_id: str | None = None) -> str:
+def add_book(
+    specialty: str, title: str, pdf_path: str, page_count: int, added_by: int, book_id: str | None = None,
+    series: str | None = None, volume: int | None = None,
+) -> str:
     specialty = add_specialty(specialty)
     book_id = book_id or new_book_id()
     with _lock:
@@ -144,6 +147,8 @@ def add_book(specialty: str, title: str, pdf_path: str, page_count: int, added_b
             "index_error": None,
             "added_by": added_by,
             "added_at": time.time(),
+            "series": series,  # one volume of a multi-volume book (see library.volume_fields)
+            "volume": volume,
         }
         _save(data)
     return book_id
@@ -252,10 +257,13 @@ def catalog() -> list[dict]:
                 "qa_indexed": bool(b.get("qa_indexed")),
                 "index_error": b.get("index_error"),
                 "has_chapters": bool(b.get("chapters")),
+                "series": b.get("series"),
+                "volume": b.get("volume"),
             }
             for bid, b in data["books"].items()
             if b["specialty"] == name
         ]
-        books.sort(key=lambda b: b["title"].lower())
+        # Volumes of one book sort together, in volume order.
+        books.sort(key=lambda b: ((b["series"] or b["title"]).lower(), b["volume"] or 0))
         out.append({"name": name, "books": books})
     return out
