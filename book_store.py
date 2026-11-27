@@ -249,14 +249,19 @@ _TEMP_SUFFIXES = (".download", ".repair.tmp", ".tmp")
 _TEMP_MAX_AGE = 6 * 3600
 
 
-def _dir_size(path: str) -> int:
+def _dir_size(path: str, seen: set) -> int:
+    # Hard links (the content cache links index files) are counted once.
     total = 0
     for dirpath, _dirs, files in os.walk(path):
         for f in files:
             try:
-                total += os.path.getsize(os.path.join(dirpath, f))
+                st = os.stat(os.path.join(dirpath, f))
             except OSError:
-                pass
+                continue
+            if (st.st_dev, st.st_ino) in seen:
+                continue
+            seen.add((st.st_dev, st.st_ino))
+            total += st.st_size
     return total
 
 
@@ -265,11 +270,11 @@ def disk_report() -> dict:
     import shutil
 
     root = os.path.realpath(STORAGE_DIR)
-    sizes = {}
+    sizes, seen = {}, set()
     try:
-        for name in os.listdir(root):
+        for name in sorted(os.listdir(root), key=lambda n: n == "_content_cache"):  # links counted where they're used
             full = os.path.join(root, name)
-            sizes[name] = _dir_size(full) if os.path.isdir(full) else os.path.getsize(full)
+            sizes[name] = _dir_size(full, seen) if os.path.isdir(full) else os.path.getsize(full)
     except OSError:
         pass
     # Users' own folders (numeric ids) are summed into one line.
