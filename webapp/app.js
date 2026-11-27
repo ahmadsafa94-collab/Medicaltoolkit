@@ -1100,7 +1100,9 @@ function detectVolume(name) {
 let volSheetResolve = null;
 
 // Resolves with [{file, title, series, volume, label}] in upload order, or null if cancelled.
-function askVolumes(files, { title = "", head = "Add a book" } = {}) {
+// `volumes`: numbers this book already has (new files are numbered after
+// them); `multi`: it is known to be a multi-volume book.
+function askVolumes(files, { title = "", head = "Add a book", volumes = [], multi: knownMulti = false } = {}) {
   files = Array.from(files || []).filter((f) => f && f.size);
   if (!files.length) return Promise.resolve(null);
   for (const f of files) {
@@ -1112,12 +1114,13 @@ function askVolumes(files, { title = "", head = "Add a book" } = {}) {
   const found = files.map((f) => ({ file: f, ...detectVolume(f.name) }));
   // Volumes found in the names: in that order; otherwise as picked.
   if (found.every((x) => x.volume)) found.sort((a, b) => a.volume - b.volume);
-  const multi = files.length > 1 || found[0].volume != null;
+  const multi = knownMulti || files.length > 1 || found[0].volume != null;
   document.getElementById("vol-head").textContent = files.length > 1 ? `Add ${files.length} files` : head;
   document.getElementById("vol-title").value = title || found[0].base || cleanFileTitle(files[0].name);
   document.getElementById("vol-multi").checked = multi;
   document.getElementById("vol-error").hidden = true;
-  const used = new Set();
+  volSheetExisting = new Set(volumes);
+  const used = new Set(volumes);
   document.getElementById("vol-files").innerHTML = found
     .map((x, i) => {
       let n = x.volume && !used.has(x.volume) ? x.volume : null;
@@ -1144,6 +1147,7 @@ function askVolumes(files, { title = "", head = "Add a book" } = {}) {
 }
 
 let volSheetFiles = [];
+let volSheetExisting = new Set();  // volumes the book already has (adding to a multi-volume book)
 
 function syncVolSheet() {
   const multi = document.getElementById("vol-multi").checked;
@@ -1183,6 +1187,7 @@ function submitVolSheet() {
     const n = parseInt(input.value, 10);
     if (!(n >= 1 && n <= 99)) return fail("Each volume needs a number from 1 to 99.");
     if (seen.has(n)) return fail(`Volume ${n} is listed twice.`);
+    if (volSheetExisting.has(n)) return fail(`Volume ${n} is already in the library.`);
     seen.add(n);
     const file = volSheetFiles[parseInt(input.dataset.vol, 10)];
     items.push({ file, title: `${title} — Volume ${n}`, series: title, volume: n, label: `Volume ${n}` });
@@ -4054,9 +4059,9 @@ async function askAdminCall(path, opts, { confirmText } = {}) {
 
 // Into the specialty library (admin): the same title/volumes sheet as the
 // shelf, then the files go up one after another.
-async function askAdminUpload(files, { specialty = askSpecialty, title = "" } = {}) {
+async function askAdminUpload(files, { specialty = askSpecialty, title = "", volumes = [], multi = false } = {}) {
   if (!specialty) return;
-  const items = await askVolumes(files, { title, head: `Add a book to ${specialty}` });
+  const items = await askVolumes(files, { title, head: `Add a book to ${specialty}`, volumes, multi });
   if (!items) return;
   const wrap = document.getElementById("ask-admin-progress");
   const bar = document.getElementById("ask-admin-bar");
@@ -4100,14 +4105,20 @@ async function askAdminUpload(files, { specialty = askSpecialty, title = "" } = 
 let recSpecialty = null;
 let recPending = null;  // {specialty, title} waiting for its PDF
 
+// What the specialty already has of a recommended book: a single book, or
+// the volumes of a multi-volume one (more volumes can still be added).
 function recBookInLibrary(specialty, rec) {
   const spec = (askLib.specialties || []).find((s) => s.name.toLowerCase() === specialty.toLowerCase());
-  if (!spec) return false;
+  if (!spec) return null;
   const words = rec.match.map((w) => w.toLowerCase());
-  return spec.books.some((b) => {
-    const t = (b.title || "").toLowerCase().replace(/[_-]+/g, " ");
+  const hits = spec.books.filter((b) => {
+    const t = (b.series || b.title || "").toLowerCase().replace(/[_-]+/g, " ");
     return words.every((w) => t.includes(w));
   });
+  if (!hits.length) return null;
+  const vols = hits.filter((b) => b.series && b.volume);
+  if (!vols.length) return { single: true };
+  return { series: vols[0].series, volumes: vols.map((b) => b.volume).sort((x, y) => x - y) };
 }
 
 function renderRecommended() {
@@ -4129,12 +4140,21 @@ function renderRecommended() {
   box.innerHTML = rec[recSpecialty]
     .map((r, i) => {
       const have = recBookInLibrary(recSpecialty, r);
+      let status;
+      if (!have) {
+        status = `<button class="mini-btn" data-rec="${i}">${ic("upload")} Add PDF</button>`;
+      } else if (have.single) {
+        status = `<span class="rec-have">${ic("circle-check")} In library</span>`;
+      } else {
+        // A multi-volume book: which volumes are in, and a button for the rest.
+        const v = have.volumes;
+        status =
+          `<span class="rec-have">${ic("layers")} Vol. ${v.join(", ")}</span>` +
+          `<button class="mini-btn" data-rec="${i}">${ic("plus")} Volume</button>`;
+      }
       return `<div class="check-row rec-row"><span class="rec-num">${i + 1}</span>` +
         `<span class="check-title"><strong>${escapeHtml(r.title)}</strong><br><span class="muted">${escapeHtml(r.by)}</span></span>` +
-        (have
-          ? `<span class="rec-have">${ic("circle-check")} In library</span>`
-          : `<button class="mini-btn" data-rec="${i}">${ic("upload")} Add PDF</button>`) +
-        `</div>`;
+        status + `</div>`;
     })
     .join("");
 }
@@ -4159,7 +4179,7 @@ async function recUpload(files) {
     }
   }
   askSpecialty = specialty;
-  askAdminUpload(files, { specialty, title: pending.title });
+  askAdminUpload(files, { specialty, title: pending.title, volumes: pending.volumes, multi: pending.multi });
 }
 
 function renderAskAdminShelf() {
@@ -4519,7 +4539,10 @@ function wireAskTab() {
     const b = e.target.closest("[data-rec]");
     if (!b) return;
     const r = askLib.recommended[recSpecialty][parseInt(b.dataset.rec, 10)];
-    recPending = { specialty: recSpecialty, title: r.title };
+    const have = recBookInLibrary(recSpecialty, r);
+    recPending = have && have.series
+      ? { specialty: recSpecialty, title: have.series, volumes: have.volumes, multi: true }
+      : { specialty: recSpecialty, title: r.title };
     document.getElementById("rec-file").click();
   });
   document.getElementById("rec-file").addEventListener("change", (e) => {
