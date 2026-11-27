@@ -2904,6 +2904,31 @@ async def shared_rename(request: Request):
     return JSONResponse({"title": title, "specialties": _shared_catalog()})
 
 
+async def shared_set_volume(request: Request):
+    """
+    Admin: make a specialty book one volume of a multi-volume book -- e.g. a
+    book uploaded as a single file before volumes existed becomes Volume 1,
+    so its other volumes can be added under the same title.
+    """
+    _require_admin(request)
+    body = await _json_body(request)
+    book_id = request.path_params["book_id"]
+    if shared_library.get_book(book_id) is None:
+        raise ApiError(status_code=404, detail="That book no longer exists.")
+    series, volume = library.volume_fields(body.get("series"), body.get("volume"))
+    if not series:
+        raise ApiError(status_code=400, detail="Give the book's title and a volume number from 1 to 99.")
+    clash = next(
+        (b for bid, b in shared_library.list_books().items()
+         if bid != book_id and (b.get("series") or "").lower() == series.lower() and b.get("volume") == volume),
+        None,
+    )
+    if clash:
+        raise ApiError(status_code=409, detail=f"Volume {volume} of that book is already in the library.")
+    shared_library.set_volume(book_id, series, volume, library.volume_title(series, volume))
+    return JSONResponse({"book_id": book_id, "specialties": _shared_catalog()})
+
+
 async def suggest_book(request: Request):
     """A customer suggests a book for a specialty library; it's saved and sent to every admin."""
     user = require_user(request)
@@ -3365,6 +3390,7 @@ routes = [
     Route("/api/shared/books/{book_id}/index", shared_reindex, methods=["POST"]),
     Route("/api/shared/books/{book_id}", shared_delete_book, methods=["DELETE"]),
     Route("/api/shared/books/{book_id}/rename", shared_rename, methods=["POST"]),
+    Route("/api/shared/books/{book_id}/volume", shared_set_volume, methods=["POST"]),
     Route("/api/shared/books/{book_id}/cover", shared_book_cover, methods=["GET"]),
     Route("/api/books/{book_id}/cover", book_cover, methods=["GET"]),
     Route("/api/lexidrug/status", lexidrug_status, methods=["GET"]),

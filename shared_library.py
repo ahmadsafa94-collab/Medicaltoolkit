@@ -183,6 +183,11 @@ def rename_book(book_id: str, title) -> str:
     return title
 
 
+def set_volume(book_id: str, series: str | None, volume: int | None, title: str) -> bool:
+    """Make a book one volume of a multi-volume book (or a plain book again, with None)."""
+    return _update(book_id, series=series, volume=volume, title=title)
+
+
 def set_chapters(book_id: str, chapters: list[dict]) -> bool:
     """Chapter ranges shared by every user who opens this book (computed once, see webapp_api)."""
     return _update(book_id, chapters=chapters)

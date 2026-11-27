@@ -1102,7 +1102,7 @@ let volSheetResolve = null;
 // Resolves with [{file, title, series, volume, label}] in upload order, or null if cancelled.
 // `volumes`: numbers this book already has (new files are numbered after
 // them); `multi`: it is known to be a multi-volume book.
-function askVolumes(files, { title = "", head = "Add a book", volumes = [], multi: knownMulti = false } = {}) {
+function askVolumes(files, { title = "", head = "Add a book", volumes = [], multi: knownMulti = false, convertId = null } = {}) {
   files = Array.from(files || []).filter((f) => f && f.size);
   if (!files.length) return Promise.resolve(null);
   for (const f of files) {
@@ -1120,6 +1120,7 @@ function askVolumes(files, { title = "", head = "Add a book", volumes = [], mult
   document.getElementById("vol-multi").checked = multi;
   document.getElementById("vol-error").hidden = true;
   volSheetExisting = new Set(volumes);
+  volSheetConverting = !!convertId;
   const used = new Set(volumes);
   document.getElementById("vol-files").innerHTML = found
     .map((x, i) => {
@@ -1147,12 +1148,17 @@ function askVolumes(files, { title = "", head = "Add a book", volumes = [], mult
 }
 
 let volSheetFiles = [];
-let volSheetExisting = new Set();  // volumes the book already has (adding to a multi-volume book)
+let volSheetExisting = new Set();
+let volSheetConverting = false;  // the book already in becomes Volume 1  // volumes the book already has (adding to a multi-volume book)
 
 function syncVolSheet() {
   const multi = document.getElementById("vol-multi").checked;
   const several = volSheetFiles.length > 1;
-  document.getElementById("vol-hint").hidden = !multi;
+  const hint = document.getElementById("vol-hint");
+  hint.hidden = !multi;
+  hint.textContent = volSheetConverting && multi
+    ? "The file already in the library becomes Volume 1, and these files are added as the next volumes, all under this title."
+    : "The volumes are kept together under this title. In Ask, ticking the title picks every volume, or tick just the one you need.";
   document.querySelectorAll("#vol-files .vol-num").forEach((el) => { el.hidden = !multi; });
   // Several files that aren't volumes of one book are separate books, each under its own name.
   const label = document.querySelector("#vol-sheet .vol-label");
@@ -1187,7 +1193,11 @@ function submitVolSheet() {
     const n = parseInt(input.value, 10);
     if (!(n >= 1 && n <= 99)) return fail("Each volume needs a number from 1 to 99.");
     if (seen.has(n)) return fail(`Volume ${n} is listed twice.`);
-    if (volSheetExisting.has(n)) return fail(`Volume ${n} is already in the library.`);
+    if (volSheetExisting.has(n)) {
+      return fail(volSheetConverting && n === 1
+        ? "Volume 1 is the file already in the library. Number these from 2."
+        : `Volume ${n} is already in the library.`);
+    }
     seen.add(n);
     const file = volSheetFiles[parseInt(input.dataset.vol, 10)];
     items.push({ file, title: `${title} — Volume ${n}`, series: title, volume: n, label: `Volume ${n}` });
@@ -4059,10 +4069,22 @@ async function askAdminCall(path, opts, { confirmText } = {}) {
 
 // Into the specialty library (admin): the same title/volumes sheet as the
 // shelf, then the files go up one after another.
-async function askAdminUpload(files, { specialty = askSpecialty, title = "", volumes = [], multi = false } = {}) {
+async function askAdminUpload(files, { specialty = askSpecialty, title = "", volumes = [], multi = false, convertId = null } = {}) {
   if (!specialty) return;
-  const items = await askVolumes(files, { title, head: `Add a book to ${specialty}`, volumes, multi });
+  const items = await askVolumes(files, { title, head: `Add a book to ${specialty}`, volumes, multi, convertId });
   if (!items) return;
+  if (convertId && items[0].series) {
+    // The single book already in the library becomes Volume 1 of this title.
+    try {
+      await api(`/api/shared/books/${encodeURIComponent(convertId)}/volume`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ series: items[0].series, volume: 1 }),
+      });
+    } catch (e) {
+      return alertMsg(e.message);
+    }
+  }
   const wrap = document.getElementById("ask-admin-progress");
   const bar = document.getElementById("ask-admin-bar");
   const status = document.getElementById("ask-admin-status");
@@ -4117,7 +4139,7 @@ function recBookInLibrary(specialty, rec) {
   });
   if (!hits.length) return null;
   const vols = hits.filter((b) => b.series && b.volume);
-  if (!vols.length) return { single: true };
+  if (!vols.length) return { single: true, book_id: hits[0].book_id };
   return { series: vols[0].series, volumes: vols.map((b) => b.volume).sort((x, y) => x - y) };
 }
 
@@ -4144,7 +4166,9 @@ function renderRecommended() {
       if (!have) {
         status = `<button class="mini-btn" data-rec="${i}">${ic("upload")} Add PDF</button>`;
       } else if (have.single) {
-        status = `<span class="rec-have">${ic("circle-check")} In library</span>`;
+        // Uploaded as one file: it can still become Volume 1 of a set.
+        status = `<span class="rec-have">${ic("circle-check")} In library</span>` +
+          `<button class="mini-btn" data-rec="${i}" title="Add another volume of this book">${ic("plus")} Volume</button>`;
       } else {
         // A multi-volume book: which volumes are in, and a button for the rest.
         const v = have.volumes;
@@ -4179,7 +4203,7 @@ async function recUpload(files) {
     }
   }
   askSpecialty = specialty;
-  askAdminUpload(files, { specialty, title: pending.title, volumes: pending.volumes, multi: pending.multi });
+  askAdminUpload(files, { specialty, title: pending.title, volumes: pending.volumes, multi: pending.multi, convertId: pending.convertId });
 }
 
 function renderAskAdminShelf() {
@@ -4542,7 +4566,10 @@ function wireAskTab() {
     const have = recBookInLibrary(recSpecialty, r);
     recPending = have && have.series
       ? { specialty: recSpecialty, title: have.series, volumes: have.volumes, multi: true }
-      : { specialty: recSpecialty, title: r.title };
+      : have && have.single
+        // The file already in becomes Volume 1; the new files follow it.
+        ? { specialty: recSpecialty, title: r.title, volumes: [1], multi: true, convertId: have.book_id }
+        : { specialty: recSpecialty, title: r.title };
     document.getElementById("rec-file").click();
   });
   document.getElementById("rec-file").addEventListener("change", (e) => {
