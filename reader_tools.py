@@ -180,23 +180,15 @@ def page_texts(book_id: str, pdf_path: str) -> list[str]:
                 return cached["pages"]
         except (OSError, json.JSONDecodeError, AttributeError):
             pass
-        import pypdfium2 as pdfium  # already a dependency (book covers)
+        from pdf_processor import fast_page_texts  # pdfium, with repair and its thread lock
 
-        pages = []
-        pdf = pdfium.PdfDocument(pdf_path)
+        pages = fast_page_texts(pdf_path)
+        if pages is None:
+            pages = []
         try:
-            for i in range(len(pdf)):
-                page = pdf[i]
-                try:
-                    tp = page.get_textpage()
-                    pages.append(tp.get_text_range() or "")
-                    tp.close()
-                except Exception:
-                    pages.append("")
-                finally:
-                    page.close()
-        finally:
-            pdf.close()
+            mtime = os.path.getmtime(pdf_path)  # a repair may have rewritten the file
+        except OSError:
+            pass
         try:
             _write(path, {"mtime": mtime, "pages": pages})
         except OSError:

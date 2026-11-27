@@ -56,15 +56,18 @@ def get_cover(book_id: str, pdf_path: str, size: str = "thumb") -> str:
         if os.path.exists(out):  # rendered by another request while this one waited
             return out
         try:
-            pdf = pdfium.PdfDocument(book_store.ensure_local(pdf_path))
-            try:
-                page = pdf[0]
-                width, height = page.get_size()
-                scale = min(_WIDTHS[size] / max(width, 1), _MAX_HEIGHTS[size] / max(height, 1))
-                image = page.render(scale=scale).to_pil().convert("RGB")
-                page.close()
-            finally:
-                pdf.close()
+            from pdf_processor import PDFIUM_LOCK  # pdfium isn't thread-safe
+
+            with PDFIUM_LOCK:
+                pdf = pdfium.PdfDocument(book_store.ensure_local(pdf_path))
+                try:
+                    page = pdf[0]
+                    width, height = page.get_size()
+                    scale = min(_WIDTHS[size] / max(width, 1), _MAX_HEIGHTS[size] / max(height, 1))
+                    image = page.render(scale=scale).to_pil().convert("RGB")
+                    page.close()
+                finally:
+                    pdf.close()
             fd, tmp = tempfile.mkstemp(dir=COVERS_DIR, suffix=".jpg")
             try:
                 with os.fdopen(fd, "wb") as f:

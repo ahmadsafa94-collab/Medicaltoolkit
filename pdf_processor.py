@@ -18,6 +18,8 @@ import logging
 import os
 import re
 import zlib
+import threading
+import time
 
 import anthropic
 import pdfplumber
@@ -173,24 +175,85 @@ def heavy_pages(pdf_path: str) -> frozenset:
     return _heavy_cache[key]
 
 
+# pdfium (C) is not thread-safe, and several books can be read at once
+# (indexing, covers, the reader's search): every pdfium call holds this.
+# Pages are read one lock-hold at a time, so books still interleave.
+PDFIUM_LOCK = threading.RLock()
+_repair_lock = threading.Lock()  # one qpdf rewrite at a time: they are big
+
+
+def _pdfium_opens(path: str) -> bool:
+    import pypdfium2 as pdfium
+
+    try:
+        with PDFIUM_LOCK:
+            pdfium.PdfDocument(path).close()
+        return True
+    except Exception:
+        return False
+
+
+def _repair_in_place(path: str) -> bool:
+    """
+    Rewrite a PDF that pdfium refuses ("Data format error": junk before the
+    header, a broken cross-reference table, a missing trailer -- common in
+    books passed around online) with qpdf, which rebuilds those structures.
+    Pages and their content are copied untouched, so page numbers, chapters
+    and highlights stay valid. The fixed file replaces the original (and its
+    bucket copy), so the repair happens once per book.
+    """
+    import pikepdf
+    import pypdfium2 as pdfium
+
+    with _repair_lock:
+        if _pdfium_opens(path):  # another thread repaired it meanwhile
+            return True
+        tmp = path + ".repair.tmp"
+        started = time.monotonic()
+        try:
+            with pikepdf.open(path) as src:
+                pages = len(src.pages)
+                src.save(tmp)
+            with PDFIUM_LOCK:
+                doc = pdfium.PdfDocument(tmp)
+                fixed_pages = len(doc)
+                doc.close()
+            if fixed_pages != pages:
+                raise ValueError(f"page count changed {pages} -> {fixed_pages}")
+            os.replace(tmp, path)
+        except Exception as e:
+            logger.warning("Couldn't repair %s for pdfium: %r", os.path.basename(path), e)
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            return False
+    logger.info("Repaired %s for pdfium (%d pages, %.0fs)", os.path.basename(path), pages, time.monotonic() - started)
+    threading.Thread(target=book_store.upload, args=(path,), daemon=True).start()
+    return True
+
+
 def fast_page_texts(pdf_path: str, first: int = 0, last: int | None = None, progress_cb=None, every: int = 25) -> list[str] | None:
     """
     Pages first..last-1 as text, read with pdfium (Chrome's PDF engine, in C).
     pdfplumber (pure Python) read big books at a page every few seconds on a
     single core -- a 4,000-page textbook took hours, with memory climbing;
     pdfium does the same in minutes and lets go of each page at once. Heavy
-    pages (see _MAX_PAGE_CONTENT_BYTES) come back empty. None if pdfium can't
-    open the file, so the caller can fall back to pdfplumber.
+    pages (see _MAX_PAGE_CONTENT_BYTES) come back empty. A file pdfium refuses
+    is repaired first; None only if even that fails, so the caller can fall
+    back to pdfplumber.
     """
     import pypdfium2 as pdfium
 
     path = book_store.ensure_local(pdf_path)
+    if not _pdfium_opens(path):
+        logger.info("pdfium couldn't open %s; repairing it", os.path.basename(path))
+        if not _repair_in_place(path):
+            logger.info("Repair failed for %s; using pdfplumber", os.path.basename(path))
+            return None
     heavy = heavy_pages(path)
-    try:
+    with PDFIUM_LOCK:
         doc = pdfium.PdfDocument(path)
-    except Exception as e:
-        logger.info("pdfium couldn't open %s (%r); using pdfplumber", os.path.basename(path), e)
-        return None
     out = []
     try:
         total = len(doc)
@@ -199,11 +262,12 @@ def fast_page_texts(pdf_path: str, first: int = 0, last: int | None = None, prog
             text = ""
             if i not in heavy:
                 try:
-                    page = doc[i]
-                    tp = page.get_textpage()
-                    text = tp.get_text_range() or ""
-                    tp.close()
-                    page.close()
+                    with PDFIUM_LOCK:
+                        page = doc[i]
+                        tp = page.get_textpage()
+                        text = tp.get_text_range() or ""
+                        tp.close()
+                        page.close()
                 except Exception:
                     text = ""  # one unreadable page doesn't stop the book
             out.append(text.replace("\r\n", "\n").replace("\r", "\n"))
@@ -213,7 +277,8 @@ def fast_page_texts(pdf_path: str, first: int = 0, last: int | None = None, prog
                 except Exception:
                     pass
     finally:
-        doc.close()
+        with PDFIUM_LOCK:
+            doc.close()
     return out
 
 
@@ -292,6 +357,9 @@ def extract_page_previews(pdf_path: str, chars_per_page: int = 350, progress_cb=
     return previews
 
 
+_MIN_REFUSAL_WINDOW = 40  # pages; see the refusal case in _detect_window
+
+
 def _detect_window(previews: list[str], start: int, end: int, total: int) -> list[dict]:
     """One AI pass over pages start+1..end (0-based slice bounds). Returns raw, unvalidated entries."""
     numbered_text = "\n".join(f"[PAGE {i + 1}] {previews[i]}" for i in range(start, end))
@@ -335,6 +403,21 @@ def _detect_window(previews: list[str], start: int, end: int, total: int) -> lis
         except Exception:
             pass  # cost logging must never break chapter detection itself
 
+        if response.stop_reason == "refusal":
+            # A safety filter tripped on something in these pages (drug
+            # doses, toxicology...), not a bad reply: asking again sends the
+            # same pages. Halve the window instead, so the pages that trip it
+            # end up in as small a slice as possible; a small slice that
+            # still trips it just contributes no chapter starts.
+            if end - start <= _MIN_REFUSAL_WINDOW:
+                logger.warning("Chapter split refused for pages %d-%d; treating them as no new chapter", start + 1, end)
+                return []
+            mid = (start + end) // 2
+            logger.warning("Chapter split refused for pages %d-%d; retrying in halves", start + 1, end)
+            found = _detect_window(previews, start, mid, total) + _detect_window(previews, mid, end, total)
+            if whole_book and not found:
+                return [{"title": "Full document", "start_page": 1}]
+            return found
         raw = "".join(block.text for block in response.content if block.type == "text").strip()
         raw = re.sub(r"^```json|```$", "", raw.strip(), flags=re.MULTILINE).strip()
         try:

@@ -118,6 +118,9 @@ from webapp_api import app as webapp_app
 logging.basicConfig(level=logging.INFO)
 # httpx logs every request URL at INFO -- including openFDA's ?api_key=...
 logging.getLogger("httpx").setLevel(logging.WARNING)
+# pdfminer warns once per odd colour operator: thousands a second on some
+# books, which hit Railway's log rate limit and slowed the reading itself.
+logging.getLogger("pdfminer").setLevel(logging.ERROR)
 logger = logging.getLogger(__name__)
 
 dp = Dispatcher()
